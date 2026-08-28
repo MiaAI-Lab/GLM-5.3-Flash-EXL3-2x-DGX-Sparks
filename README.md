@@ -335,6 +335,7 @@ your cabling differs. `ncclCommInitRank` hangs without them.
 | `SPEC_METHOD` | `dflash` | `dflash` / `mtp` / `none`. Rollback: `SPEC_METHOD=mtp ./start.sh restart` |
 | `DFLASH_MODEL` | `incoai/GLM-5.3-Flash-DFlash2` | DFlash2 draft Hub repo (~2.3 GiB BF16) |
 | `DFLASH_TOKENS` | `7` | DFlash2 speculative tokens (trained block 8) |
+| `DFLASH_VERIFY_TOKENS` | `0` (full width) | publish a graph-aligned prefix (`1`, `3`, or `7`) to the target verifier while retaining the trained `DFLASH_TOKENS` proposal block; structured output stays full-width |
 | `DFLASH_DRAFT_TP` | `1` | keep the 2.3 GiB drafter on rank 0 (no CX7 per draft step). Empty = inherit TP |
 | DFlash2 draft KV | `auto` (bf16) | target stays `fp8`/`fp8_ds_mla`; dense draft has no MLA FP8 backend on SM121 |
 | DFlash2 attention | *(unset)* | SM121 picks FLASH_ATTN for non-causal SWA. Do not pin `TRITON_ATTN` |
@@ -355,6 +356,52 @@ your cabling differs. `ncclCommInitRank` hangs without them.
 | `HEAD_CX7_IF` / `WORKER_CX7_IF` | `enp1s0f1np1` / `enp1s0f0np0` | NCCL sockets |
 | `HEAD_CX7_IB` / `WORKER_CX7_IB` | `rocep1s0f1` / `rocep1s0f0` | NCCL HCAs |
 | `USE_HOST_NCCL` | `0` | image nvidia-nccl; host preload duplicates DeepEP |
+
+### DFlash2 proposal width vs verification width
+
+`DFLASH_VERIFY_TOKENS=3` keeps DFlash2's trained seven-token proposal block,
+but sends only its first three positions to the target model. This is ordinary
+standard rejection sampling over a shorter prefix: no prompt, checkpoint, or
+sampling-distribution change is involved. The launcher advertises the runtime
+width to vLLM so it captures four target rows per request, while the DFlash2
+drafter keeps its eight-row graph.
+
+The pinned GLM image also retained max-K GDN/KDA metadata after selecting a
+shorter runtime K. The fail-closed `patch_gdn_runtime_width.py` backports the
+proposed active-width fix from the still-open
+[vLLM #53542](https://github.com/vllm-project/vllm/pull/53542).
+It leaves max-width storage allocated, but keeps the active four-column view
+through FULL-graph staging. On GLM this avoids eight-wide short-convolution
+metadata in 34 KDA layers during a K3 verification step.
+
+The wide-proposal/narrow-verification pattern also appears in the broader
+adaptive-verification work in [vLLM #52559](https://github.com/vllm-project/vllm/pull/52559).
+This launcher uses a smaller fixed, batch-uniform prefix because the pinned
+V2 runner and sparse-MLA backend do not support that draft PR's adaptive path.
+
+```bash
+DFLASH_TOKENS=7 DFLASH_VERIFY_TOKENS=3 ./start.sh restart
+```
+
+Only graph-aligned prefixes (`1`, `3`, `7`) are accepted. `0` is the stock
+full-width rollback. Structured-output batches deliberately retain stock
+full-width publication; the grammar-validated path is outside this optimization.
+
+On two DGX Sparks, K3 was the best of the graph-aligned prefixes tested for a
+small controlled English-prose sample:
+
+| Mode | Proposal / verify | Median decode tok/s | Observed delta vs stock 7/7 |
+| --- | ---: | ---: | ---: |
+| Speculative decoding off | — | 13.91 | -15.58% |
+| Stock DFlash2 | 7 / 7 | 16.48 | — |
+| Static narrow block | 3 / 3 | 19.25 | +16.83% |
+| Wide proposal, narrow verify | 7 / 1 | 19.29 | +17.10% |
+| Wide proposal, narrow verify | 7 / 3 | **20.04** | **+21.64%** |
+
+Each row is the median of two fixed prompts with one 512-token completion per
+prompt, temperature 1, top-p 0.95, thinking off, single-stream, and a warmed
+idle endpoint. This is a small workload-specific A/B sample, not a statistical
+claim for other prompts, languages, context lengths, or concurrency levels.
 
 ## Image / overlay
 
@@ -387,6 +434,8 @@ this Dockerfile instead. After CUDA compile, Python overlay edits
 | `overlay/patch_glm_video_placeholders.py` | align video timestamp blocks to encoder `grid_t` |
 | `overlay/patch_suppress_stops_in_reasoning.py` | fail-closed detokenizer guard: client `stop` dormant until `</think>` |
 | `overlay/patch_scheduler_decode_floor.py` | skip (or cap) peer prefill while another seq is decoding |
+| `overlay/patch_dflash2_verify_width.py` | decouple the trained DFlash2 proposal block from its batch-uniform target verification width |
+| `overlay/patch_gdn_runtime_width.py` | preserve active runtime verification width through GDN/KDA FULL-graph metadata ([vLLM #53542](https://github.com/vllm-project/vllm/pull/53542)) |
 | `scripts/boot-shape-warmup.sh` | post-`/health` DFlash2 k=7 BLOCK ladder + sampler/kpool arms |
 
 Image-build runs `EXL3_SELFCHECK_GPU=0`. `./start.sh` runs the GPU self-check
@@ -423,4 +472,3 @@ DFlash2 stays [CC BY-NC-ND 4.0](https://huggingface.co/incoai/GLM-5.3-Flash-DFla
   (CC BY-NC-ND 4.0, research/eval)
 - **KLD panel:** [malaiwah](https://huggingface.co/malaiwah) —
   [discussion #1](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw/discussions/1#6a9144846b0bdba943bfe86f)
-

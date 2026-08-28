@@ -45,6 +45,11 @@
 # ============================================================================
 set -euo pipefail
 
+log()  { printf '\033[1;36m[glm53-exl3]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[glm53-exl3]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m[glm53-exl3]\033[0m ERROR: %s\n' "$*" >&2; exit 1; }
+
+REQUESTED_COMMAND="${1:-start}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
 if [ ! -f "$SCRIPT_DIR/.env" ]; then
@@ -58,6 +63,8 @@ fi
 # Caller exports (MTP_TOKENS=2 ./start.sh restart) must win over .env.
 _cli_mtp="${MTP_TOKENS-}"
 _cli_spec="${SPEC_METHOD-}"
+_cli_dflash_tokens="${DFLASH_TOKENS-}"
+_cli_dflash_verify="${DFLASH_VERIFY_TOKENS-}"
 _cli_eager="${ENFORCE_EAGER-}"
 _cli_fused="${EXL3_FUSED_MOE-}"
 _cli_image="${IMAGE-}"
@@ -69,6 +76,8 @@ source "$SCRIPT_DIR/.env"
 set +a
 [ -n "${_cli_mtp}" ] && MTP_TOKENS="$_cli_mtp"
 [ -n "${_cli_spec}" ] && SPEC_METHOD="$_cli_spec"
+[ -n "${_cli_dflash_tokens}" ] && DFLASH_TOKENS="$_cli_dflash_tokens"
+[ -n "${_cli_dflash_verify}" ] && DFLASH_VERIFY_TOKENS="$_cli_dflash_verify"
 [ -n "${_cli_eager}" ] && ENFORCE_EAGER="$_cli_eager"
 [ -n "${_cli_fused}" ] && EXL3_FUSED_MOE="$_cli_fused"
 [ -n "${_cli_image}" ] && IMAGE="$_cli_image"
@@ -124,6 +133,9 @@ SPEC_METHOD="${SPEC_METHOD:-dflash}"
 DFLASH_MODEL="${DFLASH_MODEL:-incoai/GLM-5.3-Flash-DFlash2}"
 DFLASH_CACHE_NAME="${DFLASH_CACHE_NAME:-models--${DFLASH_MODEL//\//--}}"
 DFLASH_TOKENS="${DFLASH_TOKENS:-7}"
+# Keep the trained proposal block at DFLASH_TOKENS while publishing only this
+# many positions to the target verifier. 0 preserves stock full-width behavior.
+DFLASH_VERIFY_TOKENS="${DFLASH_VERIFY_TOKENS:-0}"
 # 1 = keep the ~2.3 GiB drafter on rank 0 (no CX7 on every draft step).
 # Empty = inherit target TP. Do not pin attention_backend: SM121 already
 # prefers FLASH_ATTN for non-causal dense SWA. TRITON_ATTN was an SM120
@@ -132,6 +144,26 @@ DFLASH_DRAFT_TP="${DFLASH_DRAFT_TP-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-1000000}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.87}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
+if [ "$REQUESTED_COMMAND" = "start" ] || [ "$REQUESTED_COMMAND" = "restart" ]; then
+    [[ "$MAX_NUM_SEQS" =~ ^[1-9][0-9]*$ ]] \
+        || die "MAX_NUM_SEQS must be a positive integer"
+    [ "$MAX_NUM_SEQS" -le 64 ] \
+        || die "MAX_NUM_SEQS must be at most 64 for bounded graph capture"
+    if [ "$SPEC_METHOD" = "dflash" ]; then
+        [[ "$DFLASH_TOKENS" =~ ^[1-9][0-9]*$ ]] \
+            || die "DFLASH_TOKENS must be a positive integer"
+        [[ "$DFLASH_VERIFY_TOKENS" =~ ^(0|[1-9][0-9]*)$ ]] \
+            || die "DFLASH_VERIFY_TOKENS must be 0 or a positive integer"
+        [ "$DFLASH_VERIFY_TOKENS" -le "$DFLASH_TOKENS" ] \
+            || die "DFLASH_VERIFY_TOKENS cannot exceed DFLASH_TOKENS"
+        case "$DFLASH_VERIFY_TOKENS" in
+            0|1|3|7) ;;
+            *) die "DFLASH_VERIFY_TOKENS must be a graph-aligned prefix: 0, 1, 3, or 7" ;;
+        esac
+    elif [ "$DFLASH_VERIFY_TOKENS" != "0" ]; then
+        die "DFLASH_VERIFY_TOKENS is only valid with SPEC_METHOD=dflash"
+    fi
+fi
 # 8192 chunk × long history oversubscribes GB10 persistent_topk smem (300k crash).
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1024}"
 CHAT_TEMPLATE_HOST="${CHAT_TEMPLATE_HOST:-$SCRIPT_DIR/files/chat_template.jinja}"
@@ -141,6 +173,8 @@ STOP_PATCH_HOST="${STOP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_suppress_stops_in_
 SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode_floor.py}"
 DRAFTER_PATCH_HOST="${DRAFTER_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm5_drafter_group.py}"
 APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py}"
+DFLASH_VERIFY_PATCH_HOST="${DFLASH_VERIFY_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_dflash2_verify_width.py}"
+GDN_RUNTIME_PATCH_HOST="${GDN_RUNTIME_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_gdn_runtime_width.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
@@ -155,12 +189,27 @@ FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-12.1a}"
 # 1..4 seqs × 3 tokens (must include 3). DFlash2 k=7 is 1..4 seqs × 8 tokens
 # (must include 8, 16, 24, 32).
 ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
-if [ "${ENFORCE_EAGER}" != "1" ]; then
+if { [ "$REQUESTED_COMMAND" = "start" ] || [ "$REQUESTED_COMMAND" = "restart" ]; } \
+    && [ "${ENFORCE_EAGER}" != "1" ]; then
     case " ${EXTRA_ARGS:-} " in
         *" --cudagraph-capture-sizes "*|*" cudagraph-capture-sizes "*) ;;
         *)
             if [ "$SPEC_METHOD" = "dflash" ]; then
-                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 4 8 16 24 32"
+                # DFlash proposes its full trained block, but an optional
+                # uniform verification prefix changes target rows/request.
+                # Capture those exact totals for every supported concurrency.
+                _dflash_capture_sizes=(1 2 4 8 16 24 32)
+                _dflash_target_k="$DFLASH_TOKENS"
+                [ "$DFLASH_VERIFY_TOKENS" -gt 0 ] \
+                    && _dflash_target_k="$DFLASH_VERIFY_TOKENS"
+                for ((_capture_c = 1; _capture_c <= MAX_NUM_SEQS; _capture_c++)); do
+                    _capture_seen_size=$((_capture_c * (_dflash_target_k + 1)))
+                    _dflash_capture_sizes+=("$_capture_seen_size")
+                done
+                _dflash_capture_list="$(
+                    printf '%s\n' "${_dflash_capture_sizes[@]}" | sort -nu | paste -sd' ' -
+                )"
+                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes ${_dflash_capture_list}"
             else
                 EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 3 4 6 8 12"
             fi
@@ -208,9 +257,6 @@ WORKER_SCRIPT="$SCRIPT_DIR/.glm53-exl3-worker.inner.sh"
 EXPECTED_SHARDS="${EXPECTED_SHARDS:-120}"
 
 # ------------------------------- helpers -----------------------------------
-log()  { printf '\033[1;36m[glm53-exl3]\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m[glm53-exl3]\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31m[glm53-exl3]\033[0m ERROR: %s\n' "$*" >&2; exit 1; }
 
 banner() {
     local label="${1:-start.sh}"
@@ -300,7 +346,6 @@ preflight() {
 
     [ "$TP" = "2" ] || warn "TP=${TP} on a 2×1-GPU cluster — expected TP=2"
     [ "$NNODES" = "2" ] || warn "NNODES=${NNODES} — expected 2"
-
     local others
     others=$(worker_ssh "docker ps --format '  {{.Names}}  ({{.Image}})'" 2>/dev/null | grep -v "^  ${CONTAINER_WORKER}" || true)
     if [ -n "$others" ]; then
@@ -316,6 +361,10 @@ preflight() {
     [ -f "$SCHED_PATCH_HOST" ] || die "$SCHED_PATCH_HOST missing"
     [ -f "$DRAFTER_PATCH_HOST" ] || die "$DRAFTER_PATCH_HOST missing"
     [ -f "$APC_PATCH_HOST" ] || die "$APC_PATCH_HOST missing"
+    if [ "$SPEC_METHOD" = "dflash" ] && [ "$DFLASH_VERIFY_TOKENS" -gt 0 ]; then
+        [ -f "$DFLASH_VERIFY_PATCH_HOST" ] || die "$DFLASH_VERIFY_PATCH_HOST missing"
+        [ -f "$GDN_RUNTIME_PATCH_HOST" ] || die "$GDN_RUNTIME_PATCH_HOST missing"
+    fi
 
     local need_kb=$((180 * 1024 * 1024)) avail
     mkdir -p "$HF_CACHE_DIR"
@@ -678,6 +727,9 @@ spec={"method":"dflash","model":os.environ["DFLASH_MODEL_DIR"],"num_speculative_
 tp=os.environ.get("DFLASH_DRAFT_TP","").strip()
 if tp:
     spec["draft_tensor_parallel_size"]=int(tp)
+verify=int(os.environ.get("DFLASH_VERIFY_TOKENS","0"))
+if verify:
+    spec["num_speculative_tokens_per_batch_size"]=[[1,int(os.environ["MAX_NUM_SEQS"]),verify]]
 print(json.dumps(spec,separators=(",",":")))')")
 elif [ "${SPEC_METHOD:-mtp}" = "none" ]; then
     :
@@ -716,6 +768,10 @@ if [ -f /opt/glm53/patch_glm5_drafter_group.py ]; then
 fi
 if [ -f /opt/glm53/patch_hybrid_prefix_hit.py ]; then
     python3 /opt/glm53/patch_hybrid_prefix_hit.py
+fi
+if [ "${SPEC_METHOD:-}" = "dflash" ] && [ "${DFLASH_VERIFY_TOKENS:-0}" -gt 0 ]; then
+    python3 /opt/glm53/patch_dflash2_verify_width.py
+    python3 /opt/glm53/patch_gdn_runtime_width.py
 fi
 say "launching: vllm serve ${MODEL_DIR} ${ARGS[*]}"
 exec vllm serve "${MODEL_DIR}" "${ARGS[@]}"
@@ -756,6 +812,9 @@ spec={"method":"dflash","model":os.environ["DFLASH_MODEL_DIR"],"num_speculative_
 tp=os.environ.get("DFLASH_DRAFT_TP","").strip()
 if tp:
     spec["draft_tensor_parallel_size"]=int(tp)
+verify=int(os.environ.get("DFLASH_VERIFY_TOKENS","0"))
+if verify:
+    spec["num_speculative_tokens_per_batch_size"]=[[1,int(os.environ["MAX_NUM_SEQS"]),verify]]
 print(json.dumps(spec,separators=(",",":")))')")
 elif [ "${SPEC_METHOD:-mtp}" = "none" ]; then
     :
@@ -793,6 +852,10 @@ fi
 if [ -f /opt/glm53/patch_hybrid_prefix_hit.py ]; then
     python3 /opt/glm53/patch_hybrid_prefix_hit.py
 fi
+if [ "${SPEC_METHOD:-}" = "dflash" ] && [ "${DFLASH_VERIFY_TOKENS:-0}" -gt 0 ]; then
+    python3 /opt/glm53/patch_dflash2_verify_width.py
+    python3 /opt/glm53/patch_gdn_runtime_width.py
+fi
 say "joining TP2 at ${HEAD_IP}:${MASTER_PORT} as rank 1"
 exec vllm serve "${MODEL_DIR}" "${ARGS[@]}"
 EOF
@@ -819,6 +882,19 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$DRAFTER_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_glm5_drafter_group.py"
     [ -f "$APC_PATCH_HOST" ] || die "missing $APC_PATCH_HOST"
     scp -q -o BatchMode=yes "$APC_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_hybrid_prefix_hit.py"
+    local -a head_width_mounts=()
+    local worker_width_mounts=""
+    if [ "$SPEC_METHOD" = "dflash" ] && [ "$DFLASH_VERIFY_TOKENS" -gt 0 ]; then
+        [ -f "$DFLASH_VERIFY_PATCH_HOST" ] || die "missing $DFLASH_VERIFY_PATCH_HOST"
+        scp -q -o BatchMode=yes "$DFLASH_VERIFY_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_dflash2_verify_width.py"
+        [ -f "$GDN_RUNTIME_PATCH_HOST" ] || die "missing $GDN_RUNTIME_PATCH_HOST"
+        scp -q -o BatchMode=yes "$GDN_RUNTIME_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_gdn_runtime_width.py"
+        head_width_mounts=(
+            -v "$DFLASH_VERIFY_PATCH_HOST:/opt/glm53/patch_dflash2_verify_width.py:ro"
+            -v "$GDN_RUNTIME_PATCH_HOST:/opt/glm53/patch_gdn_runtime_width.py:ro"
+        )
+        worker_width_mounts="-v '/tmp/patch_dflash2_verify_width.py:/opt/glm53/patch_dflash2_verify_width.py:ro' -v '/tmp/patch_gdn_runtime_width.py:/opt/glm53/patch_gdn_runtime_width.py:ro'"
+    fi
 
     local -a nccl_common=(
         -e NCCL_IB_DISABLE=0
@@ -878,7 +954,7 @@ launch_cluster() {
     for v in SERVED_MODEL_NAME PORT TP NNODES HEAD_IP MASTER_PORT QUANTIZATION \
              MAX_MODEL_LEN GPU_MEM_UTIL MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS \
              KV_CACHE_DTYPE MTP_TOKENS SPEC_METHOD DFLASH_TOKENS DFLASH_MODEL_DIR \
-             DFLASH_DRAFT_TP \
+             DFLASH_DRAFT_TP DFLASH_VERIFY_TOKENS \
              LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING \
              LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE MODEL_DIR EXTRA_ARGS; do
         serve_env+=" -e $v='${!v:-}'"
@@ -900,6 +976,7 @@ launch_cluster() {
         -v '/tmp/patch_scheduler_decode_floor.py:/opt/glm53/patch_scheduler_decode_floor.py:ro' \
         -v '/tmp/patch_glm5_drafter_group.py:/opt/glm53/patch_glm5_drafter_group.py:ro' \
         -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
+        ${worker_width_mounts} \
         ${worker_preload} \
         ${worker_nccl} \
         -e NCCL_SOCKET_IFNAME='$WORKER_CX7_IF' \
@@ -925,6 +1002,7 @@ launch_cluster() {
         -v "$SCHED_PATCH_HOST:/opt/glm53/patch_scheduler_decode_floor.py:ro" \
         -v "$DRAFTER_PATCH_HOST:/opt/glm53/patch_glm5_drafter_group.py:ro" \
         -v "$APC_PATCH_HOST:/opt/glm53/patch_hybrid_prefix_hit.py:ro" \
+        "${head_width_mounts[@]}" \
         "${head_preload[@]}" \
         "${nccl_common[@]}" \
         -e NCCL_SOCKET_IFNAME="$HEAD_CX7_IF" \
@@ -943,6 +1021,7 @@ launch_cluster() {
         -e DFLASH_TOKENS="${DFLASH_TOKENS:-7}" \
         -e DFLASH_MODEL_DIR="${DFLASH_MODEL_DIR:-}" \
         -e DFLASH_DRAFT_TP="${DFLASH_DRAFT_TP:-}" \
+        -e DFLASH_VERIFY_TOKENS="${DFLASH_VERIFY_TOKENS:-0}" \
         -e LANGUAGE_MODEL_ONLY="$LANGUAGE_MODEL_ONLY" \
         -e SKIP_MM_PROFILING="$SKIP_MM_PROFILING" \
         -e LIMIT_MM="$LIMIT_MM" \
@@ -1028,7 +1107,12 @@ on_ready() {
     local vision=on
     [ "${LANGUAGE_MODEL_ONLY}" = "1" ] && vision=off
     local spec="MTP k=${MTP_TOKENS}"
-    [ "$SPEC_METHOD" = "dflash" ] && spec="DFlash2 k=${DFLASH_TOKENS} (${DFLASH_MODEL})"
+    if [ "$SPEC_METHOD" = "dflash" ]; then
+        spec="DFlash2 draft k=${DFLASH_TOKENS}"
+        [ "${DFLASH_VERIFY_TOKENS:-0}" -gt 0 ] \
+            && spec+=" / verify k=${DFLASH_VERIFY_TOKENS}"
+        spec+=" (${DFLASH_MODEL})"
+    fi
     [ "$SPEC_METHOD" = "none" ] && spec=off
     log "  features   : tools=glm47+auto, reasoning=glm45, spec=${spec}, vision=${vision}"
     log "  quick test :"
@@ -1061,7 +1145,7 @@ start() {
         log "DFlash2 load path (in-container): ${DFLASH_MODEL_DIR}"
     fi
     log "model load path (in-container): ${MODEL_DIR}"
-    log "config: image=${IMAGE} tp=${TP} nnodes=${NNODES} quant=${QUANTIZATION} spec=${SPEC_METHOD} mtp=${MTP_TOKENS} dflash_k=${DFLASH_TOKENS} max-len=${MAX_MODEL_LEN} gpu-util=${GPU_MEM_UTIL} kv=${KV_CACHE_DTYPE} lm-only=${LANGUAGE_MODEL_ONLY} port=${PORT}"
+    log "config: image=${IMAGE} tp=${TP} nnodes=${NNODES} quant=${QUANTIZATION} spec=${SPEC_METHOD} mtp=${MTP_TOKENS} dflash_k=${DFLASH_TOKENS} dflash_verify_k=${DFLASH_VERIFY_TOKENS} max-len=${MAX_MODEL_LEN} gpu-util=${GPU_MEM_UTIL} kv=${KV_CACHE_DTYPE} lm-only=${LANGUAGE_MODEL_ONLY} port=${PORT}"
 
     launch_cluster
     if wait_for_health; then
