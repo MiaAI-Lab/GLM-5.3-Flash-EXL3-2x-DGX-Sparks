@@ -262,8 +262,43 @@ python3 tests/bench_prefix_cache.py --runs 3
 Note the page math: hits are **block-aligned to the 3584-token hybrid MLA
 page**, so a warm prompt only ever reuses `floor(tokens / 3584) × 3584`
 tokens — the 7168 / 10752 / 14336 hit rows above are exactly 2 / 3 / 4 full
-pages. And since this build exposes **no cache-reset endpoint**, the bench
-salts its filler content per invocation so every cold is genuinely cold.
+pages. The bench resets the prefix cache between colds
+(`POST /reset_prefix_cache`, see the API surface notes below) and salts its
+filler content per invocation on top — repeated runs stay genuinely cold
+even if the reset route is disabled.
+
+## API surface notes (this build, 2026-08-29)
+
+Two things that cost us time (#31), documented so the next person does not
+chase ghosts:
+
+**Cache reset.** `overlay/patch_cache_reset.py` mounts the upstream dev
+cache router on the head API server, so a genuinely cold prefix cache no
+longer needs a container restart:
+
+```bash
+curl -s -X POST http://127.0.0.1:8888/reset_prefix_cache    # -> {"success": true}
+```
+
+It returns `{"success": bool}` and reports `false` while blocks are still
+held (running requests, in-flight async KV offload) — retry after they
+drain. `GLM53_EXPOSE_CACHE_RESET=0 ./start.sh` restores the stock surface
+(restart is then the only reset); `VLLM_SERVER_DEV_MODE=1` still mounts the
+whole dev set (`/sleep`, `/rlhf`, `/rpc`, `/server_info`) if ever needed.
+Auth caveat: the bearer middleware only guards `/v1`, `/v2`, `/inference`,
+`/cohere` (upstream `GUARDED_PREFIX`), so root-mounted routes — the stock
+`/tokenize` / `/detokenize` and the cache-reset routes — answer without the
+key even with `VLLM_API_KEY` set. Set `GLM53_EXPOSE_CACHE_RESET=0` on kits
+that serve untrusted clients.
+
+**Tokenize.** It is mounted at the **root** (`/v1/tokenize` is 404) and the
+request validates `prompt` (or `messages` for the chat shape), not `text`:
+
+```bash
+curl -s http://127.0.0.1:8888/tokenize -H 'Content-Type: application/json' \
+     -d '{"model": "GLM-5.3-Flash-EXL3", "prompt": "hello world"}'
+# -> {"count":2,"max_model_len":1000000,"tokens":[14978,1879],"token_strs":null}
+```
 
 ## Quick start (2× Spark)
 
@@ -452,6 +487,8 @@ this Dockerfile instead. After CUDA compile, Python overlay edits
 | `overlay/patch_scheduler_decode_floor.py` | skip (or cap) peer prefill while another seq is decoding |
 | `overlay/patch_xgrammar_termination.py` | source-exact vLLM #52805/#53046 backports; stop at termination and validate post-reasoning speculative drafts before FSM advance |
 | `tests/test_xgrammar_termination.py` | exact two-file patch, idempotence, cross-file fail-closed drift, termination/rollback/reset and post-reasoning draft behavior, launcher wiring |
+| `overlay/patch_cache_reset.py` | mount only the upstream cache-reset dev router (`/reset_prefix_cache` et al., #31) when `GLM53_EXPOSE_CACHE_RESET=1`; runtime-mounted by `start.sh` (`CACHE_RESET_PATCH_HOST`) |
+| `tests/test_cache_reset_endpoint.py` | exact `build_app` anchor, flag semantics (off / on / dev precedence), fail-closed drift, installed-file + launcher/Dockerfile wiring |
 | `scripts/boot-shape-warmup.sh` | post-`/health` DFlash2 k=7 BLOCK ladder + sampler/kpool arms |
 
 Image-build runs `EXL3_SELFCHECK_GPU=0`. `./start.sh` runs the GPU self-check
