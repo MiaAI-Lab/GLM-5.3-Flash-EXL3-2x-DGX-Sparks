@@ -11,14 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_json_command_substitutions_skip_sitecustomize() -> None:
-    source = (ROOT / "start.sh").read_text()
+    source = (ROOT / "start.sh").read_text(encoding="utf-8")
     marker = '$(python3 -S -c \'import json,os'
     assert source.count(marker) == 2
 
 
 def test_import_time_overlay_never_writes_stdout() -> None:
     path = ROOT / "overlay" / "patch_glm_video_placeholders.py"
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     calls = [
         node
         for node in ast.walk(tree)

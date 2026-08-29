@@ -382,8 +382,8 @@ def test_recipe_wiring_if_present() -> None:
     dockerfile = ROOT / "Dockerfile"
     if not start.is_file() or not dockerfile.is_file():
         return
-    launcher = start.read_text()
-    image = dockerfile.read_text()
+    launcher = start.read_text(encoding="utf-8")
+    image = dockerfile.read_text(encoding="utf-8")
     assert 'XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-' in launcher
     assert launcher.count("python3 /opt/glm53/patch_xgrammar_termination.py") == 2
     assert (
