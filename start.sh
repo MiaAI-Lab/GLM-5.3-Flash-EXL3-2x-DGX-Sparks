@@ -292,6 +292,48 @@ check_port_free() {
     fi
 }
 
+# GLM53 preflight memory guard (begin)
+read_meminfo_kib() {
+    local source_file="${1:-/proc/meminfo}"
+    awk '
+      /^MemTotal:/ { total=$2 }
+      /^MemAvailable:/ { available=$2 }
+      END {
+        if (!total || !available) exit 1
+        print total, available
+      }
+    ' "$source_file"
+}
+
+preflight_memory() {
+    local label="$1" total_kib="$2" available_kib="$3" util="$4"
+    local headroom_kib="${GLM53_PREFLIGHT_MEMORY_HEADROOM_KIB:-2097152}"
+    local total_gib available_gib requested_gib headroom_gib
+
+    if ! [[ "$total_kib" =~ ^[0-9]+$ && "$available_kib" =~ ^[0-9]+$ && "$headroom_kib" =~ ^[0-9]+$ ]]; then
+        echo "PREFLIGHT FAIL [$label]: invalid memory reading" >&2
+        return 2
+    fi
+    if ! [[ "$util" =~ ^(0([.][0-9]+)?|[.][0-9]+|1([.]0+)?)$ ]] \
+       || ! awk -v u="$util" 'BEGIN { exit !(u > 0 && u <= 1) }'; then
+        echo "PREFLIGHT FAIL [$label]: GPU_MEM_UTIL must be greater than 0 and at most 1: $util" >&2
+        return 2
+    fi
+
+    total_gib=$(awk -v k="$total_kib" 'BEGIN { printf "%.2f", k/1048576 }')
+    available_gib=$(awk -v k="$available_kib" 'BEGIN { printf "%.2f", k/1048576 }')
+    requested_gib=$(awk -v t="$total_kib" -v u="$util" 'BEGIN { printf "%.2f", (t*u)/1048576 }')
+    headroom_gib=$(awk -v k="$headroom_kib" 'BEGIN { printf "%.2f", k/1048576 }')
+
+    if ! awk -v a="$available_kib" -v t="$total_kib" -v u="$util" -v h="$headroom_kib" \
+        'BEGIN { exit !(a >= (t*u)+h) }'; then
+        echo "PREFLIGHT FAIL [$label]: MemAvailable=${available_gib} GiB of ${total_gib} GiB; GPU_MEM_UTIL=${util} requests ${requested_gib} GiB plus ${headroom_gib} GiB headroom" >&2
+        return 1
+    fi
+    echo "PREFLIGHT OK [$label]: MemAvailable=${available_gib}/${total_gib} GiB; request=${requested_gib} GiB plus ${headroom_gib} GiB headroom"
+}
+# GLM53 preflight memory guard (end)
+
 trap 'warn "interrupted — containers keep running ('"'"'./start.sh logs'"'"' to watch, '"'"'./start.sh stop'"'"' to stop)"; exit 130' INT
 
 # ------------------------------ preflight ----------------------------------
@@ -345,6 +387,16 @@ preflight() {
 
     check_port_free "$PORT" PORT
     check_port_free "$MASTER_PORT" MASTER_PORT
+
+    local head_mem worker_mem head_total head_available worker_total worker_available
+    head_mem="$(read_meminfo_kib /proc/meminfo)" \
+        || die "cannot read MemTotal/MemAvailable on head"
+    worker_mem="$(worker_ssh "cat /proc/meminfo" | read_meminfo_kib /dev/stdin)" \
+        || die "cannot read MemTotal/MemAvailable on worker"
+    read -r head_total head_available <<< "$head_mem"
+    read -r worker_total worker_available <<< "$worker_mem"
+    preflight_memory head "$head_total" "$head_available" "$GPU_MEM_UTIL" || return
+    preflight_memory worker "$worker_total" "$worker_available" "$GPU_MEM_UTIL" || return
 
     [ -f "$STOP_PATCH_HOST" ] || die "$STOP_PATCH_HOST missing"
     [ -f "$SCHED_PATCH_HOST" ] || die "$SCHED_PATCH_HOST missing"
