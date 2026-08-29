@@ -296,8 +296,10 @@ resolve_dflash_dir() {
 check_port_free() {
     local port="$1" envname="$2"
     command -v ss >/dev/null 2>&1 || return 0
-    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; then
-        if docker inspect -f '{{.State.Running}}' "$CONTAINER_HEAD" 2>/dev/null | grep -q true; then
+    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\\$"; then
+        # Do not pipe docker inspect into grep -q: pipefail can turn grep's
+        # early close into a false negative when docker gets SIGPIPE.
+        if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_HEAD" 2>/dev/null || true)" = "true" ]; then
             die "port ${port} is held by ${CONTAINER_HEAD} — use './start.sh restart' or './start.sh stop' first"
         fi
         die "port ${port} is already in use — stop it or rerun with ${envname}=<free-port>"
@@ -1094,7 +1096,9 @@ wait_for_health() {
     local elapsed=0 healthy=0 exited=0 dead_side="" worker_fail=0
     while [ "$elapsed" -lt "$READY_TIMEOUT" ]; do
         if curl -fsS -m 5 "$url" >/dev/null 2>&1; then healthy=1; break; fi
-        if ! docker inspect -f '{{.State.Running}}' "$CONTAINER_HEAD" 2>/dev/null | grep -q true; then
+        # Keep the inspect result out of a grep -q pipeline. With pipefail,
+        # grep can close early and make a running container look dead.
+        if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_HEAD" 2>/dev/null || true)" != "true" ]; then
             log "head container exited during startup"
             exited=1; dead_side="head"; break
         fi
@@ -1103,7 +1107,7 @@ wait_for_health() {
         # #22, item 4). Transient ssh/docker hiccups are tolerated; only
         # three consecutive non-running answers (~30 s) count as a dead
         # worker.
-        if worker_ssh "docker inspect -f '{{.State.Running}}' '$CONTAINER_WORKER' 2>/dev/null" | grep -q true; then
+        if [ "$(worker_ssh "docker inspect -f '{{.State.Running}}' '$CONTAINER_WORKER' 2>/dev/null" || true)" = "true" ]; then
             worker_fail=0
         else
             worker_fail=$((worker_fail + 1))

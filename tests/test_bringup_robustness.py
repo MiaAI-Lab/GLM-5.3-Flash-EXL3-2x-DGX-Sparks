@@ -49,6 +49,13 @@ def test_worker_cache_writability_preflight_wired() -> None:
     assert "test -w '$WORKER_CACHE_DIR/hub'" in src
 
 
+def test_running_container_checks_are_pipefail_safe() -> None:
+    src = _source()
+    assert "docker inspect -f '{{.State.Running}}' \"$CONTAINER_HEAD\"" in src
+    assert "docker inspect -f '{{.State.Running}}' \"$CONTAINER_HEAD\" 2>/dev/null | grep -q true" not in src
+    assert "worker_ssh \"docker inspect -f '{{.State.Running}}' '$CONTAINER_WORKER' 2>/dev/null\" | grep -q true" not in src
+
+
 if __name__ == "__main__":
     test_worker_death_detection_wired()
     test_sync_revision_marker_wired()
