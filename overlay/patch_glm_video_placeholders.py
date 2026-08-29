@@ -6,6 +6,7 @@
 # processor wrapper still routed 5.3 through _get_video_second_idx_glm4v.
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 
@@ -92,7 +93,10 @@ def apply() -> None:
 
     Glm4vProcessingInfo._construct_video_placeholder = _construct_video_placeholder
     Glm4vProcessingInfo._glm53_video_t_aligned = True
-    print("glm53: video placeholders aligned to encoder grid_t (Glm5Next→glm46v)")
+    print(
+        "glm53: video placeholders aligned to encoder grid_t (Glm5Next→glm46v)",
+        file=sys.stderr,
+    )
 
 
 def _install_import_hook() -> None:
@@ -113,7 +117,7 @@ def _install_import_hook() -> None:
         try:
             apply()
         except Exception as exc:
-            print(f"glm53: video apply() failed: {exc!r}")
+            print(f"glm53: video apply() failed: {exc!r}", file=sys.stderr)
         finally:
             applying = False
 
@@ -139,10 +143,13 @@ def _disable_gb10_persistent_topk() -> None:
         raise FileNotFoundError(f"glm53: missing {KPOOL}")
     text = KPOOL.read_text()
     if KPOOL_NEW in text:
-        print("glm53: persistent_topk already disabled in kpool")
+        print("glm53: persistent_topk already disabled in kpool", file=sys.stderr)
     elif KPOOL_OLD in text:
         KPOOL.write_text(text.replace(KPOOL_OLD, KPOOL_NEW, 1))
-        print("glm53: disabled GB10 persistent_topk (use top_k_per_row_decode)")
+        print(
+            "glm53: disabled GB10 persistent_topk (use top_k_per_row_decode)",
+            file=sys.stderr,
+        )
     else:
         raise RuntimeError(
             "glm53: kpool persistent_topk pattern not found — patch the file by hand"
@@ -170,4 +177,4 @@ if __name__ == "__main__":
         "import glm53_video_patch\n"
     )
     _disable_gb10_persistent_topk()
-    print("glm53: overlay install ok aligned=True")
+    print("glm53: overlay install ok aligned=True", file=sys.stderr)
