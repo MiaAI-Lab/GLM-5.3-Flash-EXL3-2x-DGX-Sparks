@@ -407,6 +407,7 @@ that are now documented/enforced:
 | `MAX_MODEL_LEN` | `1000000` | default context. 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool |
 | `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq |
 | `MAX_NUM_BATCHED_TOKENS` | `2048` | prefill chunk (P1 keep). 3584/4096 lost; 8192 oversubscribes GB10 indexer topk |
+| `DEFAULT_MAX_NEW_TOKENS` | `65536` | server-side default for an omitted `max_tokens` (HF semantics: == vLLM `max_tokens`). Without it a request may decode unbounded (budget ~`max_model_len` - prompt) and grow KV until it preempts other sessions. Admission is chunk-based in this build (not gated on max_tokens) - long-context concurrency is governed by the effective KV pool (issue #43). Explicit client `max_tokens` wins; empty = old unbounded fallback |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (2048) |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
 | `GLM53_BOOT_SHAPE_WARMUP` | `1` | after `/health`, burn DFlash2 BLOCK / sampler / kpool shapes (nonfatal) |
