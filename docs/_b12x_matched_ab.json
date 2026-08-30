@@ -1,0 +1,221 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "date_utc": "2026-08-30",
+    "hardware": {
+      "systems": 2,
+      "system_type": "NVIDIA DGX Spark",
+      "accelerator": "GB10",
+      "interconnect": "200 GbE CX7"
+    },
+    "other_head_workload": {
+      "name": "co-resident service",
+      "resident": true,
+      "approximate_memory_gib": 4.6
+    },
+    "software": {
+      "head": {
+        "os": "Ubuntu 24.04.4 LTS",
+        "kernel": "6.17.0-1026-nvidia",
+        "nvidia_driver": "580.173.02",
+        "gpu_vbios": "9A.0B.2D.00.00",
+        "docker_server": "29.2.1"
+      },
+      "worker": {
+        "os": "Ubuntu 24.04.4 LTS",
+        "kernel": "6.17.0-1021-nvidia",
+        "nvidia_driver": "580.159.03",
+        "gpu_vbios": "9A.0B.1E.00.00",
+        "docker_server": "29.2.1"
+      }
+    },
+    "artifact_hashes": {
+      "chat_template_sha256": "96ed83160b243de213e95eb2fa19bde4ac13b676661cfec477d18e45e9fcca3a",
+      "site_local_transplant_manifest_sha256": "9415dd1934a6f614516505e637f2a01e63ca5c374c4cf4eb9a0ca876bcd278a9",
+      "overlay_sha256_manifest_sha256": "0ab931357a6d370c24ef02aa5061016583f2dfa60ef7262c1edd933bb65077e9"
+    }
+  },
+  "licenses": {
+    "target": {
+      "name": "ShapleyMcg License v1.0",
+      "canonical_url": "https://github.com/brandonmmusic-max/shapleymcg",
+      "attribution_notice": "https://github.com/brandonmmusic-max/shapleymcg/blob/main/LICENSE#schedule-b--attribution-notice-and-citation"
+    },
+    "draft": {
+      "name": "CC BY-NC-ND 4.0",
+      "use": "research and evaluation",
+      "url": "https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2#license"
+    }
+  },
+  "fixed_conditions": {
+    "target": {
+      "repository": "brandonmusic/GLM-5.3-Flash-tr3-4bpw",
+      "snapshot": "61e26e1484e16d7a603f77040cda9b43cc4a31d6"
+    },
+    "draft": {
+      "repository": "incoai/GLM-5.3-Flash-DFlash2",
+      "snapshot": "dc77ff1c99eeb2df044ee3d4f0094eb033fee410"
+    },
+    "max_model_len": 750000,
+    "temperature": 0,
+    "thinking": false,
+    "generated_tokens": 400,
+    "dflash_physical_k": 7,
+    "target_verification_k": 7,
+    "draft_tensor_parallel_size": 1,
+    "draft_sample_method": "probabilistic",
+    "rejection_sample_method": "standard",
+    "same_chat_template": true,
+    "same_load_time_behavior_profile": true
+  },
+  "profiles": {
+    "control": {
+      "recipe_commit": "02e46f2a5f28e2003655c5cf916b72cec0efbb37",
+      "attention_backend": "FLASHINFER_MLA_SPARSE_SM120",
+      "max_num_batched_tokens": 1024
+    },
+    "candidate": {
+      "attention_backend": "B12X_MLA_SPARSE",
+      "kv_cache_dtype": "fp8_ds_mla",
+      "kv_cache_dtype_skip_layers": "sliding_window",
+      "kv_cache_memory_bytes": 6600000000,
+      "max_num_batched_tokens": 1024,
+      "max_num_seqs": 4,
+      "block_size": 2304,
+      "mm_processor_cache_gb": 0,
+      "gpu_memory_utilization_admission_ceiling": 0.75,
+      "image": "ghcr.io/entrpi/glm-5.3-flash-exl3-2x-spark@sha256:284142c5833cbfd540ad42bb8f32cb340451db05a3b84029eaebae54579e9135",
+      "vllm_commit": "59c1a0c4c3142a303b6f46ef5f7784731c11074d",
+      "b12x_commit": "cd5e8a50ac106b7e32a7d90965d600dd71eb7131",
+      "entrpi_recipe_commit": "3a7c13fa5a5b9373bb91651e61c810ce1912bada"
+    }
+  },
+  "results": {
+    "structured_decode": {
+      "unit": "tok/s",
+      "aggregation": "median",
+      "prompt": "count from 1 to 200, output numbers only",
+      "control_runs": [
+        62.56187888274371,
+        62.585844464367774,
+        61.56325696513495
+      ],
+      "candidate_runs": [
+        68.52879757645825,
+        68.64996072453485,
+        66.62384594456799
+      ],
+      "control": 62.56187888274371,
+      "candidate": 68.52879757645825,
+      "change_percent": 9.537627066632703,
+      "control_ttft_median_s": 0.49583436781540513,
+      "candidate_ttft_median_s": 0.4617794309742749
+    },
+    "prose_decode": {
+      "unit": "tok/s",
+      "aggregation": "median",
+      "prompt": "detailed explanation of a hash map",
+      "control_runs": [
+        27.272441113433963,
+        27.41512307586824,
+        24.276258337222963
+      ],
+      "candidate_runs": [
+        31.3479473069127,
+        27.7043392742929,
+        28.770876996718094
+      ],
+      "control": 27.272441113433963,
+      "candidate": 28.770876996718094,
+      "change_percent": 5.494322554595321,
+      "control_ttft_median_s": 0.4949018703773618,
+      "candidate_ttft_median_s": 0.396616886369884
+    },
+    "four_client_wall_throughput": {
+      "unit": "tok/s",
+      "aggregation": "one matched first run per profile",
+      "formula": "sum(completion_tokens) / group_wall_seconds",
+      "control": 87.16184063536556,
+      "candidate": 101.53214373013112,
+      "change_percent": 16.486920182058284,
+      "control_wall_s": 18.356656861957163,
+      "candidate_wall_s": 15.758556268177927,
+      "control_completion_tokens": [400, 400, 400, 400],
+      "candidate_completion_tokens": [400, 400, 400, 400],
+      "control_sum_per_request_decode_tok_s": 174.81274564070313,
+      "candidate_sum_per_request_decode_tok_s": 165.33032490126257,
+      "control_per_request_ttft_s": [
+        8.109648548066616,
+        0.4175906456075609,
+        8.109081635251641,
+        8.108765441924334
+      ],
+      "candidate_per_request_ttft_s": [
+        5.909774912055582,
+        5.9097382398322225,
+        5.909331631846726,
+        5.908606397919357
+      ],
+      "candidate_run_tagged_repeat_excluded": 138.06445410579096
+    }
+  },
+  "validation": {
+    "arithmetic": true,
+    "native_tool_call": true,
+    "strict_json_schema": true,
+    "prefix_cache": true,
+    "coherence": true,
+    "nan_detected": false,
+    "health_before_and_after": true,
+    "native_b12x_on_both_ranks": true,
+    "runtime_errors_detected": false,
+    "measured_kv_tokens": 779702,
+    "post_gate_memory_snapshot": {
+      "available_bytes": 5601017856,
+      "available_gib": 5.2163543701171875,
+      "normal_swap_used_bytes": 7877513216,
+      "normal_swap_used_gib": 7.336505889892578
+    },
+    "load_only_swap_present_during_benchmark": false
+  },
+  "limitations": {
+    "decode_runs_per_profile": 3,
+    "matched_concurrency_runs_per_profile": 1,
+    "full_750k_request_tested": false,
+    "quality_evaluations_not_run": [
+      "KLD",
+      "MATH-500",
+      "GPQA",
+      "vision",
+      "refusal",
+      "broad tool-use"
+    ],
+    "claim_scope": "one matched shared-head deployment, not current upstream main"
+  },
+  "rejected_profiles": [
+    {
+      "profile": "B12X K=7, batch 1024, 11.6 GB KV",
+      "structured_change_percent": 9.8,
+      "prose_change_percent": 3.8,
+      "four_client_change_percent": 4.3,
+      "reason": "control chat template was missing and prose gate missed"
+    },
+    {
+      "profile": "B12X K=7, batch 8192, 11.6 GB KV",
+      "structured_change_percent": 8.1,
+      "prose_change_percent": 5.6,
+      "four_client_change_percent": 1.2,
+      "reason": "steady-state memory rejected"
+    },
+    {
+      "profile": "B12X target K=3, physical draft K=7",
+      "structured_change_percent": -30.6,
+      "prose_change_percent": 13.3,
+      "four_client_first_tok_s": 74.9805174462376,
+      "four_client_first_change_percent": -13.975523119213983,
+      "four_client_repeat_tok_s": 102.0000954682447,
+      "four_client_repeat_change_percent": 17.023797024839983,
+      "reason": "structured speed rejected"
+    }
+  ]
+}
