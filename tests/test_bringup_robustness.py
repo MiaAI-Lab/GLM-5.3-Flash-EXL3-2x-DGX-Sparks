@@ -55,6 +55,10 @@ def test_running_container_checks_are_pipefail_safe() -> None:
     assert "docker inspect -f '{{.State.Running}}' \"$CONTAINER_HEAD\"" in src
     assert "docker inspect -f '{{.State.Running}}' \"$CONTAINER_HEAD\" 2>/dev/null | grep -q true" not in src
     assert "worker_ssh \"docker inspect -f '{{.State.Running}}' '$CONTAINER_WORKER' 2>/dev/null\" | grep -q true" not in src
+    assert "head_fail=0" in src
+    assert "head container missing during startup" in src
+    assert "with_cluster_lock" in src
+    assert "steal_cluster_lock_for_stop" in src
 
 
 def test_check_port_free_detects_representative_listeners() -> None:
