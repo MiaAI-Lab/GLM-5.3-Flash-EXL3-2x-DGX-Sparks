@@ -2,7 +2,12 @@
 .glm53-exl3-*.inner.sh
 logs/
 tool-eval-bench/
-ablit/
+# Transplant dumps (~2.7 GiB) stay local; fetch with ablit/fetch_transplant.py
+ablit/*
+!ablit/LAYER_MAP.json
+!ablit/refusal_direction_glm53_dealign_late.pt
+!ablit/refusal_direction_glm53_bf_oproj.pt
+!ablit/fetch_transplant.py
 __pycache__/
 *.py[cod]
 .pytest_cache/
