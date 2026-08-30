@@ -30,7 +30,9 @@ def test_head_env_block_passes_var() -> None:
 
 
 def test_env_passthrough_and_docs() -> None:
-    assert "DEFAULT_MAX_NEW_TOKENS MODEL_DIR EXTRA_ARGS; do" in (ROOT / "start.sh").read_text()
+    src = (ROOT / "start.sh").read_text()
+    assert "DEFAULT_MAX_NEW_TOKENS MODEL_DIR EXTRA_ARGS \\" in src
+    assert "ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do" in src
     assert "DEFAULT_MAX_NEW_TOKENS=65536" in (ROOT / ".env.example").read_text()
     assert "`DEFAULT_MAX_NEW_TOKENS`" in (ROOT / "README.md").read_text()
 

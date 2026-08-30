@@ -1,0 +1,395 @@
+{
+  "model": "GLM-5.3-Flash-NVFP4",
+  "hidden_size": 4096,
+  "num_hidden_layers": 45,
+  "o_proj_linear_shape": [
+    4096,
+    8192
+  ],
+  "o_proj_dsa_shape": [
+    4096,
+    16384
+  ],
+  "o_proj_dtype": "bfloat16",
+  "quant_ignore_includes_o_proj": true,
+  "n_edit": 31,
+  "layers": [
+    {
+      "layer": 0,
+      "attn": "linear_attention",
+      "mlp": "dense",
+      "o_proj": "model.language_model.layers.0.self_attn.o_proj.weight",
+      "shard": "model-00001-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 1,
+      "attn": "linear_attention",
+      "mlp": "dense",
+      "o_proj": "model.language_model.layers.1.self_attn.o_proj.weight",
+      "shard": "model-00001-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 2,
+      "attn": "linear_attention",
+      "mlp": "dense",
+      "o_proj": "model.language_model.layers.2.self_attn.o_proj.weight",
+      "shard": "model-00029-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 3,
+      "attn": "deepseek_sparse_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.3.self_attn.o_proj.weight",
+      "shard": "model-00059-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 4,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.4.self_attn.o_proj.weight",
+      "shard": "model-00090-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 5,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.5.self_attn.o_proj.weight",
+      "shard": "model-00109-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 6,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.6.self_attn.o_proj.weight",
+      "shard": "model-00112-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 7,
+      "attn": "deepseek_sparse_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.7.self_attn.o_proj.weight",
+      "shard": "model-00115-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 8,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.8.self_attn.o_proj.weight",
+      "shard": "model-00117-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 9,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.9.self_attn.o_proj.weight",
+      "shard": "model-00120-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 10,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.10.self_attn.o_proj.weight",
+      "shard": "model-00004-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 11,
+      "attn": "deepseek_sparse_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.11.self_attn.o_proj.weight",
+      "shard": "model-00007-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 12,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.12.self_attn.o_proj.weight",
+      "shard": "model-00009-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 13,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.13.self_attn.o_proj.weight",
+      "shard": "model-00012-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 14,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.14.self_attn.o_proj.weight",
+      "shard": "model-00015-of-00120.safetensors",
+      "role": "safety-anchor"
+    },
+    {
+      "layer": 15,
+      "attn": "deepseek_sparse_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.15.self_attn.o_proj.weight",
+      "shard": "model-00018-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 16,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.16.self_attn.o_proj.weight",
+      "shard": "model-00020-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 17,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.17.self_attn.o_proj.weight",
+      "shard": "model-00023-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 18,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.18.self_attn.o_proj.weight",
+      "shard": "model-00026-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 19,
+      "attn": "deepseek_sparse_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.19.self_attn.o_proj.weight",
+      "shard": "model-00029-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 20,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.20.self_attn.o_proj.weight",
+      "shard": "model-00032-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 21,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.21.self_attn.o_proj.weight",
+      "shard": "model-00034-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 22,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.22.self_attn.o_proj.weight",
+      "shard": "model-00037-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 23,
+      "attn": "deepseek_sparse_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.23.self_attn.o_proj.weight",
+      "shard": "model-00040-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 24,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.24.self_attn.o_proj.weight",
+      "shard": "model-00043-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 25,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.25.self_attn.o_proj.weight",
+      "shard": "model-00045-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 26,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.26.self_attn.o_proj.weight",
+      "shard": "model-00048-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 27,
+      "attn": "deepseek_sparse_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.27.self_attn.o_proj.weight",
+      "shard": "model-00051-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 28,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.28.self_attn.o_proj.weight",
+      "shard": "model-00054-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 29,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.29.self_attn.o_proj.weight",
+      "shard": "model-00057-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 30,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.30.self_attn.o_proj.weight",
+      "shard": "model-00062-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 31,
+      "attn": "deepseek_sparse_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.31.self_attn.o_proj.weight",
+      "shard": "model-00065-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 32,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.32.self_attn.o_proj.weight",
+      "shard": "model-00068-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 33,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.33.self_attn.o_proj.weight",
+      "shard": "model-00070-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 34,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.34.self_attn.o_proj.weight",
+      "shard": "model-00073-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 35,
+      "attn": "deepseek_sparse_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.35.self_attn.o_proj.weight",
+      "shard": "model-00076-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 36,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.36.self_attn.o_proj.weight",
+      "shard": "model-00079-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 37,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.37.self_attn.o_proj.weight",
+      "shard": "model-00081-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 38,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.38.self_attn.o_proj.weight",
+      "shard": "model-00084-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 39,
+      "attn": "deepseek_sparse_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.39.self_attn.o_proj.weight",
+      "shard": "model-00087-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 40,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.40.self_attn.o_proj.weight",
+      "shard": "model-00092-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 41,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.41.self_attn.o_proj.weight",
+      "shard": "model-00095-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 42,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.42.self_attn.o_proj.weight",
+      "shard": "model-00098-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 43,
+      "attn": "deepseek_sparse_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.43.self_attn.o_proj.weight",
+      "shard": "model-00101-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 44,
+      "attn": "linear_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.44.self_attn.o_proj.weight",
+      "shard": "model-00103-of-00120.safetensors",
+      "role": "edit"
+    },
+    {
+      "layer": 45,
+      "attn": "deepseek_sparse_attention",
+      "mlp": "sparse",
+      "o_proj": "model.language_model.layers.45.self_attn.o_proj.weight",
+      "shard": "model-00106-of-00120.safetensors",
+      "role": "mtp-edit"
+    }
+  ],
+  "published": {
+    "method": "dealign-oproj-transplant",
+    "min_layer": 15,
+    "max_layer": 45,
+    "early_stock": [
+      0,
+      14
+    ]
+  }
+}

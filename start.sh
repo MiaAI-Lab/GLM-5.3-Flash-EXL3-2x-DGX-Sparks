@@ -67,6 +67,12 @@ _cli_image="${IMAGE-}"
 _cli_util="${GPU_MEM_UTIL-}"
 _cli_lm="${LANGUAGE_MODEL_ONLY-}"
 _cli_max_num_seqs="${MAX_NUM_SEQS-}"
+_cli_ablit="${ABLIT-}"
+_cli_ablit_method="${ABLIT_METHOD-}"
+_cli_ablit_direction="${ABLIT_DIRECTION-}"
+_cli_ablit_layers="${ABLIT_LAYERS-}"
+_cli_ablit_alpha="${ABLIT_ALPHA-}"
+_cli_ablit_mtp="${ABLIT_INCLUDE_MTP-}"
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
@@ -82,6 +88,12 @@ set +a
 [ -n "${_cli_util}" ] && GPU_MEM_UTIL="$_cli_util"
 [ -n "${_cli_lm}" ] && LANGUAGE_MODEL_ONLY="$_cli_lm"
 [ -n "${_cli_max_num_seqs}" ] && MAX_NUM_SEQS="$_cli_max_num_seqs"
+[ -n "${_cli_ablit}" ] && ABLIT="$_cli_ablit"
+[ -n "${_cli_ablit_method}" ] && ABLIT_METHOD="$_cli_ablit_method"
+[ -n "${_cli_ablit_direction}" ] && ABLIT_DIRECTION="$_cli_ablit_direction"
+[ -n "${_cli_ablit_layers}" ] && ABLIT_LAYERS="$_cli_ablit_layers"
+[ -n "${_cli_ablit_alpha}" ] && ABLIT_ALPHA="$_cli_ablit_alpha"
+[ -n "${_cli_ablit_mtp}" ] && ABLIT_INCLUDE_MTP="$_cli_ablit_mtp"
 
 # ----------------------------- configuration -------------------------------
 MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"
@@ -112,6 +124,11 @@ HEAD_CX7_IB="${HEAD_CX7_IB:-rocep1s0f1}"
 WORKER_CX7_IB="${WORKER_CX7_IB:-rocep1s0f0}"
 NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-3}"
+# The RoCEv2 GID index is per-NIC: the usable entry is the one whose GID matches
+# that node's own fabric IP. Most pairs share a good index; some do not (this kit
+# needs head=4, worker=3). Unset, both inherit NCCL_IB_GID_INDEX -> unchanged.
+HEAD_GID="${HEAD_GID:-$NCCL_IB_GID_INDEX}"
+WORKER_GID="${WORKER_GID:-$NCCL_IB_GID_INDEX}"
 # vLLM subtracts a CUDA-graph memory ESTIMATE from the KV pool. On this kit the
 # estimate is 2.43 GiB while the captured graphs actually consume -0.19 GiB, so
 # ~2.6 GiB of KV is reserved and never used. 0 keeps CUDA graphs ON and drops only
@@ -137,11 +154,12 @@ SPEC_METHOD="${SPEC_METHOD:-dflash}"
 DFLASH_MODEL="${DFLASH_MODEL:-incoai/GLM-5.3-Flash-DFlash2}"
 DFLASH_CACHE_NAME="${DFLASH_CACHE_NAME:-models--${DFLASH_MODEL//\//--}}"
 DFLASH_TOKENS="${DFLASH_TOKENS:-7}"
-# 1 = keep the ~2.3 GiB drafter on rank 0 (no CX7 on every draft step).
-# Empty = inherit target TP. Do not pin attention_backend: SM121 already
-# prefers FLASH_ATTN for non-causal dense SWA. TRITON_ATTN was an SM120
-# mask-fix copy this image does not have.
-DFLASH_DRAFT_TP="${DFLASH_DRAFT_TP-1}"
+# 2 = shard the ~2.3 GiB DFlash2 drafter across TP (C4 keep, 2026-08-30:
+# idle 8k 938 / 16k 972 / 100k 997; decode structured 65.1 / prose 27.1).
+# 1 = rank 0 only (no CX7 on every draft step). Empty = inherit target TP.
+# Do not pin attention_backend: SM121 already prefers FLASH_ATTN for
+# non-causal dense SWA. TRITON_ATTN was an SM120 mask-fix this image lacks.
+DFLASH_DRAFT_TP="${DFLASH_DRAFT_TP-2}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-1000000}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.87}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
@@ -165,6 +183,7 @@ SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode
 DRAFTER_PATCH_HOST="${DRAFTER_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm5_drafter_group.py}"
 APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py}"
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
+KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
@@ -198,6 +217,18 @@ EXL3_FUSED_MOE="${EXL3_FUSED_MOE:-1}"
 EXL3_MOE_ROW_TILE="${EXL3_MOE_ROW_TILE:-0}"
 # Fused exl3_moe temp rows/expert. 1024 was slower than 128+fallback (P2b).
 EXL3_TEMP_ROWS_FUSED="${EXL3_TEMP_ROWS_FUSED:-128}"
+
+# --- abliteration (ablit/) --------------------------------------------------
+# Load-time o_proj orthogonalization (overlay/ablit_runtime.py). Published
+# recipe: layers 15-45 edited with the dealign direction, 0-14 stay stock
+# safety anchors, MTP block included. 0 = stock weights. Applied identically
+# on both TP ranks; the DFlash2 drafter is never touched.
+ABLIT="${ABLIT:-0}"
+ABLIT_METHOD="${ABLIT_METHOD:-auto}"           # auto | transplant | proj
+ABLIT_DIRECTION="${ABLIT_DIRECTION:-dealign}"  # dealign | bf_oproj | /path/dir.pt
+ABLIT_LAYERS="${ABLIT_LAYERS:-15-45}"          # inclusive; 45 = checkpoint MTP block
+ABLIT_ALPHA="${ABLIT_ALPHA:-3.0}"              # 1.0 = plain projection, >1 over-projects
+ABLIT_INCLUDE_MTP="${ABLIT_INCLUDE_MTP:-1}"
 
 READY_TIMEOUT="${READY_TIMEOUT:-3600}"
 # 1 = suppress client stop strings until </think> (DSpark #42 class).
@@ -333,24 +364,32 @@ preflight() {
     worker_ssh "nvidia-smi -L 2>/dev/null | grep -q GB10" \
         || warn "no GB10 GPU visible on worker"
 
-    # NCCL_IB_GID_INDEX must name a populated GID on BOTH nodes' CX7 devices.
-    # An empty (all-zero) entry passes every earlier check and then kills the
-    # worker rank ~60 s in with ibv_modify_qp errno 61 "No data available" —
-    # kits differ: on some GB10 pairs gid 3 is populated on one node and
-    # all-zero on the other. Fail here, in seconds, with the fix in hand.
+    # Each rank's GID index must name a populated entry on ITS OWN CX7 device.
+    # An empty (all-zero) entry passes every earlier check and then kills that
+    # rank ~60 s in with ibv_modify_qp errno 61 "No data available". The index is
+    # per-NIC, so validate head and worker separately: some pairs share one good
+    # index, others need different ones (HEAD_GID / WORKER_GID).
     local gid_head gid_worker gid_path
-    gid_path="/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gids/${NCCL_IB_GID_INDEX}"
+    gid_path="/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gids/${HEAD_GID}"
     gid_head=$(cat "$gid_path" 2>/dev/null | tr -d ':0' || true)
-    gid_path="/sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gids/${NCCL_IB_GID_INDEX}"
+    gid_path="/sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gids/${WORKER_GID}"
     gid_worker=$(worker_ssh "cat '$gid_path' 2>/dev/null" | tr -d ':0' || true)
     if [ -z "$gid_head" ] || [ -z "$gid_worker" ]; then
-        warn "NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX} is EMPTY on $( [ -z "$gid_head" ] && echo "head(${HEAD_CX7_IB})" ) $( [ -z "$gid_worker" ] && echo "worker(${WORKER_CX7_IB})" )"
-        warn "GID tables (pick an index whose entry is non-zero on BOTH nodes — the ::ffff:<ip> RoCEv2 one):"
-        for i in 0 1 2 3; do
-            printf '    head   gid%s: %s\n' "$i" "$(cat "/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gids/$i" 2>/dev/null)" >&2
+        if [ -z "$gid_head" ]; then
+            warn "head GID index ${HEAD_GID} is EMPTY on ${HEAD_CX7_IB}"
+        fi
+        if [ -z "$gid_worker" ]; then
+            warn "worker GID index ${WORKER_GID} is EMPTY on ${WORKER_CX7_IB}"
+        fi
+        warn "GID tables — pick each node's ::ffff:<ip> entry whose type is RoCE v2;"
+        warn "the two indices need not match, and a v1 entry at the same index will not work:"
+        for i in 0 1 2 3 4 5 6 7; do
+            printf '    head   gid%s: %-40s %s\n' "$i" \
+                "$(cat "/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gids/$i" 2>/dev/null)" \
+                "$(cat "/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gid_attrs/types/$i" 2>/dev/null)" >&2
         done
-        worker_ssh "for i in 0 1 2 3; do printf '    worker gid%s: %s\n' \"\$i\" \"\$(cat /sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gids/\$i 2>/dev/null)\"; done" >&2 || true
-        die "set NCCL_IB_GID_INDEX in .env to a populated index (this kills the worker rank with ibv_modify_qp errno 61 otherwise)"
+        worker_ssh "for i in 0 1 2 3 4 5 6 7; do printf '    worker gid%s: %-40s %s\n' \"\$i\" \"\$(cat /sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gids/\$i 2>/dev/null)\" \"\$(cat /sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gid_attrs/types/\$i 2>/dev/null)\"; done" >&2 || true
+        die "set NCCL_IB_GID_INDEX (same index both ranks) or HEAD_GID/WORKER_GID (per rank) in .env to populated indices"
     fi
 
     [ "$TP" = "2" ] || warn "TP=${TP} on a 2×1-GPU cluster — expected TP=2"
@@ -372,6 +411,13 @@ preflight() {
     [ -f "$DRAFTER_PATCH_HOST" ] || die "$DRAFTER_PATCH_HOST missing"
     [ -f "$APC_PATCH_HOST" ] || die "$APC_PATCH_HOST missing"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "$XGRAMMAR_PATCH_HOST missing"
+    [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "$KPOOL_TAIL_PATCH_HOST missing"
+    [ -f "$SCRIPT_DIR/overlay/patch_ablit.py" ] || die "$SCRIPT_DIR/overlay/patch_ablit.py missing"
+    [ -f "$SCRIPT_DIR/overlay/ablit_runtime.py" ] || die "$SCRIPT_DIR/overlay/ablit_runtime.py missing"
+    [ -f "$SCRIPT_DIR/ablit/LAYER_MAP.json" ] || die "$SCRIPT_DIR/ablit/LAYER_MAP.json missing"
+    if [ "$ABLIT" = "1" ]; then
+        log "ablit: ON (method=${ABLIT_METHOD} direction=${ABLIT_DIRECTION} layers=${ABLIT_LAYERS} alpha=${ABLIT_ALPHA} mtp=${ABLIT_INCLUDE_MTP})"
+    fi
 
     local need_kb=$((180 * 1024 * 1024)) avail
     mkdir -p "$HF_CACHE_DIR"
@@ -829,6 +875,17 @@ fi
 if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
     python3 /opt/glm53/patch_xgrammar_termination.py
 fi
+if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
+    python3 /opt/glm53/patch_kpool_tail_slotmap.py
+fi
+if [ -f /opt/glm53/patch_ablit.py ]; then
+    python3 /opt/glm53/patch_ablit.py
+fi
+if [ "${ABLIT:-0}" = "1" ]; then
+    say "ablit: o_proj orthogonalization ON (method=${ABLIT_METHOD:-auto} direction=${ABLIT_DIRECTION:-dealign} layers=${ABLIT_LAYERS:-15-45} alpha=${ABLIT_ALPHA:-3.0})"
+else
+    say "ablit: off — stock o_proj weights"
+fi
 say "launching: vllm serve ${MODEL_DIR} ${ARGS[*]}"
 exec vllm serve "${MODEL_DIR}" "${ARGS[@]}"
 EOF
@@ -909,6 +966,17 @@ fi
 if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
     python3 /opt/glm53/patch_xgrammar_termination.py
 fi
+if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
+    python3 /opt/glm53/patch_kpool_tail_slotmap.py
+fi
+if [ -f /opt/glm53/patch_ablit.py ]; then
+    python3 /opt/glm53/patch_ablit.py
+fi
+if [ "${ABLIT:-0}" = "1" ]; then
+    say "ablit: o_proj orthogonalization ON (method=${ABLIT_METHOD:-auto} direction=${ABLIT_DIRECTION:-dealign} layers=${ABLIT_LAYERS:-15-45} alpha=${ABLIT_ALPHA:-3.0})"
+else
+    say "ablit: off — stock o_proj weights"
+fi
 say "joining TP2 at ${HEAD_IP}:${MASTER_PORT} as rank 1"
 exec vllm serve "${MODEL_DIR}" "${ARGS[@]}"
 EOF
@@ -937,11 +1005,17 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$APC_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_hybrid_prefix_hit.py"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "missing $XGRAMMAR_PATCH_HOST"
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
+    [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
+    scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
+
+    worker_ssh "rm -rf /tmp/glm53-ablit"
+    scp -q -r -o BatchMode=yes "$SCRIPT_DIR/ablit" "${WORKER_SSH}:/tmp/glm53-ablit"
+    scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/ablit_runtime.py" "${WORKER_SSH}:/tmp/glm53-ablit_runtime.py"
+    scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/patch_ablit.py" "${WORKER_SSH}:/tmp/patch_ablit.py"
 
     local -a nccl_common=(
         -e NCCL_IB_DISABLE=0
         -e NCCL_IB_ROCE_VERSION_NUM=2
-        -e "NCCL_IB_GID_INDEX=$NCCL_IB_GID_INDEX"
         -e NCCL_NET=IB
         -e NCCL_NET_PLUGIN=none
         -e NCCL_NVLS_ENABLE=0
@@ -1000,7 +1074,8 @@ launch_cluster() {
              DFLASH_DRAFT_TP \
              LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING \
              LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE EXL3_MOE_ROW_TILE EXL3_TEMP_ROWS_FUSED \
-             DEFAULT_MAX_NEW_TOKENS MODEL_DIR EXTRA_ARGS; do
+             DEFAULT_MAX_NEW_TOKENS MODEL_DIR EXTRA_ARGS \
+             ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
         serve_env+=" -e $v='${!v:-}'"
     done
     # VLLM_API_KEY is read by the head (rank 0) API server for bearer auth; the
@@ -1027,11 +1102,16 @@ launch_cluster() {
         -v '/tmp/patch_glm5_drafter_group.py:/opt/glm53/patch_glm5_drafter_group.py:ro' \
         -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
+        -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
+        -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
+        -v '/tmp/glm53-ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro' \
+        -v '/tmp/patch_ablit.py:/opt/glm53/patch_ablit.py:ro' \
         ${worker_preload} \
         ${worker_nccl} \
         -e NCCL_SOCKET_IFNAME='$WORKER_CX7_IF' \
         -e GLOO_SOCKET_IFNAME='$WORKER_CX7_IF' \
         -e NCCL_IB_HCA='$WORKER_CX7_IB' \
+        -e NCCL_IB_GID_INDEX='$WORKER_GID' \
         -e VLLM_HOST_IP='$WORKER_IP' \
         ${serve_env} \
         --entrypoint bash '$IMAGE' /start.sh" >/dev/null
@@ -1053,11 +1133,16 @@ launch_cluster() {
         -v "$DRAFTER_PATCH_HOST:/opt/glm53/patch_glm5_drafter_group.py:ro" \
         -v "$APC_PATCH_HOST:/opt/glm53/patch_hybrid_prefix_hit.py:ro" \
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
+        -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
+        -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
+        -v "$SCRIPT_DIR/overlay/ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro" \
+        -v "$SCRIPT_DIR/overlay/patch_ablit.py:/opt/glm53/patch_ablit.py:ro" \
         "${head_preload[@]}" \
         "${nccl_common[@]}" \
         -e NCCL_SOCKET_IFNAME="$HEAD_CX7_IF" \
         -e GLOO_SOCKET_IFNAME="$HEAD_CX7_IF" \
         -e NCCL_IB_HCA="$HEAD_CX7_IB" \
+        -e NCCL_IB_GID_INDEX="$HEAD_GID" \
         -e VLLM_HOST_IP="$HEAD_IP" \
         -e SERVED_MODEL_NAME="$SERVED_MODEL_NAME" \
         -e PORT="$PORT" -e TP="$TP" -e NNODES="$NNODES" \
@@ -1080,6 +1165,12 @@ launch_cluster() {
         -e EXL3_FUSED_MOE="$EXL3_FUSED_MOE" \
         -e EXL3_MOE_ROW_TILE="$EXL3_MOE_ROW_TILE" \
         -e EXL3_TEMP_ROWS_FUSED="$EXL3_TEMP_ROWS_FUSED" \
+        -e ABLIT="$ABLIT" \
+        -e ABLIT_METHOD="$ABLIT_METHOD" \
+        -e ABLIT_DIRECTION="$ABLIT_DIRECTION" \
+        -e ABLIT_LAYERS="$ABLIT_LAYERS" \
+        -e ABLIT_ALPHA="$ABLIT_ALPHA" \
+        -e ABLIT_INCLUDE_MTP="$ABLIT_INCLUDE_MTP" \
         -e MODEL_DIR="$MODEL_DIR" \
         -e VLLM_API_KEY="$VLLM_API_KEY" \
         -e EXTRA_ARGS="${EXTRA_ARGS:-}" \
@@ -1178,7 +1269,9 @@ on_ready() {
     [ "$SPEC_METHOD" = "none" ] && spec=off
     local mt_line="mt_default=off (omitted max_tokens unbounded, up to ~max_model_len)"
     [ -n "${DEFAULT_MAX_NEW_TOKENS:-}" ] && mt_line="mt_default=${DEFAULT_MAX_NEW_TOKENS}"
-    log "  features   : tools=glm47+auto, reasoning=glm45, spec=${spec}, vision=${vision}, ${mt_line}"
+    local ablit="off (stock weights)"
+    [ "$ABLIT" = "1" ] && ablit="ON method=${ABLIT_METHOD} direction=${ABLIT_DIRECTION} layers=${ABLIT_LAYERS} alpha=${ABLIT_ALPHA}"
+    log "  features   : tools=glm47+auto, reasoning=glm45, spec=${spec}, vision=${vision}, ${mt_line}, ablit=${ablit}"
     local auth_line="none (VLLM_API_KEY empty)"
     if [ -n "${VLLM_API_KEY:-}" ]; then
         auth_line="bearer token set (VLLM_API_KEY) — send Authorization: Bearer <key> on /v1 requests"

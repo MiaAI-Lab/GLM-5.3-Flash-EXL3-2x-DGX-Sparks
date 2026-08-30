@@ -38,7 +38,7 @@ Official numbers: sparkDash Decode bench, DFlash2 k=7, **Structured** (count 1�
 
 Serve recipe is `--max-model-len 1000000` with KV pool **1,754,237** tokens (1.75× a full 1M request) at util 0.87. These runs are warm / empty KV — they do not need a filled 1M cache.
 
-Lab `tests/bench_decode.py` on the same protocol (median of 5 × 400, C1): Structured **61.7** tok/s (0.918 accept / 6.43 per step); Prose (hash-map) **26.9** (0.332 / 2.33). Long context / mixed (~60–100k KV) 24–27. MTP k=2 baseline ~24.6.
+Lab `tests/bench_decode.py` on the same protocol (median of 5 × 400, 2026-08-30 C4, `DFLASH_DRAFT_TP=2`): Structured **65.1** tok/s (0.959 accept / 6.71 per step); Prose (hash-map) **27.1** (0.341 / 2.39). Prior TP=1 lab: 61.7 / 26.9. Long context / mixed (~60–100k KV) 24–27. MTP k=2 baseline ~24.6.
 
 Structured per-pos (lab median): **0.98 / 0.98 / 0.94 / 0.94 / 0.91 / 0.83 / 0.83**.
 Prose per-pos: **0.75 / 0.58 / 0.41 / 0.28 / 0.16 / 0.09 / 0.06**.
@@ -95,10 +95,76 @@ same path as the compact-64 fp8 serve (not NVFP4 KV).
 | Tools / reasoning | `--tool-call-parser glm47 --enable-auto-tool-choice --reasoning-parser glm45` |
 | Graphs | on (`ENFORCE_EAGER=0`) — MTP capture `1 2 3 4 6 8 12`; DFlash2 capture `1 2 4 8 16 24 32` |
 | Vision | on (`LANGUAGE_MODEL_ONLY=0`) — image + video, `--limit-mm-per-prompt {image:4,video:1}`, `--skip-mm-profiling` |
+| Ablit | **off** (`ABLIT=0`). Stock `o_proj`. Set `ABLIT=1` to enable; see [Abliteration](#abliteration-ablit1) |
 
 Kernels: `TORCH_CUDA_ARCH_LIST=12.1a`. ExLlamaV3 pin `c5d9c657` (0.0.43) exposes
 `exl3_moe` / `exl3_moe_max_concurrency`; aarch64 CPU allreduce stubs in
 `overlay/patch_exl3_ext_aarch64.py`.
+
+## Abliteration (`ABLIT=1`)
+
+**Off by default.** Unset or `ABLIT=0` serves stock `o_proj`. `ABLIT=1` is
+opt-in refusal-direction ablation at weight-load on top of the EXL3 checkpoint
+— nothing on disk is rewritten.
+
+This overlay is based on [@u1tra_instinct](https://x.com/u1tra_instinct)'s
+files. Artifacts live in `ablit/` (from
+[drowzeys/keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock](https://huggingface.co/drowzeys/keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock),
+method `dealign-oproj-transplant`: layers **15–45** edited, **0–14 stock**
+safety anchors, MTP block included).
+
+**Method — `ABLIT_METHOD=transplant` (default via `auto`).** The published
+checkpoint's `o_proj` L15–45 are byte-copied from the donor
+[dealignai/GLM-5.3-Flash-UNCENSORED-NVFP4](https://huggingface.co/dealignai/GLM-5.3-Flash-UNCENSORED-NVFP4)
+(same 120-shard layout; o_proj is native BF16 in both). Since this EXL3
+checkpoint's o_proj is byte-identical to the NVFP4 body's, replacing those
+31 tensors at load reproduces the published edit exactly. Fetched once (~2.7 GiB,
+range-requests only the o_proj tensors — no full checkpoint download):
+
+```bash
+python3 ablit/fetch_transplant.py      # donor is public; HF token optional
+ABLIT=1 ./start.sh restart
+```
+
+Fidelity checks (logged per layer): mean `rel_l2` vs stock ≈ the published
+fingerprint (`Mean Δrel 0.126`; their L44 outlier `0.74` matches our measured
+`0.737`). Their own gate: `refusal32` → 32/32 bypass on the NVFP4 stack.
+
+**Why not direction orthogonalization (`ABLIT_METHOD=proj`)?** Measured: the
+shipped direction vectors (`refusal_direction_glm53_*.pt`) are statistically
+random against the stock o_proj (max |rᵀW| 0.084 vs 0.084 for random unit
+vectors; mean identical). The publisher's own table shows projection variants
+(Blackfrost V / Dealign V SVD) topping out at 9/32 bypass — only the byte-copy
+hits 32/32. `proj` stays available for custom directions you extract yourself:
+
+```text
+W' = (I - alpha * r rᵀ) W      # ABLIT_ALPHA, default 3.0 (alpha_ref)
+```
+
+Mechanics (both methods): o_proj is native BF16 and `RowParallelLinear` shards
+only the input dim, so edits are per-rank row-space ops with no collectives —
+identical result on both TP ranks. Applied by `overlay/ablit_runtime.py` at
+the end of `Glm5NextModel.load_weights` / `Glm5NextMTP.load_weights`, before
+CUDA-graph capture. The DFlash2 drafter is never touched (for the checkpoint's
+own MTP block, `ABLIT_INCLUDE_MTP=1` transplants its o_proj too — the
+publisher found a stock MTP draft head keeps proposing refusals).
+
+Disable with `ABLIT=0` (or unset) — hook is a no-op, stock weights. No
+rebuild: artifacts + hook are bind-mounted into both containers every start.
+
+| Knob | Default | What |
+|---|---|---|
+| `ABLIT` | `0` (off) | `1` = apply the o_proj edit at load (both ranks). Default and unset = stock weights |
+| `ABLIT_METHOD` | `auto` | `auto` = transplant when `ablit/transplant/` is populated, else `proj` \| `transplant` \| `proj` |
+| `ABLIT_LAYERS` | `15-45` | inclusive range; `45` is the checkpoint MTP block |
+| `ABLIT_ALPHA` | `3.0` | proj-only: projection scale (`1.0` = plain projection) |
+| `ABLIT_DIRECTION` | `dealign` | proj-only: `dealign` \| `bf_oproj` \| path to a custom direction `.pt` |
+| `ABLIT_INCLUDE_MTP` | `1` | also edit the MTP block's o_proj when it loads (`SPEC_METHOD=mtp`) |
+
+Caveats: the KLD quality panel above was measured **without** ablit; expect
+behavioral drift and re-run `tests/bench_decode.py` after enabling (DFlash2
+acceptance can shift). Donor licensing: Dealign weights carry their own
+terms — see the donor card before redistributing anything derived.
 
 ## Why the overlay exists
 
@@ -139,6 +205,14 @@ idempotent script preflights both source files before writing and is already
 mounted and run on both ranks. These address issue #19's matcher-error paths;
 they do not reinterpret a client request that combines GLM XML tool output
 with a JSON response schema, nor do they remove cold-prefill queue time.
+
+`overlay/patch_kpool_tail_slotmap.py` clamps the generic paged slot-map kernel
+so `KpoolTailSpec`'s one-block circular scratch cannot index past its single
+block-table entry. Without that clamp, every token at `pos >= block_size`
+fills the mapping with adjacent memory and the kpool seed/update kernels
+write through it — long generations (~2k tokens) crash or silently corrupt
+another layer's indexer. The clamp is identity for every other KV group.
+Fail-closed, idempotent, mounted and run on both ranks.
 
 `overlay/patch_glm_video_placeholders.py` routes Glm5Next video timestamps through
 the glm46v path and aligns placeholder blocks to encoder `grid_t`. The overlay
@@ -206,7 +280,7 @@ Keep **`SKIP_MM_PROFILING=1`** — a max-size image+video dummy profile OOMs thi
 **NVFP4 KV is not available here.** FlashInfer’s SM12x NVFP4 kernels are dense MHA,
 not sparse MLA. Do not confuse that with NVFP4 **weights** (`--moe-backend marlin`).
 
-## Prefix caching (this kit, 2026-08-29)
+## Prefix caching (this kit, 2026-08-30)
 
 `--enable-prefix-caching` is on. The OpenAI API is **stateless**: the client
 resends the full history each turn; vLLM hashes that prefix. Concurrent chats
@@ -224,22 +298,22 @@ does **not** let that group shrink the MLA+mamba hit. Mamba stays in the min
 (skipping a mamba miss is a correctness hole). Do not raise
 `--max-num-batched-tokens` to “fix” APC.
 
-**Live receipts** (thinking off, temp 0, real user + assistant + follow-up), 1M serve, **`MAX_NUM_BATCHED_TOKENS=2048`** (P1 keep; 3584/4096 reverted). Idle 8k/16k/100k are the dedicated keep A/B; 12k/256k/300k are the production full ladder. The MNBT=1024 baseline is `docs/cold-prefill.md`. ~12k/~16k follow-ups and the 4× concurrent row are the earlier same-day retest (chunk size does not change those hit counts). Details: `docs/improve-prefill.md`.
+**Live receipts** (thinking off, temp 0, unique pads), 1M serve, **`MAX_NUM_BATCHED_TOKENS=2048`** (P1 keep; 3584/4096 reverted), **`DFLASH_DRAFT_TP=2`**. Idle 8k/16k/100k are the 2026-08-30 C4 keep A/B. 12k/256k/300k and the concurrent follow-ups are the prior TP=1 production ladder (chunk size does not change those hit counts). The MNBT=1024 baseline is `docs/cold-prefill.md`. Details: `docs/improve-prefill.md`.
 
 | Turn | Hits | Compute | Prompt tok | TTFT | Prefill tok/s |
 |---|---:|---:|---:|---:|---:|
-| ~8k cold | 0 | 7995 | 7995 | **8.93 s** | **895** |
-| ~8k follow-up | **7168** | 836 | 8004 | **1.27 s** | 6310 |
+| ~8k cold | 0 | 7995 | 7995 | **8.53 s** | **938** |
+| ~8k follow-up | **7168** | 836 | 8004 | **1.30 s** | 6177 |
 | ~12k cold | 0 | 11995 | 11995 | 12.96 s | **926** |
 | ~12k follow-up | **10752** | 1263 | 12015 | **1.94 s** | — |
-| ~16k cold | 0 | 15995 | 15995 | 16.78 s | **953** |
+| ~16k cold | 0 | 15995 | 15995 | **16.45 s** | **972** |
 | ~16k follow-up | **14336** | 1679 | 16015 | **2.18 s** | — |
-| ~100k cold | 0 | 99995 | 99995 | 102.5 s | **975** |
+| ~100k cold | 0 | 99995 | 99995 | **100.3 s** | **997** |
 | ~256k cold | 0 | 255995 | 255995 | 263.2 s | **973** |
 | ~300k cold | 0 | 299995 | 299995 | 318.9 s | **941** |
 | 4× ~7.5k concurrent follow-ups | **7168 each** (28672 total) | rest | 7515 each | **1.86–2.50 s** | — |
 
-An ~8k follow-up still reuses **7168 / 8004 ≈ 90%** of the prompt, not 46%. MNBT=2048 vs the 1024 ladder: ~8k 10.36 s / 772 → **8.93 s / 895**; ~100k 105.6 s / 947 → **102.5 s / 975**; ~256k 273 s / 936 → **263 s / 973**; ~300k 323 s / 928 → **319 s / 941**. Coarser decode interleave (2k-token chunks vs 1k).
+An ~8k follow-up still reuses **7168 / 8004 ≈ 90%** of the prompt, not 46%. MNBT=2048 vs the 1024 ladder (draft TP=1): ~8k 10.36 s / 772 → 8.93 s / 895; ~100k 105.6 s / 947 → 102.5 s / 975; ~256k 273 s / 936 → **263 s / 973**; ~300k 323 s / 928 → **319 s / 941**. C4 keep (`DFLASH_DRAFT_TP=2`): ~8k **8.53 s / 938**; ~16k **16.45 s / 972**; ~100k **100.3 s / 997**. Coarser decode interleave (2k-token chunks vs 1k).
 Hits work **below** UserHIJ’s 14,336-token floor (that floor is 896-chunk ×
 2048-align LCM on a different geometry; this kit’s 3584 is 4×896). Isolation
 held (`STILL_READY_S` / `STILL_C0`…`C3`). Idle chats are not reserved; after
@@ -365,11 +439,13 @@ that are now documented/enforced:
   `WORKER_CX7_IF/IB` in `.env` (some pairs use the same names on both nodes,
   e.g. `enP2p1s0f1np1`/`roceP2p1s0f1`). Exporting generic
   `NCCL_SOCKET_IFNAME`/`NCCL_IB_HCA` does **not** override the per-node values.
-- **`NCCL_IB_GID_INDEX` (default 3) may be an all-zero entry on one node** —
-  the launch then dies ~60 s in with `ibv_modify_qp` errno 61 on the worker
-  rank. `preflight` now validates the index on both devices and prints both
-  GID tables when it refuses; pick the index carrying the `::ffff:<ip>`
-  RoCEv2 entry on both nodes.
+- **The RoCEv2 GID index is per-NIC** — each node needs the index carrying its
+  own `::ffff:<ip>` entry, and an all-zero entry kills that rank ~60 s in with
+  `ibv_modify_qp` errno 61. Preflight validates each rank against its own device
+  and dumps both GID tables (0–7) when it refuses. If one index is valid on both
+  nodes, set `NCCL_IB_GID_INDEX`; if the nodes need different indices, set
+  `HEAD_GID` / `WORKER_GID` per rank (both default to `NCCL_IB_GID_INDEX`).
+
 - **`GPU_MEM_UTIL=0.87` needs ≥105.9 GiB free *after* vLLM's own ~9 GiB
   init.** Nodes running resident services (dashboards, TTS, desktop) can miss
   it by well under 1 GiB and fail the startup memory check; `GPU_MEM_UTIL=0.86`
@@ -391,13 +467,19 @@ that are now documented/enforced:
 | `GHCR_TOKEN` / `GHCR_USER` | *(unset)* | optional login if anonymous GHCR pull is rate-limited |
 | `PORT` | `8888` | OpenAI API on the head |
 | `VLLM_API_KEY` | *(unset)* | opt-in Bearer token for `/v1`. Empty = open API. `/health` stays keyless |
+| `ABLIT` | `0` (off) | opt-in. `1` = apply o_proj edit at load (both ranks). Unset = stock weights |
+| `ABLIT_METHOD` | `auto` | `auto` = transplant when `ablit/transplant/` is populated, else `proj` |
+| `ABLIT_LAYERS` | `15-45` | inclusive range; `45` is the checkpoint MTP block |
+| `ABLIT_DIRECTION` | `dealign` | proj-only: `dealign` \| `bf_oproj` \| path to a custom `.pt` |
+| `ABLIT_ALPHA` | `3.0` | proj-only: projection scale |
+| `ABLIT_INCLUDE_MTP` | `1` | also edit the MTP block's o_proj when it loads |
 | `TP` / `NNODES` | `2` / `2` | do not change for this recipe |
 | `QUANTIZATION` | `exl3` | overlay method; never `marlin` |
 | `MTP_TOKENS` | `2` | MTP speculative tokens (`SPEC_METHOD=mtp`) |
 | `SPEC_METHOD` | `dflash` | `dflash` / `mtp` / `none`. Rollback: `SPEC_METHOD=mtp ./start.sh restart` |
 | `DFLASH_MODEL` | `incoai/GLM-5.3-Flash-DFlash2` | DFlash2 draft Hub repo (~2.3 GiB BF16) |
 | `DFLASH_TOKENS` | `7` | DFlash2 speculative tokens (trained block 8) |
-| `DFLASH_DRAFT_TP` | `1` | keep the 2.3 GiB drafter on rank 0 (no CX7 per draft step). Empty = inherit TP |
+| `DFLASH_DRAFT_TP` | `2` | shard DFlash2 across TP (C4 keep: 8k 938 / decode 65.1). `1` = rank 0 only. Empty = inherit TP |
 | DFlash2 draft KV | `auto` (bf16) | target stays `fp8`/`fp8_ds_mla`; dense draft has no MLA FP8 backend on SM121 |
 | DFlash2 attention | *(unset)* | SM121 picks FLASH_ATTN for non-causal SWA. Do not pin `TRITON_ATTN` |
 | `ENFORCE_EAGER` | `0` | CUDA graphs; MTP capture `1 2 3 4 6 8 12`, DFlash2 `1 2 4 8 16 24 32` |
@@ -452,6 +534,12 @@ this Dockerfile instead. After CUDA compile, Python overlay edits
 | `overlay/patch_scheduler_decode_floor.py` | skip (or cap) peer prefill while another seq is decoding |
 | `overlay/patch_xgrammar_termination.py` | source-exact vLLM #52805/#53046 backports; stop at termination and validate post-reasoning speculative drafts before FSM advance |
 | `tests/test_xgrammar_termination.py` | exact two-file patch, idempotence, cross-file fail-closed drift, termination/rollback/reset and post-reasoning draft behavior, launcher wiring |
+| `overlay/patch_kpool_tail_slotmap.py` | clamp KpoolTail one-block circular slot mapping; identity for other KV groups |
+| `tests/test_kpool_tail_slotmap.py` | circular addressing math, exact kernel patch, idempotence, fail-closed drift, launcher wiring |
+| `overlay/ablit_runtime.py` | load-time o_proj transplant / projection (`ABLIT=1`); no-op when off |
+| `overlay/patch_ablit.py` | install the load_weights hook; bind-mounted and run on both ranks |
+| `ablit/` | direction vectors + `LAYER_MAP.json` from drowzeys' published recipe; `fetch_transplant.py` + `transplant/` for the donor o_proj byte-copy |
+| `tests/test_ablit.py` | recipe integrity, orthogonalization math, TP-shard equivalence, transplant byte-copy + TP slice, hook gating |
 | `scripts/boot-shape-warmup.sh` | post-`/health` DFlash2 k=7 BLOCK ladder + sampler/kpool arms |
 
 Image-build runs `EXL3_SELFCHECK_GPU=0`. `./start.sh` runs the GPU self-check
@@ -488,3 +576,9 @@ DFlash2 stays [CC BY-NC-ND 4.0](https://huggingface.co/incoai/GLM-5.3-Flash-DFla
   (CC BY-NC-ND 4.0, research/eval)
 - **KLD panel:** [malaiwah](https://huggingface.co/malaiwah) —
   [discussion #1](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw/discussions/1#6a9144846b0bdba943bfe86f)
+- **Abliteration basis:** [@u1tra_instinct](https://x.com/u1tra_instinct) —
+  this overlay is based on their files
+- **Abliteration recipe / direction artifacts:** [drowzeys](https://huggingface.co/drowzeys) —
+  [keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock](https://huggingface.co/drowzeys/keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock)
+- **Abliteration donor weights:** [dealignai](https://huggingface.co/dealignai) —
+  [GLM-5.3-Flash-UNCENSORED-NVFP4](https://huggingface.co/dealignai/GLM-5.3-Flash-UNCENSORED-NVFP4)
