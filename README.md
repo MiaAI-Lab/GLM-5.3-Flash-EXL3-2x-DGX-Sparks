@@ -107,15 +107,13 @@ Kernels: `TORCH_CUDA_ARCH_LIST=12.1a`. ExLlamaV3 pin `c5d9c657` (0.0.43) exposes
 opt-in refusal-direction ablation at weight-load on top of the EXL3 checkpoint
 — nothing on disk is rewritten.
 
-This overlay is based on [@u1tra_instinct](https://x.com/u1tra_instinct)'s
-files. Artifacts live in `ablit/` (from
+Artifacts live in `ablit/` (from
 [drowzeys/keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock](https://huggingface.co/drowzeys/keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock),
 method `dealign-oproj-transplant`: layers **15–45** edited, **0–14 stock**
 safety anchors, MTP block included).
 
 **Method — `ABLIT_METHOD=transplant` (default via `auto`).** The published
-checkpoint's `o_proj` L15–45 are byte-copied from the donor
-[dealignai/GLM-5.3-Flash-UNCENSORED-NVFP4](https://huggingface.co/dealignai/GLM-5.3-Flash-UNCENSORED-NVFP4)
+checkpoint's `o_proj` L15–45 are byte-copied from that recipe
 (same 120-shard layout; o_proj is native BF16 in both). Since this EXL3
 checkpoint's o_proj is byte-identical to the NVFP4 body's, replacing those
 31 tensors at load reproduces the published edit exactly. Fetched once (~2.7 GiB,
@@ -575,9 +573,5 @@ DFlash2 stays [CC BY-NC-ND 4.0](https://huggingface.co/incoai/GLM-5.3-Flash-DFla
   (CC BY-NC-ND 4.0, research/eval)
 - **KLD panel:** [malaiwah](https://huggingface.co/malaiwah) —
   [discussion #1](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw/discussions/1#6a9144846b0bdba943bfe86f)
-- **Abliteration basis:** [@u1tra_instinct](https://x.com/u1tra_instinct) —
-  this overlay is based on their files
 - **Abliteration recipe / direction artifacts:** [drowzeys](https://huggingface.co/drowzeys) —
   [keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock](https://huggingface.co/drowzeys/keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock)
-- **Abliteration donor weights:** [dealignai](https://huggingface.co/dealignai) —
-  [GLM-5.3-Flash-UNCENSORED-NVFP4](https://huggingface.co/dealignai/GLM-5.3-Flash-UNCENSORED-NVFP4)
