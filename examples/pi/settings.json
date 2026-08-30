@@ -1,0 +1,15 @@
+{
+  "defaultProvider": "local-glm",
+  "defaultModel": "GLM-5.3-Flash-EXL3",
+  "defaultThinkingLevel": "off",
+  "httpIdleTimeoutMs": 600000,
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 65536,
+    "keepRecentTokens": 24000
+  },
+  "packages": [
+    "npm:@tintinweb/pi-subagents",
+    "npm:context-mode"
+  ]
+}

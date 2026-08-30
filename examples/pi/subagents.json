@@ -1,0 +1,13 @@
+{
+  "maxConcurrent": 2,
+  "maxConcurrentForeground": 1,
+  "defaultMaxTurns": 20,
+  "graceTurns": 2,
+  "toolDescriptionMode": "compact",
+  "agentMentions": "direct",
+  "schedulingEnabled": false,
+  "workflowsEnabled": false,
+  "maxSubagentDepth": 1,
+  "fallbackSubagent": "none",
+  "outputTranscript": false
+}
