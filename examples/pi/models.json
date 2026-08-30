@@ -1,0 +1,47 @@
+{
+  "providers": {
+    "local-glm": {
+      "name": "Local GLM 5.3 Flash EXL3",
+      "baseUrl": "http://127.0.0.1:8888/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "authHeader": false,
+      "models": [
+        {
+          "id": "GLM-5.3-Flash-EXL3",
+          "name": "GLM 5.3 Flash EXL3",
+          "reasoning": false,
+          "input": [
+            "text"
+          ],
+          "contextWindow": 500000,
+          "maxTokens": 8192,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "compat": {
+            "supportsStore": false,
+            "supportsDeveloperRole": false,
+            "supportsReasoningEffort": false,
+            "supportsUsageInStreaming": true,
+            "supportsFinishReason": true,
+            "supportsStrictMode": false,
+            "maxTokensField": "max_tokens",
+            "chatTemplateKwargs": {
+              "enable_thinking": false
+            }
+          }
+        }
+      ],
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "supportsStrictMode": false,
+        "maxTokensField": "max_tokens"
+      }
+    }
+  }
+}
