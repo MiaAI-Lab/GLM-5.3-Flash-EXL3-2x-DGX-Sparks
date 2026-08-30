@@ -296,7 +296,7 @@ resolve_dflash_dir() {
 check_port_free() {
     local port="$1" envname="$2"
     command -v ss >/dev/null 2>&1 || return 0
-    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\\$"; then
+    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; then
         # Do not pipe docker inspect into grep -q: pipefail can turn grep's
         # early close into a false negative when docker gets SIGPIPE.
         if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_HEAD" 2>/dev/null || true)" = "true" ]; then
