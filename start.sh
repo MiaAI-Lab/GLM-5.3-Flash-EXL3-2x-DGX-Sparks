@@ -62,6 +62,9 @@ _cli_eager="${ENFORCE_EAGER-}"
 _cli_fused="${EXL3_FUSED_MOE-}"
 _cli_row_tile="${EXL3_MOE_ROW_TILE-}"
 _cli_temp_rows="${EXL3_TEMP_ROWS_FUSED-}"
+_cli_fat_sorted="${EXL3_FAT_SORTED-}"
+_cli_fat_batched="${EXL3_FAT_BATCHED-}"
+_cli_fat_kernel="${EXL3_FAT_KERNEL-}"
 _cli_mnbt="${MAX_NUM_BATCHED_TOKENS-}"
 _cli_image="${IMAGE-}"
 _cli_util="${GPU_MEM_UTIL-}"
@@ -83,6 +86,9 @@ set +a
 [ -n "${_cli_fused}" ] && EXL3_FUSED_MOE="$_cli_fused"
 [ -n "${_cli_row_tile}" ] && EXL3_MOE_ROW_TILE="$_cli_row_tile"
 [ -n "${_cli_temp_rows}" ] && EXL3_TEMP_ROWS_FUSED="$_cli_temp_rows"
+[ -n "${_cli_fat_sorted}" ] && EXL3_FAT_SORTED="$_cli_fat_sorted"
+[ -n "${_cli_fat_batched}" ] && EXL3_FAT_BATCHED="$_cli_fat_batched"
+[ -n "${_cli_fat_kernel}" ] && EXL3_FAT_KERNEL="$_cli_fat_kernel"
 [ -n "${_cli_mnbt}" ] && MAX_NUM_BATCHED_TOKENS="$_cli_mnbt"
 [ -n "${_cli_image}" ] && IMAGE="$_cli_image"
 [ -n "${_cli_util}" ] && GPU_MEM_UTIL="$_cli_util"
@@ -208,6 +214,13 @@ EXL3_FUSED_MOE="${EXL3_FUSED_MOE:-1}"
 EXL3_MOE_ROW_TILE="${EXL3_MOE_ROW_TILE:-0}"
 # Fused exl3_moe temp rows/expert. 1024 was slower than 128+fallback (P2b).
 EXL3_TEMP_ROWS_FUSED="${EXL3_TEMP_ROWS_FUSED:-128}"
+# Sorted routing tier; higher tiers imply it even when this is 0.
+# All three flags default off; set every flag to 0 for instant rollback.
+EXL3_FAT_SORTED="${EXL3_FAT_SORTED:-0}"
+# E1 batched tier: persistent scratch + combined gate/up; implies SORTED=1.
+EXL3_FAT_BATCHED="${EXL3_FAT_BATCHED:-0}"
+# E2 direct trellis kernel; implies BATCHED=1 and SORTED=1.
+EXL3_FAT_KERNEL="${EXL3_FAT_KERNEL:-0}"
 
 # --- abliteration (ablit/) --------------------------------------------------
 # Load-time o_proj orthogonalization (overlay/ablit_runtime.py). Published
@@ -1096,7 +1109,7 @@ launch_cluster() {
              KV_CACHE_DTYPE MTP_TOKENS SPEC_METHOD DFLASH_TOKENS DFLASH_MODEL_DIR \
              DFLASH_DRAFT_TP \
              LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING \
-             LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE EXL3_MOE_ROW_TILE EXL3_TEMP_ROWS_FUSED MODEL_DIR EXTRA_ARGS \
+             LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE EXL3_MOE_ROW_TILE EXL3_TEMP_ROWS_FUSED EXL3_FAT_SORTED EXL3_FAT_BATCHED EXL3_FAT_KERNEL MODEL_DIR EXTRA_ARGS \
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
         serve_env+=" -e $v='${!v:-}'"
     done
@@ -1186,6 +1199,9 @@ launch_cluster() {
         -e EXL3_FUSED_MOE="$EXL3_FUSED_MOE" \
         -e EXL3_MOE_ROW_TILE="$EXL3_MOE_ROW_TILE" \
         -e EXL3_TEMP_ROWS_FUSED="$EXL3_TEMP_ROWS_FUSED" \
+        -e EXL3_FAT_SORTED="$EXL3_FAT_SORTED" \
+        -e EXL3_FAT_BATCHED="$EXL3_FAT_BATCHED" \
+        -e EXL3_FAT_KERNEL="$EXL3_FAT_KERNEL" \
         -e ABLIT="$ABLIT" \
         -e ABLIT_METHOD="$ABLIT_METHOD" \
         -e ABLIT_DIRECTION="$ABLIT_DIRECTION" \

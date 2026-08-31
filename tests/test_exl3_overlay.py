@@ -118,10 +118,103 @@ def _check_gpu_gemm() -> None:
         f"finite mean={float(y.mean()):.4f}",
         flush=True,
     )
+    _check_fat_kernel(device)
     _check_fused_vs_loop(device)
     _check_fused_fat_and_row_tile(device)
+    _check_mixed_thin_fat(device)
     _check_apply_expert_map(device)
     _check_fused_cudagraph(device)
+
+
+
+def _check_fat_kernel(device) -> None:
+    """Compare E2 direct and scatter epilogues with LinearEXL3 reconstruction."""
+    import exllamav3_ext
+    import torch
+    from vllm.model_executor.layers.quantization.exl3 import (
+        MCG_MARKER_SIGNED_INT32,
+        execute_exl3_linear,
+    )
+
+    if not hasattr(exllamav3_ext, "exl3_fat_gemm"):
+        print("exl3 E2 fat kernel absent (E1 image)", flush=True)
+        return
+    assert hasattr(exllamav3_ext, "exl3_fat_gemm_scatter")
+
+    rows = 145
+    in_f = out_f = 256
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(41)
+    trellis = torch.randint(
+        -30000,
+        30000,
+        (in_f // 16, out_f // 16, 4 * 16),
+        dtype=torch.int16,
+        generator=generator,
+    ).to(device)
+    suh = torch.where(
+        torch.rand(in_f, generator=generator) > 0.5,
+        torch.tensor(1.0),
+        torch.tensor(-1.0),
+    ).half().to(device)
+    svh = torch.where(
+        torch.rand(out_f, generator=generator) > 0.5,
+        torch.tensor(1.0),
+        torch.tensor(-1.0),
+    ).half().to(device)
+    mcg = torch.tensor(
+        [MCG_MARKER_SIGNED_INT32], dtype=torch.int32, device=device
+    )
+    x = torch.randn(rows, in_f, dtype=torch.float16, device=device)
+    reference = execute_exl3_linear(
+        x, trellis, suh, svh, mcg, out_dtype=torch.float32
+    )
+    xh = torch.empty_like(x)
+    exllamav3_ext.had_r_128(x, xh, suh, None, 1.0)
+    direct = torch.empty(rows, out_f, dtype=torch.float32, device=device)
+    exllamav3_ext.exl3_fat_gemm(
+        xh, trellis, direct, svh, 4, True, False
+    )
+
+    bound = max(
+        0.15, 0.08 * float(reference.float().abs().max().clamp_min(1.0))
+    )
+    direct_err = float((reference - direct).abs().max())
+    assert torch.isfinite(direct).all()
+    assert direct_err < bound, (
+        f"E2 direct vs reconstruct maxabs={direct_err} bound={bound}"
+    )
+
+    token_idx = torch.randperm(rows + 17, device=device)[:rows].contiguous()
+    route_weight = torch.rand(rows, dtype=torch.float16, device=device)
+    expected = torch.zeros(
+        rows + 17, out_f, dtype=torch.float32, device=device
+    )
+    expected.index_add_(
+        0, token_idx, reference * route_weight.float().unsqueeze(-1)
+    )
+    scattered = torch.zeros_like(expected)
+    exllamav3_ext.exl3_fat_gemm_scatter(
+        xh,
+        trellis,
+        scattered,
+        svh,
+        token_idx,
+        route_weight,
+        4,
+        True,
+        False,
+    )
+    scatter_err = float((expected - scattered).abs().max())
+    assert torch.isfinite(scattered).all()
+    assert scatter_err < bound, (
+        f"E2 scatter vs reconstruct maxabs={scatter_err} bound={bound}"
+    )
+    print(
+        f"exl3 E2 direct/scatter parity OK rows={rows} "
+        f"direct={direct_err:.5f} scatter={scatter_err:.5f} bound={bound:.5f}",
+        flush=True,
+    )
 
 
 def _tiny_layer(device, n_exp: int = 3, hidden: int = 256, inter: int = 256):
@@ -157,6 +250,7 @@ def _tiny_layer(device, n_exp: int = 3, hidden: int = 256, inter: int = 256):
         layer.w13_svh.copy_(torch.randn(tuple(layer.w13_svh.shape), generator=g).half())
         layer.w2_suh.copy_(torch.randn(tuple(layer.w2_suh.shape), generator=g).half())
         layer.w2_svh.copy_(torch.randn(tuple(layer.w2_svh.shape), generator=g).half())
+        layer.w13_suh[:, 1].copy_(layer.w13_suh[:, 0])
         layer.w13_mcg.fill_(MCG_MARKER_SIGNED_INT32)
         layer.w2_mcg.fill_(MCG_MARKER_SIGNED_INT32)
     layer = layer.to(device)
@@ -191,7 +285,7 @@ def _check_fused_vs_loop(device) -> None:
 
 
 def _check_fused_fat_and_row_tile(device) -> None:
-    """T > TEMP_ROWS_FUSED: fallback loop vs GPU row tiles vs unique-expert loop."""
+    """T > temp rows: isolated fat tiers and row tiles match the full loop."""
     import os
 
     import torch
@@ -201,6 +295,9 @@ def _check_fused_fat_and_row_tile(device) -> None:
     )
 
     prev_tile = os.environ.get("EXL3_MOE_ROW_TILE")
+    prev_sorted = os.environ.get("EXL3_FAT_SORTED")
+    prev_batched = os.environ.get("EXL3_FAT_BATCHED")
+    prev_kernel = os.environ.get("EXL3_FAT_KERNEL")
     prev_log = os.environ.get("EXL3_FAT_EXPERT_LOG")
     prev_rows = os.environ.get("EXL3_TEMP_ROWS_FUSED")
     os.environ["EXL3_FAT_EXPERT_LOG"] = "1"
@@ -210,18 +307,64 @@ def _check_fused_fat_and_row_tile(device) -> None:
         del method
         tokens = 128 + 32
         x = torch.randn(tokens, 256, dtype=torch.float16, device=device)
-        # All rows hit expert 0 so count[0] = tokens > 128 (plus expert 1 at tokens).
+        # Both routed experts exceed the 128-row fused cap.
         ids = torch.zeros(tokens, 2, dtype=torch.long, device=device)
         ids[:, 1] = 1
         w = torch.full((tokens, 2), 0.5, dtype=torch.float16, device=device)
         os.environ["EXL3_MOE_ROW_TILE"] = "0"
         reset_exl3_fat_expert_stats()
         y_loop = apply_exl3_experts(x, ids, w, layer, fused=False)
-        y_fb = apply_exl3_experts(x, ids, w, layer, fused=True)
-        assert torch.isfinite(y_loop).all() and torch.isfinite(y_fb).all()
-        err_fb = float((y_loop.float() - y_fb.float()).abs().max())
+
+        os.environ["EXL3_FAT_SORTED"] = "0"
+        os.environ["EXL3_FAT_BATCHED"] = "0"
+        os.environ["EXL3_FAT_KERNEL"] = "0"
+        y_legacy = apply_exl3_experts(x, ids, w, layer, fused=True)
+        assert layer._exl3_last_fat_fallback == "legacy"
+
+        os.environ["EXL3_FAT_SORTED"] = "1"
+        y_sorted = apply_exl3_experts(x, ids, w, layer, fused=True)
+        assert layer._exl3_last_fat_fallback == "sorted"
+
+        os.environ["EXL3_FAT_SORTED"] = "0"
+        os.environ["EXL3_FAT_BATCHED"] = "1"
+        y_batched = apply_exl3_experts(x, ids, w, layer, fused=True)
+        assert layer._exl3_last_fat_fallback == "batched"
+
+        assert (
+            torch.isfinite(y_loop).all()
+            and torch.isfinite(y_legacy).all()
+            and torch.isfinite(y_sorted).all()
+            and torch.isfinite(y_batched).all()
+        )
         bound = max(0.15, 0.08 * float(y_loop.float().abs().max().clamp_min(1.0)))
-        assert err_fb < bound, f"fat fallback vs loop maxabs={err_fb} bound={bound}"
+        err_legacy = float((y_loop.float() - y_legacy.float()).abs().max())
+        err_sorted = float((y_loop.float() - y_sorted.float()).abs().max())
+        err_batched = float((y_loop.float() - y_batched.float()).abs().max())
+        assert err_legacy < bound, (
+            f"legacy fat fallback vs loop maxabs={err_legacy} bound={bound}"
+        )
+        assert err_sorted < bound, (
+            f"sorted fat fallback vs loop maxabs={err_sorted} bound={bound}"
+        )
+        assert err_batched < bound, (
+            f"batched fat fallback vs loop maxabs={err_batched} bound={bound}"
+        )
+        import exllamav3_ext
+
+        err_kernel = None
+        if hasattr(exllamav3_ext, "exl3_fat_gemm"):
+            os.environ["EXL3_FAT_BATCHED"] = "0"
+            os.environ["EXL3_FAT_KERNEL"] = "1"
+            y_kernel = apply_exl3_experts(x, ids, w, layer, fused=True)
+            assert layer._exl3_last_fat_fallback == "kernel"
+            assert torch.isfinite(y_kernel).all()
+            err_kernel = float(
+                (y_loop.float() - y_kernel.float()).abs().max()
+            )
+            assert err_kernel < bound, (
+                f"kernel fat fallback vs loop maxabs={err_kernel} bound={bound}"
+            )
+            os.environ["EXL3_FAT_KERNEL"] = "0"
 
         os.environ["EXL3_MOE_ROW_TILE"] = "1"
         y_tile = apply_exl3_experts(x, ids, w, layer, fused=True)
@@ -233,6 +376,18 @@ def _check_fused_fat_and_row_tile(device) -> None:
             os.environ.pop("EXL3_MOE_ROW_TILE", None)
         else:
             os.environ["EXL3_MOE_ROW_TILE"] = prev_tile
+        if prev_sorted is None:
+            os.environ.pop("EXL3_FAT_SORTED", None)
+        else:
+            os.environ["EXL3_FAT_SORTED"] = prev_sorted
+        if prev_batched is None:
+            os.environ.pop("EXL3_FAT_BATCHED", None)
+        else:
+            os.environ["EXL3_FAT_BATCHED"] = prev_batched
+        if prev_kernel is None:
+            os.environ.pop("EXL3_FAT_KERNEL", None)
+        else:
+            os.environ["EXL3_FAT_KERNEL"] = prev_kernel
         if prev_log is None:
             os.environ.pop("EXL3_FAT_EXPERT_LOG", None)
         else:
@@ -242,8 +397,73 @@ def _check_fused_fat_and_row_tile(device) -> None:
         else:
             os.environ["EXL3_TEMP_ROWS_FUSED"] = prev_rows
     print(
-        f"exl3 fat fallback + row-tile vs loop OK "
-        f"T={tokens} fb={err_fb:.5f} tile={err_tile:.5f} bound={bound:.5f}",
+        "exl3 legacy/sorted/batched/kernel fat fallback + row-tile vs loop OK "
+        f"T={tokens} legacy={err_legacy:.5f} sorted={err_sorted:.5f} "
+        f"batched={err_batched:.5f} kernel={err_kernel} "
+        f"tile={err_tile:.5f} bound={bound:.5f}",
+        flush=True,
+    )
+
+
+def _check_mixed_thin_fat(device) -> None:
+    """One oversized expert plus fused thin experts must compose exactly once."""
+    import torch
+    from vllm.model_executor.layers.quantization.exl3 import apply_exl3_experts
+
+    keys = (
+        "EXL3_MOE_ROW_TILE",
+        "EXL3_FAT_SORTED",
+        "EXL3_FAT_BATCHED",
+        "EXL3_FAT_KERNEL",
+    )
+    previous = {key: os.environ.get(key) for key in keys}
+    try:
+        _method, layer = _tiny_layer(device)
+        tokens = 200
+        x = torch.randn(tokens, 256, dtype=torch.float16, device=device)
+        ids = torch.empty(tokens, 2, dtype=torch.long, device=device)
+        ids[:, 0] = 0
+        ids[:100, 1] = 1
+        ids[100:, 1] = 2
+        weights = torch.full(
+            (tokens, 2), 0.5, dtype=torch.float16, device=device
+        )
+
+        y_loop = apply_exl3_experts(x, ids, weights, layer, fused=False)
+        os.environ["EXL3_MOE_ROW_TILE"] = "0"
+        os.environ["EXL3_FAT_SORTED"] = "1"
+        os.environ["EXL3_FAT_BATCHED"] = "1"
+        os.environ["EXL3_FAT_KERNEL"] = "0"
+        y_batched = apply_exl3_experts(x, ids, weights, layer, fused=True)
+        assert layer._exl3_last_fat_fallback == "batched"
+        assert torch.isfinite(y_loop).all() and torch.isfinite(y_batched).all()
+        bound = max(
+            0.15, 0.08 * float(y_loop.float().abs().max().clamp_min(1.0))
+        )
+        err = float((y_loop.float() - y_batched.float()).abs().max())
+        assert err < bound, (
+            f"mixed thin+fat batched vs loop maxabs={err} bound={bound}"
+        )
+        import exllamav3_ext
+
+        if hasattr(exllamav3_ext, "exl3_fat_gemm"):
+            os.environ["EXL3_FAT_KERNEL"] = "1"
+            y_kernel = apply_exl3_experts(x, ids, weights, layer, fused=True)
+            assert layer._exl3_last_fat_fallback == "kernel"
+            kernel_err = float(
+                (y_loop.float() - y_kernel.float()).abs().max()
+            )
+            assert torch.isfinite(y_kernel).all() and kernel_err < bound, (
+                f"mixed thin+fat kernel vs loop maxabs={kernel_err} bound={bound}"
+            )
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    print(
+        f"exl3 mixed thin+fat composition OK maxabs={err:.5f} bound={bound:.5f}",
         flush=True,
     )
 
