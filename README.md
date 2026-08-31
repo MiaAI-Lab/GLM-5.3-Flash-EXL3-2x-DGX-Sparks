@@ -488,6 +488,7 @@ that are now documented/enforced:
 | `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq |
 | `MAX_NUM_BATCHED_TOKENS` | `2048` | prefill chunk (P1 keep). 3584/4096 lost; 8192 oversubscribes GB10 indexer topk |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (2048) |
+| `GLM53_EXTRA_ENV` | (empty) | space-separated `NAME=VALUE` list of extra container env for both ranks, for diagnostics (e.g. `VLLM_DEBUG_WORKSPACE=1`, `VLLM_LOGGING_LEVEL=DEBUG`). Names validated; caller export wins over `.env` |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
 | `GLM53_BOOT_SHAPE_WARMUP` | `1` | after `/health`, burn DFlash2 BLOCK / sampler / kpool shapes (nonfatal) |
 | `TRITON_HOST_CACHE` / `TILELANG_HOST_CACHE` | `$CACHE_ROOT/triton` / `tilelang` | persist JIT caches across container recreate |

@@ -73,11 +73,14 @@ _cli_ablit_direction="${ABLIT_DIRECTION-}"
 _cli_ablit_layers="${ABLIT_LAYERS-}"
 _cli_ablit_alpha="${ABLIT_ALPHA-}"
 _cli_ablit_mtp="${ABLIT_INCLUDE_MTP-}"
+_cli_extra_env_set="${GLM53_EXTRA_ENV+1}"
+_cli_extra_env="${GLM53_EXTRA_ENV-}"
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
 set +a
 [ -n "${_cli_mtp}" ] && MTP_TOKENS="$_cli_mtp"
+[ -n "${_cli_extra_env_set}" ] && GLM53_EXTRA_ENV="$_cli_extra_env"
 [ -n "${_cli_spec}" ] && SPEC_METHOD="$_cli_spec"
 [ -n "${_cli_eager}" ] && ENFORCE_EAGER="$_cli_eager"
 [ -n "${_cli_fused}" ] && EXL3_FUSED_MOE="$_cli_fused"
@@ -227,6 +230,8 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # Mixed-step prefill policy when a peer is already decoding (issue #6).
 # skip = do not mix; N>0 = cap tokens; 0 = off.
 GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
+# Space-separated NAME=VALUE list of extra env for both container ranks (diagnostics, e.g. VLLM_DEBUG_WORKSPACE=1).
+GLM53_EXTRA_ENV="${GLM53_EXTRA_ENV:-}"
 # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
 # exceed that without being a true hang. NCCL watchdog is still 600s.
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
@@ -1067,6 +1072,27 @@ launch_cluster() {
         -e DO_NOT_TRACK=1
         -e "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=$CG_ESTIMATE"
     )
+    # Extra container env for diagnostics (space-separated NAME=VALUE list, e.g. GLM53_EXTRA_ENV="VLLM_DEBUG_WORKSPACE=1").
+    # Applied to both ranks. Names: [A-Z_][A-Z0-9_]*, not launcher-owned (NCCL_*, HF_*, GLM53_*, VLLM_API_KEY, cache dirs,
+    # allocator/arch settings). Values: [A-Za-z0-9_./:@,+=-]* only (no spaces, quotes, globs or shell metacharacters — the
+    # worker command line is built as shell text). Only names are logged.
+    if [ -n "${GLM53_EXTRA_ENV:-}" ]; then
+        local _kv _name _value _names=""
+        set -f
+        for _kv in $GLM53_EXTRA_ENV; do
+            case "$_kv" in *=*) ;; *) set +f; die "GLM53_EXTRA_ENV entries must be NAME=VALUE (got '$_kv')";; esac
+            _name="${_kv%%=*}"; _value="${_kv#*=}"
+            [[ "$_name" =~ ^[A-Z_][A-Z0-9_]*$ ]] || { set +f; die "GLM53_EXTRA_ENV: bad name in '$_kv'"; }
+            [[ "$_value" =~ ^[A-Za-z0-9_./:@,+=-]*$ ]] || { set +f; die "GLM53_EXTRA_ENV: unsafe value for $_name (allowed: A-Z a-z 0-9 _ . / : @ , + = -)"; }
+            case "$_name" in
+                NCCL_*|HF_*|GLM53_*|VLLM_API_KEY|VLLM_CACHE_ROOT|TRITON_CACHE_DIR|TILELANG_CACHE_DIR|TORCH_CUDA_ARCH_LIST|FLASHINFER_*|PYTORCH_CUDA_ALLOC_CONF|LD_PRELOAD|PATH|PYTHONPATH|VLLM_ENGINE_READY_TIMEOUT_S|VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS|VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS|VLLM_PREFIX_CACHE_RETENTION_INTERVAL*)
+                    set +f; die "GLM53_EXTRA_ENV: $_name is launcher-owned; set it through its own knob";;
+            esac
+            nccl_common+=(-e "$_kv"); _names="$_names $_name"
+        done
+        set +f
+        log "extra container env (both ranks):${_names}"
+    fi
     local worker_nccl="" e
     for e in "${nccl_common[@]}"; do
         [ "$e" = "-e" ] && continue
