@@ -487,6 +487,7 @@ that are now documented/enforced:
 | `MAX_MODEL_LEN` | `1000000` | default context. 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool |
 | `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq |
 | `MAX_NUM_BATCHED_TOKENS` | `2048` | prefill chunk (P1 keep). 3584/4096 lost; 8192 oversubscribes GB10 indexer topk |
+| `GLM53_APC_RETENTION_INTERVAL` | `14336` | sparse prefix-cache snapshot retention (tokens, positive multiple of 3584; empty = dense vLLM default). Dense retention lets two >=56K conversations evict each other from the shared block-id pool (each cached 3584-token segment holds ≈1 MLA + 4 mamba snapshot ids plus drafter tail blocks). Receipt `fix1-14336` (tests/validate_apc_retention.py, idle server, 2026-08-31): 45K/56K/66K/80K pairs coexist at 99/98/97/96 % hits, warm re-turn TTFT 0.9-4.0 s, 3-turn 99 %. **Limitation:** a *diverging* prefix (subagent sharing the root's first ~20K) hits only at the interval grid — measured 45 % of a ~29K prompt = 14336 tokens, not the 20K fork; dense retention (empty) restores per-block hits at the cost of the eviction above. Sweep (same ladder): 7168 → 80K pair evicts (0 %) but a diverging ~20K-share subagent hits 67.6 %; 14336 → 80K 96 %, subagent 45 %; 28672 → 80K 96 %, subagent 0 % (no boundary inside the shared 20K) — 14336 is the capacity/branch-hit compromise. Caller export wins over .env; launcher default is dense (unchanged), `.env.example` sets 14336; `0` is rejected (upstream semantics differ from 'off'). Rollback: `GLM53_APC_RETENTION_INTERVAL=` (empty), `./start.sh restart`, confirm the `retention: dense (… both ranks)` launcher line and `docker exec <head\|worker> env`. `SPEC_METHOD=mtp` is not a working rollback path on this .env (boot fails in `profile_cudagraph_memory`) |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (2048) |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
 | `GLM53_BOOT_SHAPE_WARMUP` | `1` | after `/health`, burn DFlash2 BLOCK / sampler / kpool shapes (nonfatal) |
@@ -518,6 +519,8 @@ this Dockerfile instead. After CUDA compile, Python overlay edits
 | `overlay/patch_exl3_ext_aarch64.py` | stub AVX CPU allreduce so the ext builds on GB10 |
 | `overlay/patch_model_overrides.py` | `"exl3"` in ModelConfig overrides |
 | `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0` |
+| `tests/validate_apc_retention.py` | live (idle server): sparse-retention gate — equivalence (temp 0, 400 tok, code + prose) with cold-vs-cold control, 3-turn, pair ladder 45-80K, subagent divergence; exits nonzero on a failed threshold |
+| `tests/test_apc_retention_knob.sh` | host: knob parsing (empty = dense, leading zeros, 0 / non-multiples / junk rejected) |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
 | `start.sh` / `stop.sh` / `download.sh` | 2-node launch; Hub fetch on the head only |
 | `files/chat_template.jinja` | GLM-5.3 MM template (`<|image|>` / `<|video|>`); checkpoint jinja is language-only |
