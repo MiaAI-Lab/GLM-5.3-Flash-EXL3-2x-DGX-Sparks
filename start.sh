@@ -73,11 +73,19 @@ _cli_ablit_direction="${ABLIT_DIRECTION-}"
 _cli_ablit_layers="${ABLIT_LAYERS-}"
 _cli_ablit_alpha="${ABLIT_ALPHA-}"
 _cli_ablit_mtp="${ABLIT_INCLUDE_MTP-}"
+_cli_chunk="${GLM53_MIXED_PREFILL_CHUNK-}"
+_cli_warm="${GLM53_MIXED_PREFILL_WARM_TOKENS-}"
+_cli_wait="${GLM53_MIXED_PREFILL_MAX_WAIT_MS-}"
+_cli_late="${GLM53_MIXED_PREFILL_LATE_CAP-}"
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
 set +a
 [ -n "${_cli_mtp}" ] && MTP_TOKENS="$_cli_mtp"
+[ -n "${_cli_chunk}" ] && GLM53_MIXED_PREFILL_CHUNK="$_cli_chunk"
+[ -n "${_cli_warm}" ] && GLM53_MIXED_PREFILL_WARM_TOKENS="$_cli_warm"
+[ -n "${_cli_wait}" ] && GLM53_MIXED_PREFILL_MAX_WAIT_MS="$_cli_wait"
+[ -n "${_cli_late}" ] && GLM53_MIXED_PREFILL_LATE_CAP="$_cli_late"
 [ -n "${_cli_spec}" ] && SPEC_METHOD="$_cli_spec"
 [ -n "${_cli_eager}" ] && ENFORCE_EAGER="$_cli_eager"
 [ -n "${_cli_fused}" ] && EXL3_FUSED_MOE="$_cli_fused"
@@ -227,6 +235,11 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # Mixed-step prefill policy when a peer is already decoding (issue #6).
 # skip = do not mix; N>0 = cap tokens; 0 = off.
 GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
+# Gate v2: cached follow-ups (uncached remainder <= WARM_TOKENS) bypass `skip`; held
+# cold prefills proceed after MAX_WAIT_MS under LATE_CAP tokens/step (0 = wait forever).
+GLM53_MIXED_PREFILL_WARM_TOKENS="${GLM53_MIXED_PREFILL_WARM_TOKENS:-3584}"
+GLM53_MIXED_PREFILL_MAX_WAIT_MS="${GLM53_MIXED_PREFILL_MAX_WAIT_MS:-1500}"
+GLM53_MIXED_PREFILL_LATE_CAP="${GLM53_MIXED_PREFILL_LATE_CAP:-512}"
 # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
 # exceed that without being a true hang. NCCL watchdog is still 600s.
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
@@ -300,6 +313,23 @@ validate_numeric_config() {
     _glm53_canonical_positive_int MAX_MODEL_LEN "$MAX_MODEL_LEN" 1000000 || return
     _glm53_canonical_positive_int MAX_NUM_SEQS "$MAX_NUM_SEQS" 4096 || return
     _glm53_canonical_positive_int MAX_NUM_BATCHED_TOKENS "$MAX_NUM_BATCHED_TOKENS" 8388608 || return
+    # mixed-prefill gate v2 knobs (self-defaulting so the guard block runs standalone; 0 = feature off for the first two)
+    GLM53_MIXED_PREFILL_WARM_TOKENS="${GLM53_MIXED_PREFILL_WARM_TOKENS:-3584}"
+    GLM53_MIXED_PREFILL_MAX_WAIT_MS="${GLM53_MIXED_PREFILL_MAX_WAIT_MS:-1500}"
+    GLM53_MIXED_PREFILL_LATE_CAP="${GLM53_MIXED_PREFILL_LATE_CAP:-512}"
+    local _k _v
+    local _max
+    for _k in GLM53_MIXED_PREFILL_WARM_TOKENS GLM53_MIXED_PREFILL_MAX_WAIT_MS; do
+        _v="${!_k}"
+        [ "$_k" = GLM53_MIXED_PREFILL_WARM_TOKENS ] && _max=1000000 || _max=600000
+        if ! [[ "$_v" =~ ^[0-9]+$ ]] || [ "${#_v}" -gt 7 ] || [ "$((10#$_v))" -gt "$_max" ]; then
+            echo "$_k must be an integer between 0 and $_max (got: $_v)" >&2; return 2
+        fi
+    done
+    _glm53_canonical_positive_int GLM53_MIXED_PREFILL_LATE_CAP "$GLM53_MIXED_PREFILL_LATE_CAP" 8192 || return
+    if [ "$GLM53_MIXED_PREFILL_LATE_CAP" -lt 64 ]; then
+        echo "GLM53_MIXED_PREFILL_LATE_CAP must be between 64 and 8192 (got: $GLM53_MIXED_PREFILL_LATE_CAP)" >&2; return 2
+    fi
 }
 # GLM53 numeric config guard (end)
 
@@ -1053,6 +1083,9 @@ launch_cluster() {
         -e VLLM_CACHE_ROOT=/root/.cache/vllm
         -e "GLM53_SUPPRESS_STOPS_IN_REASONING=$GLM53_SUPPRESS_STOPS_IN_REASONING"
         -e "GLM53_MIXED_PREFILL_CHUNK=$GLM53_MIXED_PREFILL_CHUNK"
+        -e "GLM53_MIXED_PREFILL_WARM_TOKENS=$GLM53_MIXED_PREFILL_WARM_TOKENS"
+        -e "GLM53_MIXED_PREFILL_MAX_WAIT_MS=$GLM53_MIXED_PREFILL_MAX_WAIT_MS"
+        -e "GLM53_MIXED_PREFILL_LATE_CAP=$GLM53_MIXED_PREFILL_LATE_CAP"
         -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
         -e "TILELANG_CACHE_DIR=$TILELANG_CACHE_DIR"
         -e "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=$VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
