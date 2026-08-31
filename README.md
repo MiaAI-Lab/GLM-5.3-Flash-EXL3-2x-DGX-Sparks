@@ -439,6 +439,8 @@ this Dockerfile instead. After CUDA compile, Python overlay edits
 | `overlay/patch_model_overrides.py` | `"exl3"` in ModelConfig overrides |
 | `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0` |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
+| `kernel_lab/exl3/` | model-agnostic EXL3 K1-K8 oracle, SM121 tactic sweep, and Atlas receipt producer |
+| `docs/exl3-sm121-kernel-lab.md` | kernel ABI, measurements, upstream sources, decisions, and next gate |
 | `start.sh` / `stop.sh` / `download.sh` | 2-node launch; Hub fetch on the head only |
 | `files/chat_template.jinja` | GLM-5.3 MM template (`<|image|>` / `<|video|>`); checkpoint jinja is language-only |
 | `overlay/qwen3_dflash2.py` | DFlash2 draft (grouped conv + candidate selector) |
@@ -455,6 +457,11 @@ this Dockerfile instead. After CUDA compile, Python overlay edits
 
 Image-build runs `EXL3_SELFCHECK_GPU=0`. `./start.sh` runs the GPU self-check
 (`docker run --gpus all`) before shipping unless `SKIP_OVERLAY_VERIFY=1`.
+
+The kernel lab accepts arbitrary `OPERATOR:K:N` shapes or a JSON workload file;
+GLM/Hy4 names are optional historical fixtures, not a supported-model list.
+See [`kernel_lab/README.md`](kernel_lab/README.md) for the portable correctness
+gate and isolated SM121 tuning command.
 
 ## Do not
 

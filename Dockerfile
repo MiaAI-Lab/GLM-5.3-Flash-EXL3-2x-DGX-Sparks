@@ -372,6 +372,9 @@ PY
 COPY overlay/patch_exl3_ext_aarch64.py /opt/glm53/patch_exl3_ext_aarch64.py
 
 ARG EXLLAMAV3_COMMIT=c5d9c657966ffeeaa9353f0cc899f18629da4a13
+ARG RUNTIME_SOURCE_COMMIT=unknown
+ENV EXLLAMAV3_COMMIT=${EXLLAMAV3_COMMIT}
+ENV RUNTIME_SOURCE_COMMIT=${RUNTIME_SOURCE_COMMIT}
 ENV TORCH_CUDA_ARCH_LIST=12.1a
 ENV FLASHINFER_CUDA_ARCH_LIST=12.1a
 ENV MAX_JOBS=8
@@ -426,6 +429,10 @@ RUN set -eux; \
       pip install --no-deps --no-build-isolation --no-cache-dir .; \
     python3 -c "import torch; import exllamav3_ext; assert hasattr(exllamav3_ext, 'exl3_moe'), dir(exllamav3_ext); print('exllamav3_ext', exllamav3_ext.__file__, 'exl3_moe=yes')"; \
     rm -rf /tmp/exllamav3 /root/.cache/pip
+
+# Keep the benchmark Python outside the CUDA build layer. Execute it from
+# /opt/glm53 so the local kernel_lab package is importable.
+COPY kernel_lab /opt/glm53/kernel_lab
 
 # Keep this AFTER the CUDA compile layer so Python-only hook edits do not
 # rebuild exllamav3_ext. Exl3Config.override_quantization_method requires
