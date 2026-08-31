@@ -73,6 +73,10 @@ _cli_ablit_direction="${ABLIT_DIRECTION-}"
 _cli_ablit_layers="${ABLIT_LAYERS-}"
 _cli_ablit_alpha="${ABLIT_ALPHA-}"
 _cli_ablit_mtp="${ABLIT_INCLUDE_MTP-}"
+# Setness-aware: an explicitly empty caller value is an operator error and
+# must reach validate_numeric_config, not be swallowed by a .env value.
+_cli_indexer_workspace_set="${GLM53_INDEXER_WORKSPACE+1}"
+_cli_indexer_workspace="${GLM53_INDEXER_WORKSPACE-}"
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
@@ -94,6 +98,7 @@ set +a
 [ -n "${_cli_ablit_layers}" ] && ABLIT_LAYERS="$_cli_ablit_layers"
 [ -n "${_cli_ablit_alpha}" ] && ABLIT_ALPHA="$_cli_ablit_alpha"
 [ -n "${_cli_ablit_mtp}" ] && ABLIT_INCLUDE_MTP="$_cli_ablit_mtp"
+[ -n "${_cli_indexer_workspace_set}" ] && GLM53_INDEXER_WORKSPACE="$_cli_indexer_workspace"
 
 # ----------------------------- configuration -------------------------------
 MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"
@@ -227,6 +232,12 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # Mixed-step prefill policy when a peer is already decoding (issue #6).
 # skip = do not mix; N>0 = cap tokens; 0 = off.
 GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
+# Sparse-indexer prefill gather workspace (overlay/patch_indexer_workspace.py).
+# stock = max_model_len * 40 entries (5036.40 MB locked at 1M, measured);
+# rightsize = the legal per-step maximum, ~+26% KV. Default applies only
+# when UNSET: an explicitly empty value is an operator error and
+# validate_numeric_config rejects it rather than guessing a serving mode.
+GLM53_INDEXER_WORKSPACE="${GLM53_INDEXER_WORKSPACE-stock}"
 # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
 # exceed that without being a true hang. NCCL watchdog is still 600s.
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
@@ -291,6 +302,24 @@ _glm53_canonical_positive_int() {
     export "$name"
 }
 
+# Enum knobs are exactly one of a fixed set. Not "non-empty means on": a
+# typo'd knob must not silently pick a serving mode. GLM53_INDEXER_WORKSPACE
+# sizes the sparse-indexer prefill workspace, and the patched
+# get_max_prefill_buffer_size itself raises on anything but stock/rightsize
+# (overlay/patch_indexer_workspace.py, _glm53_workspace_mode), so catching it
+# here turns a container boot failure into a launcher error. The match is
+# literal on both sides -- the "-stock" default applies only to an UNSET var,
+# so "", " rightsize " and "RIGHTSIZE" all fail here and would fail there.
+_glm53_validate_enum() {
+    local name="$1" value="$2" allowed
+    shift 2
+    for allowed in "$@"; do
+        [ "$value" = "$allowed" ] && return 0
+    done
+    echo "$name must be one of: $* (got: $value)" >&2
+    return 2
+}
+
 validate_numeric_config() {
     if ! [[ "$GPU_MEM_UTIL" =~ ^(0([.][0-9]+)?|[.][0-9]+|1([.]0+)?)$ ]] \
        || ! awk -v u="$GPU_MEM_UTIL" 'BEGIN { exit !(u > 0 && u <= 1) }'; then
@@ -300,6 +329,8 @@ validate_numeric_config() {
     _glm53_canonical_positive_int MAX_MODEL_LEN "$MAX_MODEL_LEN" 1000000 || return
     _glm53_canonical_positive_int MAX_NUM_SEQS "$MAX_NUM_SEQS" 4096 || return
     _glm53_canonical_positive_int MAX_NUM_BATCHED_TOKENS "$MAX_NUM_BATCHED_TOKENS" 8388608 || return
+    _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-stock}" \
+        stock rightsize || return
 }
 # GLM53 numeric config guard (end)
 
@@ -902,6 +933,9 @@ fi
 if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
     python3 /opt/glm53/patch_kpool_tail_slotmap.py
 fi
+if [ -f /opt/glm53/patch_indexer_workspace.py ]; then
+    python3 /opt/glm53/patch_indexer_workspace.py
+fi
 if [ -f /opt/glm53/patch_ablit.py ]; then
     python3 /opt/glm53/patch_ablit.py
 fi
@@ -992,6 +1026,9 @@ fi
 if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
     python3 /opt/glm53/patch_kpool_tail_slotmap.py
 fi
+if [ -f /opt/glm53/patch_indexer_workspace.py ]; then
+    python3 /opt/glm53/patch_indexer_workspace.py
+fi
 if [ -f /opt/glm53/patch_ablit.py ]; then
     python3 /opt/glm53/patch_ablit.py
 fi
@@ -1053,6 +1090,7 @@ launch_cluster() {
         -e VLLM_CACHE_ROOT=/root/.cache/vllm
         -e "GLM53_SUPPRESS_STOPS_IN_REASONING=$GLM53_SUPPRESS_STOPS_IN_REASONING"
         -e "GLM53_MIXED_PREFILL_CHUNK=$GLM53_MIXED_PREFILL_CHUNK"
+        -e "GLM53_INDEXER_WORKSPACE=$GLM53_INDEXER_WORKSPACE"
         -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
         -e "TILELANG_CACHE_DIR=$TILELANG_CACHE_DIR"
         -e "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=$VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"

@@ -64,6 +64,41 @@ def test_decimal_normalization() -> None:
     assert result.stdout.strip() == ".87|1000000|4|1024"
 
 
+def validate_enum(value: str | None) -> subprocess.CompletedProcess[str]:
+    """Run validate_numeric_config with only GLM53_INDEXER_WORKSPACE varying."""
+    script = (
+        guard_source()
+        + '\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4; '
+        + 'MAX_NUM_BATCHED_TOKENS=1024\n'
+        + 'validate_numeric_config || exit $?\n'
+        + 'printf "%s\\n" "${GLM53_INDEXER_WORKSPACE-unset}"\n'
+    )
+    env = {k: v for k, v in os.environ.items() if k != "GLM53_INDEXER_WORKSPACE"}
+    env["LC_ALL"] = "C"
+    if value is not None:
+        env["GLM53_INDEXER_WORKSPACE"] = value
+    return subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, env=env
+    )
+
+
+def test_indexer_workspace_enum() -> None:
+    """Strict enum: default on UNSET only, then a literal match.
+
+    ``overlay/patch_indexer_workspace.py``'s ``_glm53_workspace_mode`` applies
+    the same rule inside the container, so an empty or case-variant value must
+    fail here rather than change meaning across the boundary.
+    """
+    for good in (None, "stock", "rightsize"):
+        result = validate_enum(good)
+        assert result.returncode == 0, (good, result.stderr)
+    for bad in ("", " ", "Stock", "RIGHTSIZE", " rightsize ", "1", "on", "true",
+                "rightsize\n"):
+        result = validate_enum(bad)
+        assert result.returncode == 2, (bad, result.returncode, result.stdout)
+        assert "GLM53_INDEXER_WORKSPACE must be one of" in result.stderr, bad
+
+
 def test_restart_validates_before_stop() -> None:
     source = START.read_text()
     main = source.index("main() {")
@@ -75,5 +110,6 @@ def test_restart_validates_before_stop() -> None:
 if __name__ == "__main__":
     test_matrix()
     test_decimal_normalization()
+    test_indexer_workspace_enum()
     test_restart_validates_before_stop()
     print("numeric config tests: PASS")
