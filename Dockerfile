@@ -445,6 +445,8 @@ COPY tests/test_suppress_stops.py /opt/glm53/test_suppress_stops.py
 COPY overlay/patch_scheduler_decode_floor.py /opt/glm53/patch_scheduler_decode_floor.py
 COPY tests/test_scheduler_decode_floor.py /opt/glm53/test_scheduler_decode_floor.py
 COPY overlay/patch_hybrid_prefix_hit.py /opt/glm53/patch_hybrid_prefix_hit.py
+COPY overlay/patch_apc_per_group_retention.py /opt/glm53/patch_apc_per_group_retention.py
+COPY tests/test_apc_per_group_retention.py /opt/glm53/test_apc_per_group_retention.py
 COPY tests/test_hybrid_prefix_hit.py /opt/glm53/test_hybrid_prefix_hit.py
 COPY overlay/patch_xgrammar_termination.py /opt/glm53/patch_xgrammar_termination.py
 COPY tests/test_xgrammar_termination.py /opt/glm53/test_xgrammar_termination.py
@@ -461,6 +463,8 @@ RUN python3 /opt/glm53/patch_glm5_drafter_group.py
 RUN python3 /opt/glm53/patch_suppress_stops_in_reasoning.py
 RUN python3 /opt/glm53/patch_scheduler_decode_floor.py
 RUN python3 /opt/glm53/patch_hybrid_prefix_hit.py
+RUN GLM53_KV_COORDINATOR_PY_SRC=/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_coordinator.py GLM53_KV_COORDINATOR_PY_PRISTINE=/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_coordinator.py python3 /opt/glm53/test_apc_per_group_retention.py
+RUN python3 /opt/glm53/patch_apc_per_group_retention.py
 RUN python3 /opt/glm53/patch_xgrammar_termination.py
 RUN python3 /opt/glm53/patch_kpool_tail_slotmap.py
 RUN python3 /opt/glm53/patch_ablit.py
