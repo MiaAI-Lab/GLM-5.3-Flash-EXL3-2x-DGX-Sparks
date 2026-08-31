@@ -329,6 +329,16 @@ is never written (every file lands `..._r0`) and its restores return stale bytes
 — confidently wrong output, with healthy-looking `kv_offload` counters. Backing
 the CPU *primary* tier per node avoids that by construction. Details in #57.
 
+⚠️ **Offload rejects `expandable_segments:True` — do not simply switch it off.**
+Running without expandable segments is fatal on GB10: the caching allocator
+retains reserved blocks after a large prefill and never returns them. A
+337k-token request took host available memory 10358 MB → 1352 MB, did not
+recover once the request finished, and wedged both Sparks. Take the guard's
+documented exemption — keep `expandable_segments:True` and add
+`--enable-cumem-allocator`, which puts the KV pool on stable physical pages
+(what the guard actually protects) while the rest of the engine keeps expandable
+segments. The same request then dipped ~560 MB and completed in 397 s.
+
 ⚠️ Do **not** set `PYTHONHASHSEED` with offload on (the tier docs suggest it for
 cross-process key stability): it invalidates the Triton JIT cache keys and the
 mid-collective recompile kills the worker rank.
