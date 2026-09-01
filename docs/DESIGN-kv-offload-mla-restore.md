@@ -181,8 +181,10 @@ injected sources pre-stop, and keeps `offload_prompt_only: false` untouched.
 Advisory on the build plan BEFORE coding: CODEX-OFFLOAD2-PLAN.md
 (gpt-5.6-luna, DO-NOT-PROCEED, 5 BLOCKER + 10 MAJOR → every finding adopted
 or rebutted in writing; the build implements the revised design). Adversarial
-review of the final diff: CODEX-OFFLOAD2-REVIEW.md (in
-cache-scheduling-2026-08-31/).
+review of the final diff: CODEX-OFFLOAD2-REVIEW.md (DO-NOT-SHIP, 1 BLOCKER +
+8 MAJOR + 2 MINOR → all adopted or rebutted; fixes in the review-fixes
+commit; confirm pass appended there). Both docs live in
+cache-scheduling-2026-08-31/.
 
 ## Receipts
 
