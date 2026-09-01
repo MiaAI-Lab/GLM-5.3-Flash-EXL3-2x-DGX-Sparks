@@ -183,6 +183,7 @@ DRAFTER_PATCH_HOST="${DRAFTER_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm5_drafter
 APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py}"
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
+CODEX_PATCH_HOST="${CODEX_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_codex_compat.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
@@ -956,6 +957,9 @@ fi
 if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
     python3 /opt/glm53/patch_kpool_tail_slotmap.py
 fi
+if [ -f /opt/glm53/patch_codex_compat.py ]; then
+    python3 /opt/glm53/patch_codex_compat.py
+fi
 if [ -f /opt/glm53/patch_ablit.py ]; then
     python3 /opt/glm53/patch_ablit.py
 fi
@@ -1046,6 +1050,9 @@ fi
 if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
     python3 /opt/glm53/patch_kpool_tail_slotmap.py
 fi
+if [ -f /opt/glm53/patch_codex_compat.py ]; then
+    python3 /opt/glm53/patch_codex_compat.py
+fi
 if [ -f /opt/glm53/patch_ablit.py ]; then
     python3 /opt/glm53/patch_ablit.py
 fi
@@ -1084,6 +1091,7 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
+    scp -q -o BatchMode=yes "$CODEX_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_codex_compat.py"
 
     worker_ssh "rm -rf /tmp/glm53-ablit"
     scp -q -r -o BatchMode=yes "$SCRIPT_DIR/ablit" "${WORKER_SSH}:/tmp/glm53-ablit"
@@ -1179,6 +1187,7 @@ launch_cluster() {
         -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
+        -v '$CODEX_PATCH_HOST:/opt/glm53/patch_codex_compat.py:ro' \
         -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
         -v '/tmp/glm53-ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro' \
         -v '/tmp/patch_ablit.py:/opt/glm53/patch_ablit.py:ro' \
@@ -1210,6 +1219,7 @@ launch_cluster() {
         -v "$APC_PATCH_HOST:/opt/glm53/patch_hybrid_prefix_hit.py:ro" \
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
+        -v "$CODEX_PATCH_HOST:/opt/glm53/patch_codex_compat.py:ro" \
         -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
         -v "$SCRIPT_DIR/overlay/ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro" \
         -v "$SCRIPT_DIR/overlay/patch_ablit.py:/opt/glm53/patch_ablit.py:ro" \

@@ -453,7 +453,9 @@ COPY tests/test_hybrid_prefix_hit.py /opt/glm53/test_hybrid_prefix_hit.py
 COPY overlay/patch_xgrammar_termination.py /opt/glm53/patch_xgrammar_termination.py
 COPY tests/test_xgrammar_termination.py /opt/glm53/test_xgrammar_termination.py
 COPY overlay/patch_kpool_tail_slotmap.py /opt/glm53/patch_kpool_tail_slotmap.py
+COPY overlay/patch_codex_compat.py /opt/glm53/patch_codex_compat.py
 COPY tests/test_kpool_tail_slotmap.py /opt/glm53/test_kpool_tail_slotmap.py
+COPY tests/test_codex_compat.py /opt/glm53/test_codex_compat.py
 COPY overlay/ablit_runtime.py /opt/glm53/ablit_runtime.py
 COPY overlay/patch_ablit.py /opt/glm53/patch_ablit.py
 COPY tests/test_ablit.py /opt/glm53/test_ablit.py
@@ -467,6 +469,7 @@ RUN python3 /opt/glm53/patch_scheduler_decode_floor.py
 RUN python3 /opt/glm53/patch_hybrid_prefix_hit.py
 RUN python3 /opt/glm53/patch_xgrammar_termination.py
 RUN python3 /opt/glm53/patch_kpool_tail_slotmap.py
+RUN python3 /opt/glm53/patch_codex_compat.py
 RUN python3 /opt/glm53/patch_ablit.py
 
 RUN EXL3_SELFCHECK_GPU=0 python3 /opt/glm53/test_exl3_overlay.py \
@@ -475,6 +478,7 @@ RUN EXL3_SELFCHECK_GPU=0 python3 /opt/glm53/test_exl3_overlay.py \
     && python3 /opt/glm53/test_hybrid_prefix_hit.py \
     && python3 /opt/glm53/test_xgrammar_termination.py \
     && python3 /opt/glm53/test_kpool_tail_slotmap.py \
+    && python3 /opt/glm53/test_codex_compat.py \
     && python3 /opt/glm53/test_ablit.py
 
 # Baked by start.sh --build-arg so a git pull that changes overlay/Dockerfile
