@@ -608,6 +608,32 @@ def test_writer() -> None:
             w7._namespace_hash != w8._namespace_hash,
             "C22 num_speculative_tokens forks the namespace hash",
         )
+        # Policy/diagnostic fields must NOT disable a later boot (fenced-only
+        # comparison): same config, different keep_boundaries reuses the store.
+        os.environ["GLM53_KV_OFFLOAD_KEEP_BOUNDARIES"] = "5"
+        cw7b, _, _ = _mini_env(num_spec=7)
+        w7b = ns["Glm53LocalStoreWriter"](cw7b, logger5)
+        check(
+            w7b._disabled_reason is None
+            and w7b._namespace_hash == w7._namespace_hash,
+            "C22b retention-K change neither forks nor disables the namespace",
+        )
+        os.environ["GLM53_KV_OFFLOAD_KEEP_BOUNDARIES"] = "2"
+        # A corrupted namespace record fails closed.
+        ns_files = [
+            f
+            for f in Path(os.environ["GLM53_KV_OFFLOAD_DIR"]).glob("glm53kv_*.json")
+            if w7._namespace_hash in f.name
+        ]
+        check(len(ns_files) == 1, "C22c one namespace record per namespace")
+        ns_files[0].write_text("{ truncated")
+        cw7c, _, _ = _mini_env(num_spec=7)
+        w7c = ns["Glm53LocalStoreWriter"](cw7c, logger5)
+        check(
+            w7c._disabled_reason is not None
+            and "unreadable" in w7c._disabled_reason,
+            "C22d corrupted namespace record disables the writer (fail closed)",
+        )
 
     # Capture helpers through the connector-worker seam (both call sites).
     logger6 = _TestLogger()
@@ -731,12 +757,18 @@ def test_gc_tool() -> None:
             out == 1,
             "D8 orphan reported with ZERO manifests present (header-based)",
         )
-        # Stale temp: any *.tmp.* is reported and swept.
+        # Stale temps: payload temps under the base AND namespace-record
+        # temps beside it (the store root) are reported and swept.
         t = base / _hash(3)[:3] / f"{_hash(3)[3:5]}_g4" / "x.bin.tmp.r0.1.2"
         t.write_bytes(b"partial")
-        check(gc_tool.main([str(base)]) == 1, "D9 stale temp flagged by dry-run")
+        ns_t = base.parent / "glm53kv_test_model_deadbeef.json.tmp.r0.1"
+        ns_t.write_text("{}")
+        check(gc_tool.main([str(base)]) == 1, "D9 stale temps flagged by dry-run")
         gc_tool.main([str(base), "--sweep"])
-        check(not t.exists(), "D10 --sweep removes stale temps")
+        check(
+            not t.exists() and not ns_t.exists(),
+            "D10 --sweep removes payload AND namespace temps",
+        )
 
     # Forked chains: a shared divergence-point boundary survives while ANY
     # branch still keeps it (writer rule mirrored in the GC tool).

@@ -44,10 +44,16 @@ from patch_kv_offload_store_local import read_chunk_header  # noqa: E402
 
 
 def find_stale_temps(base: Path):
-    """Yield every leftover ``*.tmp.*`` under the base (payloads, manifests,
-    namespace records). Any temp is stale by definition: publication is
-    tmp+rename, so a temp only survives a crash mid-write."""
+    """Yield every leftover ``*.tmp.*`` under the base (payloads, manifests)
+    plus namespace-record temps, which live BESIDE the per-rank base in the
+    store root (non-recursive). Any temp is stale by definition: publication
+    is tmp+rename, so a temp only survives a crash mid-write."""
     yield from base.rglob("*.tmp.*")
+    root = base.parent
+    if root.is_dir():
+        for p in root.glob("glm53kv_*.json.tmp.*"):
+            if p.is_file():
+                yield p
 
 
 def find_chunk_files(base: Path):

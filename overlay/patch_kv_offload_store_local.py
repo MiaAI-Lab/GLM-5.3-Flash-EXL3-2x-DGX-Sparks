@@ -539,13 +539,20 @@ class Glm53LocalStoreWriter:
         self._namespace_hash = _glm53_hashlib.sha256(
             canonical.encode("utf-8")
         ).hexdigest()[:12]
-        # keep_boundaries is retention POLICY, not byte semantics: it rides
-        # the on-disk namespace record for operators but must NOT fence the
-        # namespace hash (changing K must not orphan the whole store).
-        namespace_fields["keep_boundaries"] = self._keep_boundaries
-        namespace_fields["rank_source"] = rank_source
-        canonical = _glm53_json.dumps(
-            namespace_fields, sort_keys=True, separators=(",", ":")
+        # The on-disk record separates the FENCED fields (exact-compared and
+        # hashed) from informational ones: retention K and rank provenance are
+        # policy/diagnostics, not byte semantics -- changing them must neither
+        # fork the namespace nor disable the writer on the next boot.
+        record = _glm53_json.dumps(
+            {
+                "fenced": namespace_fields,
+                "info": {
+                    "keep_boundaries": self._keep_boundaries,
+                    "rank_source": rank_source,
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
         safe_model = spec.config.model.name.replace("/", "_")
         self._base = (
@@ -554,12 +561,21 @@ class Glm53LocalStoreWriter:
         _os.makedirs(self._base, exist_ok=True)
         ns_path = f"{root}/glm53kv_{safe_model}_{self._namespace_hash}.json"
         if _os.path.exists(ns_path):
-            with open(ns_path, encoding="utf-8") as f:
-                existing = f.read()
-            if existing != canonical:
-                # Same 12-hex namespace, different canonical record: either a
-                # truncated write or a hash collision -- both disqualify the
-                # store (fail closed rather than mixing semantics).
+            # Compare the FENCED portion only (info fields may legitimately
+            # differ across boots). An unparseable or mismatched record is a
+            # truncated write or hash collision: fail closed.
+            try:
+                with open(ns_path, encoding="utf-8") as f:
+                    existing = _glm53_json.load(f)
+                existing_fenced = _glm53_json.dumps(
+                    existing["fenced"], sort_keys=True, separators=(",", ":")
+                )
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise ValueError(
+                    f"namespace record unreadable at {ns_path} ({exc}) -- "
+                    "refusing to write into an unverifiable store"
+                ) from exc
+            if existing_fenced != canonical:
                 raise ValueError(
                     f"namespace record mismatch at {ns_path} -- refusing to "
                     "write into a store whose recorded config differs"
@@ -567,7 +583,7 @@ class Glm53LocalStoreWriter:
         else:
             tmp = ns_path + f".tmp.r{rank}.{_os.getpid()}"
             with open(tmp, "w", encoding="utf-8") as f:
-                f.write(canonical)
+                f.write(record)
                 f.flush()
                 _os.fsync(f.fileno())
             _os.replace(tmp, ns_path)
