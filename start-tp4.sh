@@ -31,9 +31,8 @@
 #   ./start-tp4.sh logs            follow head
 #   ./start-tp4.sh logs 1|2|3      follow that worker rank
 #
-# Extra .env knobs (start.sh ignores unknown vars):
-#   WORKER2_IP WORKER3_IP WORKER2_USER WORKER3_USER
-#   WORKER2_CX7_IF WORKER2_CX7_IB WORKER2_GID  (and WORKER3_*)
+# Extra knobs live in .env.tp4 (copied from .env.tp4.example). start.sh
+# never reads that file. Shared tokens/IPs can stay in .env.
 # ============================================================================
 set -euo pipefail
 
@@ -45,7 +44,15 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
         exit 1
     }
     cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
-    printf '\033[1;36m[glm53-exl3-tp4]\033[0m wrote .env from .env.example — edit HEAD_IP / WORKER_IP / WORKER2_IP / WORKER3_IP\n'
+    printf '\033[1;36m[glm53-exl3-tp4]\033[0m wrote .env from .env.example\n'
+fi
+if [ ! -f "$SCRIPT_DIR/.env.tp4" ]; then
+    [ -f "$SCRIPT_DIR/.env.tp4.example" ] || {
+        echo "ERROR: missing .env.tp4.example" >&2
+        exit 1
+    }
+    cp "$SCRIPT_DIR/.env.tp4.example" "$SCRIPT_DIR/.env.tp4"
+    printf '\033[1;36m[glm53-exl3-tp4]\033[0m wrote .env.tp4 from .env.tp4.example — edit WORKER2_IP / WORKER3_IP / CX7 pins\n'
 fi
 # Caller exports (MTP_TOKENS=2 ./start.sh restart) must win over .env.
 _cli_mtp="${MTP_TOKENS-}"
@@ -77,6 +84,9 @@ _cli_spinwait_ms="${GLM53_SPINWAIT_MS-}"
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
+# TP=4 overlay wins over the 2× knobs in .env.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/.env.tp4"
 set +a
 [ -n "${_cli_mtp}" ] && MTP_TOKENS="$_cli_mtp"
 [ -n "${_cli_spec}" ] && SPEC_METHOD="$_cli_spec"
