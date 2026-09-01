@@ -21,8 +21,10 @@
 #                   worker is missing that digest, try docker pull there,
 #                   then fall back to docker save --platform | ssh docker
 #                   load (issue #8). SKIP_PULL=1 keeps a local copy.
-#                   BUILD=1 rebuilds from this repo instead. Local-only
-#                   tags (no slash) skip pull. SKIP_SHIP=1 never copies.
+#                   BUILD=1 rebuilds from this repo. A git pull that changes
+#                   Dockerfile/overlay also rebuilds once (recipe stamp);
+#                   SKIP_BUILD=1 keeps GHCR. Local-only tags (no slash) skip
+#                   pull. SKIP_SHIP=1 never copies.
 #   3. download   — EXL3/TR3 (+ DFlash2) into the local HF cache if missing
 #   4. sync       — rsync that cache to the worker (each rank loads local disk)
 #   5. launch     — worker --headless, then head + `vllm serve` (both
@@ -41,7 +43,7 @@
 #   ./start.sh logs worker        follow worker container logs
 #
 # Node IPs live in .env (copied from .env.example on first run).
-# Handy overrides: SKIP_DOWNLOAD=1 SKIP_SYNC=1 SKIP_PULL=1 SKIP_SHIP=1 PULL=1 BUILD=1 TAIL=1 HF_TOKEN=...
+# Handy overrides: SKIP_DOWNLOAD=1 SKIP_SYNC=1 SKIP_PULL=1 SKIP_SHIP=1 SKIP_BUILD=1 PULL=1 BUILD=1 TAIL=1 HF_TOKEN=...
 # ============================================================================
 set -euo pipefail
 
@@ -170,8 +172,8 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-1000000}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.87}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
 # 8192 chunk × long history oversubscribes GB10 persistent_topk smem (300k crash).
-# P1 ladder 2026-08-29: 2048 keep; 3584/4096 revert (fat LinearEXL3 tax).
-MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-2048}"
+# E2 one-shot 2026-09-01: 7168 keep (100k ~1148 / 300k ~1107); 2048/3548 similar or slower.
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-7168}"
 CHAT_TEMPLATE_HOST="${CHAT_TEMPLATE_HOST:-$SCRIPT_DIR/files/chat_template.jinja}"
 CHAT_TEMPLATE="${CHAT_TEMPLATE:-/opt/glm53/chat_template.jinja}"
 VIDEO_PATCH_HOST="${VIDEO_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm_video_placeholders.py}"
@@ -215,12 +217,13 @@ EXL3_MOE_ROW_TILE="${EXL3_MOE_ROW_TILE:-0}"
 # Fused exl3_moe temp rows/expert. 1024 was slower than 128+fallback (P2b).
 EXL3_TEMP_ROWS_FUSED="${EXL3_TEMP_ROWS_FUSED:-128}"
 # Sorted routing tier; higher tiers imply it even when this is 0.
-# All three flags default off; set every flag to 0 for instant rollback.
 EXL3_FAT_SORTED="${EXL3_FAT_SORTED:-0}"
 # E1 batched tier: persistent scratch + combined gate/up; implies SORTED=1.
 EXL3_FAT_BATCHED="${EXL3_FAT_BATCHED:-0}"
-# E2 direct trellis kernel; implies BATCHED=1 and SORTED=1.
-EXL3_FAT_KERNEL="${EXL3_FAT_KERNEL:-0}"
+# E2 direct trellis kernel (default on). Implies BATCHED=1 and SORTED=1.
+# Needs the patched extension — start.sh rebuilds when the recipe stamp drifts.
+# Set all three flags to 0 for the legacy fat-expert path.
+EXL3_FAT_KERNEL="${EXL3_FAT_KERNEL:-1}"
 
 # --- abliteration (ablit/) --------------------------------------------------
 # Load-time o_proj orthogonalization (overlay/ablit_runtime.py). Published
@@ -527,9 +530,35 @@ image_platform() {
     printf '%s' "${p:-linux/arm64}"
 }
 
+# Hash of Dockerfile + overlay/tests/files/ablit inputs that docker COPY.
+# Compared to LABEL glm53.recipe.stamp so a git pull rebuilds once.
+overlay_recipe_hash() {
+    {
+        printf '%s\n' "$SCRIPT_DIR/Dockerfile"
+        find "$SCRIPT_DIR/overlay" "$SCRIPT_DIR/files" "$SCRIPT_DIR/tests" \
+            "$SCRIPT_DIR/ablit" \
+            -type f \
+            ! -path '*/__pycache__/*' \
+            ! -path '*/ablit/transplant/*' \
+            ! -name '*.pyc' \
+            2>/dev/null
+    } | LC_ALL=C sort | xargs -d '\n' -r sha256sum | sha256sum | awk '{print $1}'
+}
+
+image_recipe_stamp() {
+    local stamp
+    stamp="$(docker image inspect -f '{{ index .Config.Labels "glm53.recipe.stamp" }}' "$IMAGE" 2>/dev/null || true)"
+    case "$stamp" in
+        ""|"<no value>"|"<nil>") printf '' ;;
+        *) printf '%s' "$stamp" ;;
+    esac
+}
+
 build_image() {
-    log "building ${IMAGE} from Dockerfile (log: $LOGDIR/build-sm121.log) ..."
-    docker build -t "$IMAGE" "$SCRIPT_DIR" \
+    local stamp
+    stamp="$(overlay_recipe_hash)"
+    log "building ${IMAGE} from Dockerfile stamp=${stamp:0:12} (log: $LOGDIR/build-sm121.log) ..."
+    docker build --build-arg "GLM53_RECIPE_STAMP=$stamp" -t "$IMAGE" "$SCRIPT_DIR" \
         >"$LOGDIR/build-sm121.log" 2>&1 \
         || { tail -n 40 "$LOGDIR/build-sm121.log" >&2; die "docker build of $IMAGE failed"; }
 }
@@ -541,7 +570,7 @@ pull_image() {
     die "docker pull ${IMAGE} failed.
   :exl3 is a public GHCR package — check network / disk.
   If you still get 401/403: echo YOUR_PAT | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
-  Or set GHCR_TOKEN + GHCR_USER in .env. Overlay rebuild: BUILD=1 ./start.sh"
+  Overlay rebuild: BUILD=1 ./start.sh. Recipe-stamp drift also rebuilds; SKIP_BUILD=1 keeps GHCR."
 }
 
 pull_image_on_worker() {
@@ -583,6 +612,18 @@ ensure_image() {
     fi
     local skip_pull="${SKIP_PULL:-0}"
     [ "${PULL:-0}" = "1" ] && skip_pull=0
+    local wanted_stamp have_stamp
+    wanted_stamp="$(overlay_recipe_hash)"
+    have_stamp=""
+    [ "$head_ok" = "1" ] && have_stamp="$(image_recipe_stamp)"
+    if [ "${BUILD:-0}" != "1" ] && [ "${SKIP_BUILD:-0}" != "1" ]; then
+        if [ "$head_ok" = "0" ] || [ "$have_stamp" != "$wanted_stamp" ]; then
+            log "image recipe ${have_stamp:-none} != repo ${wanted_stamp:0:12} — rebuilding (SKIP_BUILD=1 keeps GHCR)"
+            BUILD=1
+        fi
+    elif [ "${SKIP_BUILD:-0}" = "1" ] && [ "$have_stamp" != "$wanted_stamp" ]; then
+        warn "SKIP_BUILD=1 — not rebuilding; stamp ${have_stamp:-none} != repo ${wanted_stamp:0:12}"
+    fi
     if [ "${BUILD:-0}" = "1" ]; then
         build_image
         head_key="$(local_image_key)"
