@@ -1222,6 +1222,19 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/ablit_runtime.py" "${WORKER_SSH}:/tmp/glm53-ablit_runtime.py"
     scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/patch_ablit.py" "${WORKER_SSH}:/tmp/patch_ablit.py"
 
+    # OffloadingConnector (GLM53_KV_OFFLOAD=1) is refused by vLLM when
+    # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True: the VMM allocator can
+    # remap KV-cache virtual addresses onto different physical pages under
+    # pinned/registered KV memory (VllmConfig validation refuses the pair at
+    # boot; found live in the #99 receipt window — the check is unreachable
+    # from host stubs). knob=1 boots therefore DROP the env on both ranks
+    # (torch default allocator); knob=0 boots keep the stock entry, container
+    # env byte-identical to a build without the tier.
+    local -a alloc_conf_env=(-e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True)
+    if [ "${GLM53_KV_OFFLOAD-0}" = 1 ]; then
+        alloc_conf_env=()
+        log "kv-offload: PYTORCH_CUDA_ALLOC_CONF (expandable_segments:True) dropped on both ranks (OffloadingConnector incompatibility, vllm config validation)"
+    fi
     local -a nccl_common=(
         -e NCCL_IB_DISABLE=0
         -e NCCL_IB_ROCE_VERSION_NUM=2
@@ -1252,7 +1265,7 @@ launch_cluster() {
         -e "TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST"
         -e "FLASHINFER_CUDA_ARCH_LIST=$FLASHINFER_CUDA_ARCH_LIST"
         -e FLASHINFER_DISABLE_VERSION_CHECK=1
-        -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+        ${alloc_conf_env[@]+"${alloc_conf_env[@]}"}
         -e "VLLM_ENGINE_READY_TIMEOUT_S=$READY_TIMEOUT"
         # py-cpuinfo JSON-parses empty output on Grace/aarch64; the usage
         # thread then dumps JSONDecodeError. Stats are off on this private kit.

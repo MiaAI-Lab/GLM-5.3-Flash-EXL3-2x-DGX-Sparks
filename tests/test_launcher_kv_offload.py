@@ -348,6 +348,12 @@ def part_c(h: Harness) -> None:
         not mounts and not worker_mounts,
         "C3 knob=0: no store mount on either rank",
     )
+    check(
+        henv.get("PYTORCH_CUDA_ALLOC_CONF") == "expandable_segments:True"
+        and wenv.get("PYTORCH_CUDA_ALLOC_CONF") == "expandable_segments:True",
+        "C3b knob=0 keeps the stock PYTORCH_CUDA_ALLOC_CONF on BOTH ranks "
+        "(byte-identical container env)",
+    )
     mkdirs = [c for c in calls if c[0] == "ssh" and "glm53-kv-offload" in c[-1] and "mkdir" in c[-1]]
     check(not mkdirs, "C4 knob=0: no store mkdir on the worker")
 
@@ -377,6 +383,16 @@ def part_d(h: Harness) -> None:
             f"D1 {k}={v!r} present and identical on BOTH ranks "
             f"(head={henv.get(k)!r} worker={wenv.get(k)!r})",
         )
+    # vLLM refuses OffloadingConnector + expandable_segments:True (VMM remap
+    # under pinned KV memory; live receipt-window finding): knob=1 must DROP
+    # the env on both ranks; knob=0 keeps the stock value (see part_c).
+    check(
+        "PYTORCH_CUDA_ALLOC_CONF" not in henv
+        and "PYTORCH_CUDA_ALLOC_CONF" not in wenv,
+        f"D1b knob=1 drops PYTORCH_CUDA_ALLOC_CONF on BOTH ranks "
+        f"(head={henv.get('PYTORCH_CUDA_ALLOC_CONF')!r} "
+        f"worker={wenv.get('PYTORCH_CUDA_ALLOC_CONF')!r})",
+    )
     head_mount = f"{store_dir}:/data/glm53-kv-offload"
     check(
         any(head_mount == t for t in head_run),
