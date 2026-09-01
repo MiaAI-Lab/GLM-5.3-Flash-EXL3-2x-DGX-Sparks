@@ -55,45 +55,35 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
     cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
     printf '\033[1;36m[glm53-exl3]\033[0m wrote .env from .env.example — edit HEAD_IP / WORKER_IP if needed\n'
 fi
-# Caller exports (MTP_TOKENS=2 ./start.sh restart) must win over .env.
-_cli_mtp="${MTP_TOKENS-}"
-_cli_spec="${SPEC_METHOD-}"
-_cli_eager="${ENFORCE_EAGER-}"
-_cli_fused="${EXL3_FUSED_MOE-}"
-_cli_row_tile="${EXL3_MOE_ROW_TILE-}"
-_cli_temp_rows="${EXL3_TEMP_ROWS_FUSED-}"
-_cli_mnbt="${MAX_NUM_BATCHED_TOKENS-}"
-_cli_image="${IMAGE-}"
-_cli_util="${GPU_MEM_UTIL-}"
-_cli_lm="${LANGUAGE_MODEL_ONLY-}"
-_cli_max_num_seqs="${MAX_NUM_SEQS-}"
-_cli_ablit="${ABLIT-}"
-_cli_ablit_method="${ABLIT_METHOD-}"
-_cli_ablit_direction="${ABLIT_DIRECTION-}"
-_cli_ablit_layers="${ABLIT_LAYERS-}"
-_cli_ablit_alpha="${ABLIT_ALPHA-}"
-_cli_ablit_mtp="${ABLIT_INCLUDE_MTP-}"
+# Caller exports (MTP_TOKENS=2 ./start.sh restart) must win over .env for
+# every key .env defines (#28, #44, #91): remember the caller's non-empty
+# exported value of each such key, source .env, then re-apply them. Same
+# [ -n ] semantics as the per-knob capture this replaces (an explicitly empty
+# caller export does not override .env; edit .env for an empty value). The
+# scanner is lexical: any line of the form `[export ]NAME[+]=VALUE` counts,
+# even inside a heredoc or conditional; shell constructs in .env (unset,
+# declare, ...) are sourced but not tracked. Only exported, non-readonly
+# names are captured, so a launcher-internal variable named in .env
+# (SCRIPT_DIR) is never replayed and readonly `declare -rx` shell state
+# (SHELLOPTS) is never touched - unlike an `eval "$(export -p)"` replay,
+# which dies on it under set -e. Works on bash 3.2 (macOS) and 5.x.
+_env_keys="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)\+?=.*/\2/p' "$SCRIPT_DIR/.env")"
+_caller_overrides=()
+while IFS= read -r _k; do
+    [ -n "$_k" ] || continue
+    _flags="$(declare -p "$_k" 2>/dev/null || true)"
+    _flags="${_flags#declare -}"; _flags="${_flags%% *}"
+    case "$_flags" in *r*) continue ;; *x*) ;; *) continue ;; esac
+    if [ -n "${!_k:+x}" ]; then _caller_overrides+=("$_k=${!_k}"); fi
+done <<< "$_env_keys"
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
 set +a
-[ -n "${_cli_mtp}" ] && MTP_TOKENS="$_cli_mtp"
-[ -n "${_cli_spec}" ] && SPEC_METHOD="$_cli_spec"
-[ -n "${_cli_eager}" ] && ENFORCE_EAGER="$_cli_eager"
-[ -n "${_cli_fused}" ] && EXL3_FUSED_MOE="$_cli_fused"
-[ -n "${_cli_row_tile}" ] && EXL3_MOE_ROW_TILE="$_cli_row_tile"
-[ -n "${_cli_temp_rows}" ] && EXL3_TEMP_ROWS_FUSED="$_cli_temp_rows"
-[ -n "${_cli_mnbt}" ] && MAX_NUM_BATCHED_TOKENS="$_cli_mnbt"
-[ -n "${_cli_image}" ] && IMAGE="$_cli_image"
-[ -n "${_cli_util}" ] && GPU_MEM_UTIL="$_cli_util"
-[ -n "${_cli_lm}" ] && LANGUAGE_MODEL_ONLY="$_cli_lm"
-[ -n "${_cli_max_num_seqs}" ] && MAX_NUM_SEQS="$_cli_max_num_seqs"
-[ -n "${_cli_ablit}" ] && ABLIT="$_cli_ablit"
-[ -n "${_cli_ablit_method}" ] && ABLIT_METHOD="$_cli_ablit_method"
-[ -n "${_cli_ablit_direction}" ] && ABLIT_DIRECTION="$_cli_ablit_direction"
-[ -n "${_cli_ablit_layers}" ] && ABLIT_LAYERS="$_cli_ablit_layers"
-[ -n "${_cli_ablit_alpha}" ] && ABLIT_ALPHA="$_cli_ablit_alpha"
-[ -n "${_cli_ablit_mtp}" ] && ABLIT_INCLUDE_MTP="$_cli_ablit_mtp"
+# Each entry is NAME=value (SC2163 misreads the indirection).
+# shellcheck disable=SC2163
+for _kv in ${_caller_overrides[@]+"${_caller_overrides[@]}"}; do export "$_kv"; done
+unset _k _kv _flags _env_keys _caller_overrides
 
 # ----------------------------- configuration -------------------------------
 MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"

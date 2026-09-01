@@ -347,7 +347,17 @@ cp .env.example .env          # edit HEAD_IP / WORKER_IP / WORKER_USER if needed
 ```
 
 First run of `./start.sh` copies `.env.example` → `.env` if missing. Prefix env
-wins over `.env` (`SPEC_METHOD=dflash SKIP_DOWNLOAD=1 ./start.sh restart`).
+wins over `.env` (`SPEC_METHOD=dflash SKIP_DOWNLOAD=1 ./start.sh restart`) for
+every key `.env` assigns — not just an allowlist (#91): a non-empty caller
+export replaces the matching `.env` value before the launcher configures
+itself; variables the rank scripts use reach the containers through the
+existing `-e` / argv wiring, host-only controls stay host-side. An
+explicitly empty export (`KEY= ./start.sh`) is ignored; edit `.env` when an
+empty value is required. The scanner is lexical: any line of the form
+`[export ]NAME[+]=VALUE` counts as an assignment, including such text inside
+a heredoc or conditional; other shell constructs in `.env` (`unset`,
+`declare`, …) are sourced as before but their effect is not tracked. Keys
+`.env` does not set follow the launcher defaults in `start.sh`.
 
 `./start.sh` downloads weights automatically when the HF cache is incomplete
 (120 shards of `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`, falling back to
@@ -519,6 +529,7 @@ this Dockerfile instead. After CUDA compile, Python overlay edits
 | `overlay/patch_model_overrides.py` | `"exl3"` in ModelConfig overrides |
 | `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0` |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
+| `tests/test_start_overrides.py` | launcher (CPU-only, docker/ssh stubbed): every key `.env.example` defines survives a caller export through the real prologue, `.env` still beats the script defaults with no exports, empty exports do not override, readonly shell exports (`SHELLOPTS`) and CRLF / `export KEY=` / quoted-JSON `.env` lines are handled; runs under every bash on the host (3.2 and 5.x) |
 | `start.sh` / `stop.sh` / `download.sh` | 2-node launch; Hub fetch on the head only |
 | `files/chat_template.jinja` | GLM-5.3 MM template (`<|image|>` / `<|video|>`); checkpoint jinja is language-only |
 | `overlay/qwen3_dflash2.py` | DFlash2 draft (grouped conv + candidate selector) |
