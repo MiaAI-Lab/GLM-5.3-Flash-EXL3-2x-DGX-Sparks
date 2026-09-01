@@ -27,12 +27,15 @@ sys.path.insert(0, str(ROOT / "overlay"))
 
 import patch_kv_offload_scope as scope_mod  # noqa: E402
 import patch_kv_offload_store_local as store_mod  # noqa: E402
+import patch_kv_offload_restore_g0 as restore_mod  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
 # Patched module text
 # ---------------------------------------------------------------------------
-def patched_texts(with_store: bool = True) -> dict[str, str]:
+def patched_texts(
+    with_store: bool = True, with_restore: bool = False
+) -> dict[str, str]:
     """Apply the patchers (prepare only, no writes) to the pinned fixtures."""
     kvo_cfg = (FIXTURES / "image_487ecf187_kv_offload_config.py").read_text()
     conn_cfg = (FIXTURES / "image_487ecf187_offloading_config.py").read_text()
@@ -47,6 +50,11 @@ def patched_texts(with_store: bool = True) -> dict[str, str]:
         common, _ = store_mod.prepare(common, store_mod.SITES_COMMON, "t")
         sched, _ = store_mod.prepare(sched, store_mod.SITES_SCHED, "t")
         worker, _ = store_mod.prepare(worker, store_mod.SITES_WORKER, "t")
+    if with_restore:
+        assert with_store, "the restore overlay stacks on the store overlay"
+        common, _ = restore_mod.prepare(common, restore_mod.SITES_COMMON, "t")
+        sched, _ = restore_mod.prepare(sched, restore_mod.SITES_SCHED, "t")
+        worker, _ = restore_mod.prepare(worker, restore_mod.SITES_WORKER, "t")
     return {
         "kv_offload_config": kvo_cfg,
         "offloading_config": conn_cfg,
@@ -250,7 +258,7 @@ def _mod(name: str) -> types.ModuleType:
     return m
 
 
-def install_fake_vllm() -> dict:
+def install_fake_vllm(with_restore: bool = False) -> dict:
     """Install a minimal fake vllm namespace; returns handles for tests."""
     logger = _RecordingLogger()
 
@@ -410,7 +418,8 @@ def install_fake_vllm() -> dict:
 
     @dataclass
     class ScheduleEndContext:
-        pass
+        new_req_ids: list = None
+        preempted_req_ids: object = ()
 
     import numpy as np
 
@@ -506,6 +515,9 @@ def install_fake_vllm() -> dict:
         def take_events(self):
             return ()
 
+        def reset(self):
+            self.records.clear()
+
     m.OffloadingEventGroupSpec = OffloadingEventGroupSpec
     m.OffloadingEventsTracker = OffloadingEventsTracker
     m.get_offloading_event_group_spec = lambda group: OffloadingEventGroupSpec()
@@ -541,7 +553,7 @@ def install_fake_vllm() -> dict:
     m.canonical_format_id = lambda: "v1-nhd"
 
     # --- exec the PATCHED overlay outputs as the real module names
-    texts = patched_texts(with_store=True)
+    texts = patched_texts(with_store=True, with_restore=with_restore)
 
     kvo_cfg = _mod("vllm.v1.kv_offload.config")
     exec(compile(texts["kv_offload_config"], "kv_offload/config.py", "exec"), kvo_cfg.__dict__)
@@ -638,7 +650,24 @@ class FakeManager:
         )
         return out
 
+    def complete_load(self, keys, req_context):
+        self.completed_loads = getattr(self, "completed_loads", [])
+        self.completed_loads.append(tuple(keys))
+
+    def complete_store(self, keys, req_context):
+        self.completed_stores = getattr(self, "completed_stores", [])
+        self.completed_stores.append(tuple(keys))
+
     def on_request_finished(self, req_context):
+        pass
+
+    def on_schedule_end(self, schedule_end_context):
+        pass
+
+    def has_pending_work(self) -> bool:
+        return False
+
+    def reset_cache(self):
         pass
 
     def take_events(self):

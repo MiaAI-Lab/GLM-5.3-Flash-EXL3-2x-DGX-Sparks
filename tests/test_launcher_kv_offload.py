@@ -123,6 +123,9 @@ def part_a() -> None:
         {"GLM53_KV_OFFLOAD": "1", "GLM53_KV_OFFLOAD_CPU_GB": "64"},
         {"GLM53_KV_OFFLOAD": "1", "GLM53_KV_OFFLOAD_KEEP_BOUNDARIES": "0"},
         {"GLM53_KV_OFFLOAD": "0", "GLM53_KV_OFFLOAD_CPU_GB": "junk"},  # gated off
+        # Stage 2: restore is accepted iff the store tier is on.
+        {"GLM53_KV_OFFLOAD": "1", "GLM53_KV_OFFLOAD_RESTORE": "1"},
+        {"GLM53_KV_OFFLOAD": "1", "GLM53_KV_OFFLOAD_RESTORE": "0"},
     ]
     for env in ok_cases:
         rc, out = run_guard(env)
@@ -219,9 +222,27 @@ def part_b(h: Harness) -> None:
     )
     r = h.run(["restart"], GLM53_KV_OFFLOAD_RESTORE="1")
     check(
-        r.returncode == 2 and "store-only" in r.stderr and not h.host_calls(),
-        "B2 RESTORE=1 refused pre-stop with the stage-1 reason",
+        r.returncode == 2
+        and "requires GLM53_KV_OFFLOAD=1" in r.stderr
+        and not h.host_calls(),
+        "B2 RESTORE=1 without the store tier refused pre-stop (stage-2 rule)",
     )
+    r = h.run(["restart"], GLM53_KV_OFFLOAD="0", GLM53_KV_OFFLOAD_RESTORE="1")
+    check(
+        r.returncode == 2
+        and "requires GLM53_KV_OFFLOAD=1" in r.stderr
+        and not h.host_calls(),
+        "B2b explicit OFFLOAD=0 + RESTORE=1 refused pre-stop",
+    )
+    restore_p = h.repo / "overlay" / "patch_kv_offload_restore_g0.py"
+    restore_backup = restore_p.read_text()
+    restore_p.write_text(restore_backup[: len(restore_backup) // 2])
+    r = h.run(["restart"])
+    check(
+        r.returncode == 2 and not h.host_calls(),
+        "B2c truncated restore overlay: rc=2 before any host call",
+    )
+    restore_p.write_text(restore_backup)
     scope = h.repo / "overlay" / "patch_kv_offload_scope.py"
     backup = scope.read_text()
     scope.unlink()
@@ -369,7 +390,11 @@ def part_d(h: Harness) -> None:
     check(bool(mkdirs), "D4 worker store dir mkdir'ed over ssh")
 
     # scp -> /tmp -> mount chain for both overlays.
-    for name in ("patch_kv_offload_scope.py", "patch_kv_offload_store_local.py"):
+    for name in (
+        "patch_kv_offload_scope.py",
+        "patch_kv_offload_store_local.py",
+        "patch_kv_offload_restore_g0.py",
+    ):
         scps = [
             c
             for c in calls
@@ -386,11 +411,25 @@ def part_d(h: Harness) -> None:
     head, worker = _inner_scripts(h, **env)
     m = re.findall(r"python3 /opt/glm53/(patch_[a-z0-9_]+\.py)", head)
     check(
-        m.index("patch_kv_offload_scope.py") < m.index("patch_kv_offload_store_local.py"),
-        "D6 overlay order pins scope before store_local",
+        m.index("patch_kv_offload_scope.py")
+        < m.index("patch_kv_offload_store_local.py")
+        < m.index("patch_kv_offload_restore_g0.py"),
+        "D6 overlay order pins scope -> store_local -> restore_g0",
     )
     m2 = re.findall(r"python3 /opt/glm53/(patch_[a-z0-9_]+\.py)", worker)
     check(m == m2, "D7 both ranks apply the identical overlay list")
+
+    # Stage 2: RESTORE=1 launch replays the knob identically to both ranks
+    # and changes nothing else about the connector JSON.
+    env_r = dict(env)
+    env_r["GLM53_KV_OFFLOAD_RESTORE"] = "1"
+    _, head_run_r, worker_cmd_r = _launch(h, **env_r)
+    henv_r, wenv_r = _env_of_head(head_run_r), _env_of_worker(worker_cmd_r)
+    check(
+        henv_r.get("GLM53_KV_OFFLOAD_RESTORE") == "1"
+        and wenv_r.get("GLM53_KV_OFFLOAD_RESTORE") == "1",
+        "D11 RESTORE=1 replayed identically to BOTH ranks",
+    )
 
     # The comparator itself must catch a planted one-rank difference.
     planted = dict(wenv)
