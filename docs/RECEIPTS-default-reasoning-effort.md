@@ -53,81 +53,135 @@ output were exercised at both settings.
 **Recommendation: `high` for agentic coding.** Not `low` — a genuine `high`-vs-`low` quality A/B
 has not been run, so `low` is not evidenced here. Arm B was **not** `low`; it was `max`.
 
-## Live receipts to capture on the box
+## A/B v2 — `high` vs `low` (2026-09-01)
 
-Run these against the target image / running serve and paste the output under each item.
+Same task, grader, harness and vLLM process as above; arm B now went through a `low`-injecting proxy.
+Four runs, alternating A,B,A,B, one at a time, server never reconfigured.
+
+| Run | Arm | Wall (s) | Grader | Turns | Tool calls (errors) | Compactions | Prompt tok | Completion tok |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| A-1 | high | 486 | **80/80** | 37 | 36 (0) | 0 | 639,301 | 13,054 |
+| B-1 | low | 297 | **79/80** | 19 | 21 (1, self-recovered) | 0 | 285,585 | 8,478 |
+| A-2 | high | 700 | **80/80** | 27 | 35 (0) | 0 | 733,450 | 20,028 |
+| B-2 | low | 208 | **80/80** | 11 | 15 (0) | 0 | 146,586 | 6,004 |
+
+Medians: wall 593 s vs 252.5 s, completion tokens 16,541 vs 7,241, grader 80.0 vs 79.5 (the lost point was a
+41-line README against a 40-line limit). A tool-call canary (`opencode run` with a `read` tool) passed at both efforts.
+Across v1 + v2 the three levels order monotonically at the grader ceiling: low 252 s < high 468–593 s < max 2,160 s.
+
+Caveats that apply to both A/Bs: n = 2 per arm, one task, and a grader at its ceiling — the benchmark discriminates
+**cost**, not reasoning quality. `low` visibly does less exploration (half the turns and tool calls). That is why the
+recommendation stays `high`, and why `low` is documented as legal but not recommended.
+
+## Live receipts (captured 2026-09-01)
+
+Captured read-only on the live 2× DGX Spark serve — image `ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3`
+(`sha256:ad0cdd86…`), vLLM `0.1.dev20051+g487ecf187`, launched with `GLM53_DEFAULT_REASONING_EFFORT=high` in `.env`.
+No restart, no chat completions.
 
 ### 1. The flag exists in the target image
 
-```bash
-docker exec glm53-exl3-head vllm serve --help | grep -A2 default-chat-template-kwargs
+`vllm serve --help` (short page) hides it; `--help=all` lists it:
+
+```
+$ docker exec glm53-exl3-head vllm serve --help=all 2>&1 | grep -n -A2 default-chat-template-kwargs
+80:  --default-chat-template-kwargs DEFAULT_CHAT_TEMPLATE_KWARGS
+81-                        Should either be a valid JSON string or JSON keys
+82-                        passed individually. (default: None)
 ```
 
-Expect the option to be listed. Source in this vLLM: `vllm/entrypoints/openai/cli_args.py`
-(:93, :167, :200-201) and `vllm/entrypoints/openai/serving.py` (:131, :146), where server
+Source in this vLLM: `vllm/entrypoints/openai/cli_args.py` and `vllm/entrypoints/openai/serving.py`, where server
 defaults are merged first and **request** `chat_template_kwargs` win.
 
-- [ ] captured
+- [x] captured
 
 ### 2. Both ranks carry the flag
 
-```bash
-docker inspect --format '{{.Args}}' glm53-exl3-head
-ssh "$WORKER_SSH" "docker inspect --format '{{.Args}}' glm53-exl3-worker"
+The containers' `Cmd` is `bash /start.sh`, so `docker inspect` does not show the serve line; `vllm serve` is pid 1 in
+each container and `/proc/1/cmdline` (NUL-split) is the parsed argv. Element index, next element, occurrence count:
+
+```
+== HEAD ==
+host=spark-deb8 container=glm53-exl3-head image=ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3
+vllm serve pid=1
+42:--default-chat-template-kwargs
+43-{"reasoning_effort":"high"}
+occurrences=1
+argc=58
+== WORKER ==
+host=spark-d9d5 container=glm53-exl3-worker image=ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3
+vllm serve pid=1
+43:--default-chat-template-kwargs
+44-{"reasoning_effort":"high"}
+occurrences=1
+argc=59
 ```
 
-Both must show `--default-chat-template-kwargs {"reasoning_effort":"high"}` exactly once, as a
-single argv element. (The launcher builds the JSON space-free precisely so it survives the
-word-split `${worker_nccl}` env path to the worker.)
+Head API-server parsed config (the headless rank has no API server and prints no such line):
 
-- [ ] head captured
-- [ ] worker captured
+```
+$ docker logs glm53-exl3-head 2>&1 | grep -i default_chat_template_kwargs
+(APIServer pid=1) INFO 09-01 01:03:44 [api_utils.py:273] non-default args: {… 'chat_template': '/opt/glm53/chat_template.jinja', 'default_chat_template_kwargs': {'reasoning_effort': 'high'}, 'enable_auto_tool_choice': True, 'tool_call_parser': 'glm47', … 'reasoning_parser': 'glm45', … 'nnodes': 2, 'tensor_parallel_size': 2, …}
+```
+
+- [x] head captured
+- [x] worker captured
 
 ### 3. Render boundary — the default reaches Jinja, and a request overrides it
 
-The claim is about the rendered prompt, not the flag, so probe the renderer. `/tokenize` with
-`return_token_strs` renders the chat template and hands back the text:
+`/tokenize` renders the template; because `token_strs` are tokenizer pieces, each id list was passed through
+`/detokenize` for the literal prompt. Served template md5 `37639425…` == `files/chat_template.jinja`.
 
-```bash
-# A: no chat_template_kwargs -> must render "Reasoning Effort: High" (the server default)
-curl -s localhost:8888/tokenize -H 'Content-Type: application/json' -d '{
-  "model":"GLM-5.3-Flash-EXL3",
-  "messages":[{"role":"user","content":"hi"}],
-  "return_token_strs":true}' | python3 -c 'import json,sys; print("".join(json.load(sys.stdin)["token_strs"])[:200])'
+```
+# A: no chat_template_kwargs -> server default
+RESP: {"count":13,…,"token_strs":["[gMASK]","<sop>","<|system|>","Reason","ing","ĠEff","ort",":","ĠHigh","<|user|>","hi","<|assistant|>","<think>"]}
+DETOK: {"prompt":"[gMASK]<sop><|system|>Reasoning Effort: High<|user|>hi<|assistant|><think>"}
 
-# B: request override -> must render "Reasoning Effort: Low"
-curl -s localhost:8888/tokenize -H 'Content-Type: application/json' -d '{
-  "model":"GLM-5.3-Flash-EXL3",
-  "messages":[{"role":"user","content":"hi"}],
-  "chat_template_kwargs":{"reasoning_effort":"low"},
-  "return_token_strs":true}' | python3 -c 'import json,sys; print("".join(json.load(sys.stdin)["token_strs"])[:200])'
+# B: "chat_template_kwargs":{"reasoning_effort":"low"} -> request override wins
+DETOK: {"prompt":"[gMASK]<sop><|system|>Reasoning Effort: Low<|user|>hi<|assistant|><think>"}
+
+# C: "chat_template_kwargs":{"reasoning_effort":"max"} -> request override wins
+DETOK: {"prompt":"[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>hi<|assistant|><think>"}
+
+# D: "chat_template_kwargs":{"reasoning_effort":"medium"} -> no such level in the template, renders Max
+token_strs: [… "ĠMax" …]
 ```
 
-Also record the **before** state (server launched with the knob empty): request A must render
-`Reasoning Effort: Max`. That before/after pair is the whole proof — it shows both that the
-default lands and that it was `max` beforehand.
+Only token position 9 differs between A/B/C: `5124` (`ĠHigh`), `12035` (`ĠLow`), `7487` (`ĠMax`).
 
-If `/tokenize` does not surface the rendered text on this build, fall back to a
-logprobs-of-prefix probe: send `max_tokens=1, prompt_logprobs=0` on the chat endpoint and read
-the echoed prompt tokens.
+**Before state (knob empty).** Not captured live — it needs a serve launched without the knob, i.e. a restart, and the
+box was in use. Substitute: the served template file rendered offline inside the same container with jinja2
+(`jinja2.ext.loopcontrols`, as `tests/test_chat_template.py` does), which is the branch a no-flag serve takes:
 
-- [ ] before (knob empty): request A renders `Max`
-- [ ] after (knob `high`): request A renders `High`
-- [ ] after (knob `high`): request B renders `Low` — request override wins
+```
+ <no kwargs> -> '[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>hi<|assistant|><think>'
+         low -> '[gMASK]<sop><|system|>Reasoning Effort: Low<|user|>hi<|assistant|><think>'
+        high -> '[gMASK]<sop><|system|>Reasoning Effort: High<|user|>hi<|assistant|><think>'
+         max -> '[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>hi<|assistant|><think>'
+      medium -> '[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>hi<|assistant|><think>'
+```
+
+The A/B v1 "direct" arm was measured against this very serve before the knob existed and behaved as `max`.
+
+- [ ] before (knob empty): request A renders `Max` — **not captured live** (offline render above instead)
+- [x] after (knob `high`): request A renders `High`
+- [x] after (knob `high`): request B renders `Low` — request override wins (`max` override also shown)
 
 ### 4. Canaries at the chosen effort
 
-Per the Codex advisory, effort changes template text only, not `<think>` or tool-call grammar —
-but confirm rather than assume, on the running serve with the default in place:
+Effort changes template text only, not `<think>` or tool-call grammar. Evidence from the A/B runs (all through the
+live serve, all with `reasoning_content` streamed before content):
 
-- [ ] reasoning extraction: a normal chat request still returns a populated `reasoning_content`
-- [ ] tool calling: a request with `tools` still emits a well-formed `tool_calls` entry
-- [ ] JSON validity: a `response_format` / guided-JSON request still parses
+- [x] reasoning extraction: every A/B run streamed `reasoning` deltas ahead of content (this is why TTFT-to-content is
+      longer at `high`, see the v2 results' caveat 5)
+- [x] tool calling: 71/71 tool calls succeeded at `high` across v2; canary `read` tool call completed at `high` and `low`
+- [ ] JSON validity under `response_format` / guided-JSON at the chosen effort: **not run** — nothing in the A/B used
+      guided decoding. The effort hint is prompt text and does not touch the grammar path, but this is stated, not shown.
 
 ## Host tests (no hardware)
 
 ```
-tests/test_default_reasoning_effort.sh    enum guard + both serve-arg sites
+tests/test_default_reasoning_effort.sh    enum guard + both serve-arg sites (27 checks)
 tests/test_numeric_config.py              unchanged, still green
 tests/test_start_overrides.py             + setness-aware caller override
 ```
