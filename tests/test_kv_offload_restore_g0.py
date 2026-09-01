@@ -253,7 +253,7 @@ def test_scheduler_restore() -> None:
     check(hit == 0, "B3d store-write failure event denies the boundary")
 
     # B4: deepest boundary wins; foreign namespace dropped; alignment guard.
-    rst._failed_keys.clear()
+    rst._failed_by_rank.clear()
     b2 = _boundary_hash(req, 2)
     rst.consume_events(_events([0, 1], b2, 10752))
     hit, _ = sched.get_num_new_matched_tokens(req, 0)
@@ -484,18 +484,80 @@ def test_scheduler_restore() -> None:
     )
     sched.update_state_after_alloc(req_f, blocks_f, hit_f)
     sched._current_batch_load_jobs.clear()  # job registered in _jobs
+    # The request is ABORTED while its disk load is still registered — the
+    # exact route the review's BLOCKER named (finished_req_ids processing in
+    # _build_store_jobs while a non-store job is in transfer_jobs).
+    req_f.status = sys.modules["vllm.v1.request"].RequestStatus.FINISHED_ABORTED
+    req_f.num_computed_tokens = 0
+    req_f.is_finished = lambda: True
     so_f = SimpleNamespace(
-        num_scheduled_tokens={req_f.request_id: 5},
-        finished_req_ids=set(),
-        req_data={req_f.request_id: (None, False)},
+        num_scheduled_tokens={},
+        finished_req_ids={req_f.request_id},
+        req_data={},
         partial_tail_offloads=None,
     )
     sched._update_req_states(so_f)
     jobs_f = sched._build_store_jobs(so_f)  # would assert without R11
     check(
         jobs_f == {},
-        "B16b store-job creation deferred while the load job is in flight",
+        "B16b aborted-during-load: store creation deferred, no assert",
     )
+    # Complete B16's load job (both ranks ack) so the single-flight gate is
+    # free for the following subtests.
+    jid_f = rst._inflight_job
+    sched.update_connector_output(
+        SimpleNamespace(
+            kv_connector_worker_meta=mods["common"].OffloadingWorkerMetadata(
+                completed_jobs={jid_f: 2}
+            )
+        )
+    )
+    check(rst._inflight_job is None, "B16c load-job completion frees the gate")
+
+    # B17 (confirm f9): a writer restart retracts that rank's FAILURES too —
+    # a recovered writer is not permanently suppressed.
+    req_g = stub.FakeRequest(num_tokens=2 * 3584, req_id="rq-g", salt=b"g17")
+    sched.on_new_request(req_g)
+    b1g = _boundary_hash(req_g, 1)
+    rst.consume_events(
+        [("+", 0, "ns1", b1g, 7168, "boot0"), ("+", 1, "ns1", b1g, 7168, "boot1")]
+    )
+    rst.consume_events([("F", 0, "ns1", b1g, 0, "boot0")])
+    hit_g, _ = sched.get_num_new_matched_tokens(req_g, 0)
+    check(hit_g == 0, "B17 rank-0 write failure denies the boundary")
+    # rank 0's writer restarts (new generation) and republishes cleanly:
+    rst.consume_events([("+", 0, "ns1", b1g, 7168, "boot0b")])
+    hit_g, _ = sched.get_num_new_matched_tokens(req_g, 0)
+    check(
+        hit_g == 7168,
+        "B17b generation change clears the old generation's failures",
+    )
+
+    # B18 (confirm new f1): a NON-disk load job keeps the stock crash
+    # semantics — never misclassified as ours.
+    req_h = stub.FakeRequest(num_tokens=3584, req_id="rq-h", salt=b"h18")
+    sched.on_new_request(req_h)
+    st_h = sched._req_status[req_h.request_id]
+    foreign_jid = sched._generate_job_id()
+    sched._jobs[foreign_jid] = sched_mod.TransferJobStatus(
+        req_id=req_h.request_id, pending_count=2, keys=set(), is_store=False
+    )
+    st_h.transfer_jobs.add(foreign_jid)
+    so_h = SimpleNamespace(
+        num_scheduled_tokens={},
+        finished_req_ids=set(),
+        req_data={},
+        partial_tail_offloads=None,
+        preempted_req_ids={req_h.request_id},
+        scheduled_new_reqs=[],
+    )
+    try:
+        sched.build_connector_meta(so_h)
+        check(False, "B18 foreign (non-disk) load keeps stock assert semantics")
+    except AssertionError:
+        check(True, "B18 foreign (non-disk) load keeps stock assert semantics")
+    st_h.transfer_jobs.discard(foreign_jid)
+    sched._jobs.pop(foreign_jid, None)
 
     # B11: RESTORE=0 keeps the stage-1 short-circuit (no disk lookup).
     os.environ["GLM53_KV_OFFLOAD_RESTORE"] = "0"
