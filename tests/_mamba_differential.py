@@ -118,7 +118,14 @@ def write_park_fixture(
     """Write one boot's park-at-boundary-k fixture: the four mamba group
     chunk files + the boundary manifest, in the stage-1 on-disk format
     (format v1 headers, real bytes only, tmp-free direct writes — this is a
-    fixture generator, not the durable writer)."""
+    fixture generator, not the durable writer).
+
+    Deliberate fixture scope (review f12 note): only the TERMINAL boundary's
+    mamba chunks are materialized even though the manifest chain lists
+    earlier boundary hashes — mamba restore needs exactly ONE state block
+    per group at the target boundary (plan §3), and this harness compares
+    states at that boundary; earlier boundaries would be separate park
+    fixtures of their own."""
     base = root / f"glm53kv_test_model_{namespace}_r{rank}"
     bhash = boundary_hash(chain, boundary_k)
     cow_entries: dict[str, dict] = {}
@@ -191,17 +198,38 @@ def check_state_abi(base: Path, boundary_k: int, chain: str = "chainA") -> list[
         if len(segs) != 2 * n_layers:
             problems.append(f"g{group}: {len(segs)} segments != {2 * n_layers}")
             continue
+        run = 0
         for i, seg in enumerate(segs):
-            want = (
-                (list(KDA_CONV_SHAPE), KDA_CONV_DTYPE, KDA_CONV_BYTES)
-                if i % 2 == 0
-                else (list(KDA_TEMPORAL_SHAPE), KDA_TEMPORAL_DTYPE, KDA_TEMPORAL_BYTES)
-            )
-            if (seg.get("shape"), seg.get("dtype"), seg.get("length")) != want:
-                problems.append(
-                    f"g{group} seg{i}: {seg.get('shape')}/{seg.get('dtype')}"
-                    f"/{seg.get('length')} != {want}"
+            layer_idx = i // 2
+            if i % 2 == 0:
+                want_shape, want_dtype, want_len, want_kind = (
+                    list(KDA_CONV_SHAPE), KDA_CONV_DTYPE, KDA_CONV_BYTES,
+                    "conv_state",
                 )
+            else:
+                want_shape, want_dtype, want_len, want_kind = (
+                    list(KDA_TEMPORAL_SHAPE), KDA_TEMPORAL_DTYPE,
+                    KDA_TEMPORAL_BYTES, "temporal_state",
+                )
+            want_strides = []
+            acc = 1
+            for d in reversed(want_shape):
+                want_strides.append(acc)
+                acc *= int(d)
+            want_strides.reverse()
+            got = (
+                seg.get("shape"), seg.get("dtype"), seg.get("length"),
+                seg.get("kind"), seg.get("layer"), seg.get("stride"),
+                seg.get("stride_provenance"), seg.get("offset"),
+            )
+            want = (
+                want_shape, want_dtype, want_len, want_kind,
+                f"kda{group}.{layer_idx}", want_strides,
+                "derived-contiguous", run,
+            )
+            if got != want:
+                problems.append(f"g{group} seg{i}: {got} != {want}")
+            run += want_len
     return problems
 
 

@@ -698,12 +698,21 @@ class FakeSchedSpec:
 
 
 class FakeRequest:
-    def __init__(self, num_tokens, tokens_per_hash=64, req_id="req0", salt=b"s"):
+    def __init__(
+        self,
+        num_tokens,
+        tokens_per_hash=64,
+        req_id="req0",
+        salt=b"s",
+        num_prompt_tokens=None,
+    ):
         import hashlib
 
         self.request_id = req_id
         self.num_tokens = num_tokens
-        self.num_prompt_tokens = num_tokens
+        self.num_prompt_tokens = (
+            num_tokens if num_prompt_tokens is None else num_prompt_tokens
+        )
         self.num_computed_tokens = 0
         self.kv_transfer_params = None
         self.skip_reading_prefix_cache = False

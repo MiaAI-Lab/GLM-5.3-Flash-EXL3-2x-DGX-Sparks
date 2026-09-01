@@ -171,6 +171,12 @@ class Glm53RestoreState:
     lookup. Keys/hashes only -- the scheduler NEVER touches the filesystem
     (plan R0; Codex OFFLOAD2 finding 8)."""
 
+    # Registry bounds (Codex OFFLOAD2-REVIEW finding 8): fail CLOSED on
+    # overflow -- new boundaries are dropped (missed hits only), never wrong
+    # hits; one log line when first hit.
+    _MAX_BOUNDARIES = 1 << 16
+    _MAX_FAILED_KEYS = 1 << 16
+
     def __init__(self, config, vllm_config, log):
         self._log = log
         self._config = config
@@ -181,11 +187,18 @@ class Glm53RestoreState:
         # (hash_hex, group_idx) whose store WRITE failed on any rank this
         # boot -- the per-job store failure bit, on the wire and load-bearing
         # at lookup (stage-1 known limit closed per the task contract).
+        # Sticky by design: it mirrors the stage-1 writer's failed-key
+        # ledger, which never un-fails a key within a boot.
         self._failed_keys = set()
+        # rank -> writer boot id: a changed boot id means that rank's writer
+        # restarted; its previous availability is void (finding 8 fencing).
+        self._rank_boot = {}
         # req_id -> pending disk-hit boundary (end-exclusive tokens), set by
         # lookup, consumed by update_state_after_alloc, dropped on miss/reset.
         self._pending_hits = {}
         self._ns_mismatch_logged = False
+        self._overflow_logged = False
+        self._failed_overflow = False
 
         reason = None
         try:
@@ -200,6 +213,12 @@ class Glm53RestoreState:
             reason = "GLM53_KV_OFFLOAD=0 (restore reads the store tier)"
         elif reason is None and config.blocks_per_chunk != 1:
             reason = f"blocks_per_chunk={config.blocks_per_chunk} (need 1)"
+        elif reason is None and (
+            not config.kv_group_configs
+            or config.kv_group_configs[0].tokens_per_chunk <= 0
+            or config.kv_group_configs[0].hashes_per_chunk <= 0
+        ):
+            reason = "degenerate chunk/hash geometry"
         elif reason is None and (
             config.num_kv_cache_groups != 1 or len(config.kv_group_configs) != 1
         ):
@@ -245,6 +264,13 @@ class Glm53RestoreState:
             )
 
     # ---- worker event registry (plan C2: min across ranks) --------------
+    def _retract_rank(self, rank: int) -> None:
+        for key in list(self._boundaries):
+            entry = self._boundaries[key]
+            entry["ranks"].discard(rank)
+            if not entry["ranks"]:
+                self._boundaries.pop(key, None)
+
     def consume_events(self, events) -> None:
         for ev in events:
             try:
@@ -253,7 +279,12 @@ class Glm53RestoreState:
                 ns = str(ev[2])
                 key = str(ev[3])
                 aux = int(ev[4])
+                boot = str(ev[5]) if len(ev) > 5 else ""
             except (TypeError, ValueError, IndexError):
+                continue
+            # Rank must name a real worker (Codex OFFLOAD2-REVIEW finding 7):
+            # garbage ranks must never help satisfy the quorum.
+            if not 0 <= rank < self._config.num_workers:
                 continue
             if self._namespace is None:
                 self._namespace = ns
@@ -268,7 +299,37 @@ class Glm53RestoreState:
                         self._namespace[:12],
                     )
                 continue
+            # Writer-generation fencing (finding 8): a changed boot id means
+            # that rank's writer restarted -- everything it previously
+            # announced is void.
+            pinned_boot = self._rank_boot.get(rank)
+            if pinned_boot is None:
+                self._rank_boot[rank] = boot
+            elif pinned_boot != boot:
+                self._log.warning(
+                    "%s rank %d writer generation changed (%s -> %s): "
+                    "retracting its availability",
+                    _GLM53_KVR_TAG,
+                    rank,
+                    pinned_boot[:16],
+                    boot[:16],
+                )
+                self._retract_rank(rank)
+                self._rank_boot[rank] = boot
             if code == "+":
+                if (
+                    key not in self._boundaries
+                    and len(self._boundaries) >= self._MAX_BOUNDARIES
+                ):
+                    if not self._overflow_logged:
+                        self._overflow_logged = True
+                        self._log.warning(
+                            "%s boundary registry full (%d): new boundaries "
+                            "are dropped (missed hits only, fail closed)",
+                            _GLM53_KVR_TAG,
+                            self._MAX_BOUNDARIES,
+                        )
+                    continue
                 entry = self._boundaries.setdefault(
                     key, {"ranks": set(), "tokens": aux}
                 )
@@ -285,7 +346,18 @@ class Glm53RestoreState:
                     if not entry["ranks"]:
                         self._boundaries.pop(key, None)
             elif code == "F":
-                self._failed_keys.add((key, aux))
+                if len(self._failed_keys) < self._MAX_FAILED_KEYS:
+                    self._failed_keys.add((key, aux))
+                elif not self._failed_overflow:
+                    # Losing failure knowledge would be fail-OPEN; poison the
+                    # lookup instead (restore off for the rest of the boot).
+                    self._failed_overflow = True
+                    self._log.error(
+                        "%s failed-key ledger full (%d): disk lookup "
+                        "DISABLED for the rest of this boot (fail closed)",
+                        _GLM53_KVR_TAG,
+                        self._MAX_FAILED_KEYS,
+                    )
 
     # ---- single-flight gate (finding 11: self-healing invariant) --------
     def job_started(self, job_id: int) -> None:
@@ -308,7 +380,7 @@ class Glm53RestoreState:
         None = defer while another restore is in flight)."""
         req_id = req_status.req.request_id
         self._pending_hits.pop(req_id, None)
-        if self.disabled_reason is not None:
+        if self.disabled_reason is not None or self._failed_overflow:
             return 0
         cfg = self._config.kv_group_configs[0]
         tpc = cfg.tokens_per_chunk
@@ -334,7 +406,8 @@ class Glm53RestoreState:
                 continue
             if entry["tokens"] != (k + 1) * tpc:
                 continue
-            if len(entry["ranks"]) < self._config.num_workers:
+            # Exact rank-set equality (finding 7): every worker, no strays.
+            if entry["ranks"] != set(range(self._config.num_workers)):
                 continue
             if (bhash, cfg.group_idx) in self._failed_keys:
                 continue
@@ -357,9 +430,13 @@ class Glm53RestoreState:
         entries = []
         if (
             boundary_tokens == num_cached
+            and tpc > 0
+            and hpc > 0
             and local % tpc == 0
             and boundary_tokens % tpc == 0
-            and boundary_tokens // hpc // (tpc // hpc) <= len(request.block_hashes)
+            # Enough HASHES for every entry (Codex OFFLOAD2-REVIEW finding 2:
+            # the draft compared the CHUNK count against the hash list).
+            and (boundary_tokens // tpc) * hpc <= len(request.block_hashes)
         ):
             for j in range(local // tpc, boundary_tokens // tpc):
                 entries.append(
@@ -448,37 +525,71 @@ def _glm53_expected_segments(writer, gidx, gpu_refs):
     return segments, offset
 
 
+def _glm53_hex64(value) -> bool:
+    """Exact 64-char lowercase hex -- required before ANY path construction
+    from wire/manifest data (Codex OFFLOAD2-REVIEW finding 5: a corrupt hash
+    must never contribute separators or traversal components)."""
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+# Hard per-chunk payload cap (finding 6): the live g0 chunk is 27,163,136 B;
+# anything past 256 MiB is garbage regardless of layout.
+_GLM53_KVR_MAX_PAYLOAD = 256 * 1024 * 1024
+
+
 def _glm53_read_chunk_payload(path, header):
-    """Read one chunk's payload bytes (the codec's header reader validates
-    structure/length; this re-reads the payload and CRC-checks it)."""
+    """Bounded read of one chunk's payload (the codec's header reader already
+    validated envelope structure and total file length; this seeks past the
+    envelope, reads exactly the expected bytes, and CRC-checks them)."""
     import zlib as _zlib
 
+    expected = header["payload_len"]
     with open(path, "rb") as f:
-        blob = f.read()
-    hlen = int.from_bytes(blob[8:12], "little")
-    payload = blob[16 + hlen :]
-    if len(payload) != header["payload_len"]:
+        head = f.read(12)
+        if len(head) != 12:
+            raise ValueError(f"truncated envelope in {path!r}")
+        hlen = int.from_bytes(head[8:12], "little")
+        f.seek(12 + hlen + 4)
+        payload = f.read(expected + 1)
+    if len(payload) != expected:
         raise ValueError(f"payload length changed under us in {path!r}")
-    if (_zlib.crc32(payload) & 0xFFFFFFFF) != header["payload_crc32"]:
+    if (_glm53_zlib_crc32(payload)) != header["payload_crc32"]:
         raise ValueError(f"payload crc mismatch in {path!r}")
     return payload
+
+
+def _glm53_zlib_crc32(data) -> int:
+    import zlib as _zlib
+
+    return _zlib.crc32(data) & 0xFFFFFFFF
 
 
 def _glm53_run_disk_load(cw, job_id, src_spec, dst_spec) -> None:
     """Synchronous disk restore of one load job (restore concurrency = 1).
 
-    Terminal-result contract (Codex OFFLOAD2 finding 5): EVERY exit -- happy
-    path, precondition failure, manifest failure, per-chunk pread/header/
-    CRC/segment/scatter failure -- marks the job done (drained by
-    get_finished, which acks + reports finished_recving) and, for failures,
-    zero-fills the failed chunk and every later chunk's dst blocks and
-    records their physical ids for get_block_ids_with_load_errors. The copy
-    runs entirely inside this engine step: there is no cross-step disk DMA
-    to fence (the preemption/reset fence of finding 4), and a late ack after
-    reset_cache is discarded by the scheduler's _stale_job_threshold."""
+    Terminal-result contract (Codex OFFLOAD2 findings 5 + REVIEW finding 3):
+    the done-list append lives in a ``finally`` -- EVERY exit (happy path,
+    precondition failure, manifest failure, per-chunk pread/header/CRC/
+    segment/scatter failure, even an exception inside the failure
+    bookkeeping) marks the job done (drained by get_finished, which acks +
+    reports finished_recving) and, for failures, records the failed suffix's
+    physical ids for get_block_ids_with_load_errors BEFORE zero-filling
+    best-effort. The ONE deliberate exception: an unparseable dst_spec
+    (destinations not identifiable) PROPAGATES -- acking without being able
+    to report or zero the destinations could serve stale pool bytes as a
+    hit, and fail-stop is the stage-1-adopted rule for exactly that class.
+    The copy runs entirely inside this engine step: no cross-step disk DMA
+    exists (the preemption/reset fence), and a late ack after reset_cache is
+    discarded by the scheduler's _stale_job_threshold."""
     import time as _time
 
+    # Destinations must be identifiable BEFORE the catch-all: see docstring.
     dst_ids = [int(b) for b in dst_spec.block_ids]
+
     failed_from = None
     reason = None
     tensors = None
@@ -487,146 +598,205 @@ def _glm53_run_disk_load(cw, job_id, src_spec, dst_spec) -> None:
     t0 = _time.monotonic()
     entries = []
     try:
-        writer = _glm53_get_store_writer(cw)
-        if writer._disabled_reason is not None:
-            raise ValueError(f"store writer disabled: {writer._disabled_reason}")
-        if not isinstance(src_spec, dict) or src_spec.get("v") != _GLM53_KVR_SPEC_V:
-            raise ValueError(
-                f"unknown disk-load spec version {src_spec.get('v')!r}"
+        try:
+            writer = _glm53_get_store_writer(cw)
+            if writer._disabled_reason is not None:
+                raise ValueError(
+                    f"store writer disabled: {writer._disabled_reason}"
+                )
+            if (
+                not isinstance(src_spec, dict)
+                or src_spec.get("v") != _GLM53_KVR_SPEC_V
+            ):
+                raise ValueError(
+                    f"unknown disk-load spec version {src_spec.get('v')!r}"
+                )
+            if src_spec.get("namespace_hash") != writer._namespace_hash:
+                raise ValueError("disk-load namespace mismatch")
+            entries = list(src_spec.get("entries") or [])
+            if not entries or len(entries) != len(dst_ids):
+                raise ValueError(
+                    f"{len(entries)} entries vs {len(dst_ids)} dst blocks"
+                )
+            gidx = int(entries[0][1])
+            if gidx not in writer._eligible_groups:
+                raise ValueError(f"group {gidx} not eligible on this rank")
+            caches = cw._glm53_gpu_caches
+            if caches is None:
+                raise ValueError("GPU canonical caches not registered")
+            tensors = caches.tensors
+            gpu_refs = list(caches.group_data_refs[gidx])
+            staging_refs = writer._refs_per_group[gidx]
+            if [r.page_size_bytes for r in gpu_refs] != [
+                r.page_size_bytes for r in staging_refs
+            ]:
+                raise ValueError("GPU vs staging ref layout mismatch")
+            for ref in gpu_refs:
+                if getattr(ref, "mapping", None) is not None:
+                    # A canonical mapping means a raw row copy is NOT the
+                    # inverse of the store-side gather: fail closed.
+                    raise ValueError(
+                        "canonical-mapped layout not restorable (v1)"
+                    )
+            expected_segments, expected_len = _glm53_expected_segments(
+                writer, gidx, gpu_refs
             )
-        if src_spec.get("namespace_hash") != writer._namespace_hash:
-            raise ValueError("disk-load namespace mismatch")
-        entries = list(src_spec.get("entries") or [])
-        if not entries or len(entries) != len(dst_ids):
-            raise ValueError(
-                f"{len(entries)} entries vs {len(dst_ids)} dst blocks"
-            )
-        gidx = int(entries[0][1])
-        if gidx not in writer._eligible_groups:
-            raise ValueError(f"group {gidx} not eligible on this rank")
-        caches = cw._glm53_gpu_caches
-        if caches is None:
-            raise ValueError("GPU canonical caches not registered")
-        tensors = caches.tensors
-        gpu_refs = list(caches.group_data_refs[gidx])
-        staging_refs = writer._refs_per_group[gidx]
-        if [r.page_size_bytes for r in gpu_refs] != [
-            r.page_size_bytes for r in staging_refs
-        ]:
-            raise ValueError("GPU vs staging ref layout mismatch")
-        for ref in gpu_refs:
-            if getattr(ref, "mapping", None) is not None:
-                # A canonical mapping means a raw row copy is NOT the
-                # inverse of the store-side gather: fail closed.
-                raise ValueError("canonical-mapped layout not restorable (v1)")
-        expected_segments, expected_len = _glm53_expected_segments(
-            writer, gidx, gpu_refs
-        )
+            expected_segments = _glm53_json_norm(expected_segments)
+            if not 0 < expected_len <= _GLM53_KVR_MAX_PAYLOAD:
+                raise ValueError(f"implausible payload size {expected_len}")
+            group = writer._kv_groups[gidx]
+            inner = _glm53_unwrap_kv_spec(group.kv_cache_spec)
+            expected_spec_kind = type(inner).__name__
+            expected_block_size = getattr(inner, "block_size", None)
 
-        # Manifest re-validation on THIS rank before any pread (finding 8:
-        # each worker validates its own store; a retention race or missing
-        # manifest degrades to recompute, never to a guess).
-        boundary_hash = str(entries[-1][0])
-        mpath = writer._manifest_path(boundary_hash)
-        with open(mpath, encoding="utf-8") as f:
-            man = _glm53_json.load(f)
-        if (
-            man.get("namespace_hash") != writer._namespace_hash
-            or man.get("boundary_token_index")
-            != src_spec.get("boundary_token_index")
-            or (man.get("chunk_hashes") or [])[-1:] != [boundary_hash]
-        ):
-            raise ValueError("manifest identity mismatch at load time")
+            # Manifest re-validation on THIS rank before any pread
+            # (finding 8 of the advisory + REVIEW finding 4): identity,
+            # FULL cumulative chain arithmetic, hex-validated hashes, and
+            # the per-chunk [len, crc] ledger used against every header.
+            boundary_tokens = src_spec.get("boundary_token_index")
+            boundary_hash = str(entries[-1][0])
+            if not _glm53_hex64(boundary_hash):
+                raise ValueError("boundary hash is not 64-char lowercase hex")
+            mpath = writer._manifest_path(boundary_hash)
+            with open(mpath, encoding="utf-8") as f:
+                man = _glm53_json.load(f)
+            chain = man.get("chunk_hashes") or []
+            tpc = int(entries[0][3])
+            if (
+                man.get("namespace_hash") != writer._namespace_hash
+                or man.get("boundary_token_index") != boundary_tokens
+                or not isinstance(boundary_tokens, int)
+                or tpc <= 0
+                or boundary_tokens != len(chain) * tpc
+                or chain[-1:] != [boundary_hash]
+                or not all(_glm53_hex64(h) for h in chain)
+            ):
+                raise ValueError("manifest identity mismatch at load time")
+            # The job's entries must BE the chain's tail (content addressing
+            # makes deeper equality redundant, but the manifest is the
+            # commit record -- trust nothing shallower).
+            tail = chain[len(chain) - len(entries):]
+            if [str(e[0]) for e in entries] != tail:
+                raise ValueError("job entries diverge from the manifest chain")
+            ledger = (man.get("full_groups") or {}).get(str(gidx))
+            if (
+                not isinstance(ledger, list)
+                or len(ledger) != len(chain)
+                or any(
+                    not (isinstance(entry_l, list) and len(entry_l) == 3)
+                    for entry_l in ledger
+                )
+            ):
+                raise ValueError("manifest chunk ledger missing/malformed")
+            ledger_by_hash = {row[0]: (row[1], row[2]) for row in ledger}
 
-        import torch as _torch
+            import torch as _torch
 
-        for i, ent in enumerate(entries):
-            try:
-                hash_hex = str(ent[0])
-                egidx = int(ent[1])
-                n_tokens = int(ent[3])
-                if egidx != gidx:
-                    raise ValueError("mixed groups in one disk load job")
-                row = dst_ids[i]
-                if row == 0:
-                    raise ValueError("null dst block in a disk load job")
-                path = writer._file_path(hash_hex, gidx)
-                header = glm53_read_chunk_header(path)
-                if (
-                    header.get("namespace_hash") != writer._namespace_hash
-                    or header.get("hash") != hash_hex
-                    or header.get("group_idx") != gidx
-                    or header.get("tp_rank") != writer._rank
-                    or header.get("tp_world") != writer._world
-                    or header.get("n_tokens_valid") != n_tokens
-                    or header.get("payload_len") != expected_len
-                ):
-                    raise ValueError(f"chunk header identity mismatch: {path}")
-                if header.get("segment_table") != expected_segments_at(
-                    expected_segments
-                ):
-                    raise ValueError(f"segment table mismatch: {path}")
-                payload = _glm53_read_chunk_payload(path, header)
-                offset = 0
-                for ref in gpu_refs:
-                    seg = payload[offset : offset + ref.page_size_bytes]
-                    buf = _torch.frombuffer(bytearray(seg), dtype=_torch.int8)
-                    tensors[ref.tensor_idx].tensor[
-                        row, : ref.page_size_bytes
-                    ].copy_(buf)
-                    offset += ref.page_size_bytes
-                n_bytes += len(payload)
-            except Exception as exc:  # noqa: BLE001 - per-chunk T4 cell
-                failed_from = i
-                reason = f"{type(exc).__name__}: {exc}"
-                break
-    except Exception as exc:  # noqa: BLE001 - whole-job T4 cell
-        failed_from = 0
-        reason = f"{type(exc).__name__}: {exc}"
-
-    if failed_from is not None:
-        logger.warning(
-            "%s disk load job %d FAILED at chunk %d/%d (%s): zero-filling "
-            "the suffix and reporting invalid blocks (recompute)",
-            _GLM53_KVR_TAG,
-            job_id,
-            failed_from,
-            len(entries) or len(dst_ids),
-            reason,
-        )
-        for row in dst_ids[failed_from:]:
-            if row == 0:
-                continue
-            if tensors is not None and gpu_refs is not None:
+            for i, ent in enumerate(entries):
                 try:
+                    hash_hex = str(ent[0])
+                    egidx = int(ent[1])
+                    n_tokens = int(ent[3])
+                    if not _glm53_hex64(hash_hex):
+                        raise ValueError("entry hash is not 64-char hex")
+                    if egidx != gidx:
+                        raise ValueError("mixed groups in one disk load job")
+                    row = dst_ids[i]
+                    if row == 0:
+                        raise ValueError("null dst block in a disk load job")
+                    path = writer._file_path(hash_hex, gidx)
+                    header = glm53_read_chunk_header(path)
+                    led = ledger_by_hash.get(hash_hex)
+                    if (
+                        header.get("namespace_hash") != writer._namespace_hash
+                        or header.get("hash") != hash_hex
+                        or header.get("group_idx") != gidx
+                        or header.get("spec_kind") != expected_spec_kind
+                        or header.get("block_size_tokens")
+                        != expected_block_size
+                        or header.get("tp_rank") != writer._rank
+                        or header.get("tp_world") != writer._world
+                        or header.get("n_tokens_valid") != n_tokens
+                        or header.get("payload_len") != expected_len
+                        or led is None
+                        or (header["payload_len"], header["payload_crc32"])
+                        != (led[0], led[1])
+                    ):
+                        raise ValueError(
+                            f"chunk header/ledger identity mismatch: {path}"
+                        )
+                    if header.get("segment_table") != expected_segments:
+                        raise ValueError(f"segment table mismatch: {path}")
+                    payload = _glm53_read_chunk_payload(path, header)
+                    offset = 0
                     for ref in gpu_refs:
+                        seg = payload[offset : offset + ref.page_size_bytes]
+                        buf = _torch.frombuffer(
+                            bytearray(seg), dtype=_torch.int8
+                        )
                         tensors[ref.tensor_idx].tensor[
                             row, : ref.page_size_bytes
-                        ].zero_()
-                except Exception:  # noqa: BLE001 - reporting still fences
+                        ].copy_(buf)
+                        offset += ref.page_size_bytes
+                    n_bytes += len(payload)
+                except Exception as exc:  # noqa: BLE001 - per-chunk T4 cell
+                    failed_from = i
+                    reason = f"{type(exc).__name__}: {exc}"
+                    break
+        except Exception as exc:  # noqa: BLE001 - whole-job T4 cell
+            failed_from = 0
+            reason = f"{type(exc).__name__}: {exc}"
+
+        if failed_from is not None:
+            # Report FIRST (one atomic update; the ids are the T4 fence),
+            # then zero-fill best-effort.
+            cw._glm53_load_error_ids.update(
+                int(r) for r in dst_ids[failed_from:] if r != 0
+            )
+            logger.warning(
+                "%s disk load job %d FAILED at chunk %d/%d (%s): reported "
+                "%d invalid block(s), zero-filling the suffix (recompute)",
+                _GLM53_KVR_TAG,
+                job_id,
+                failed_from,
+                len(entries) or len(dst_ids),
+                reason,
+                len(dst_ids[failed_from:]),
+            )
+            if tensors is not None and gpu_refs is not None:
+                for row in dst_ids[failed_from:]:
+                    if row == 0:
+                        continue
+                    try:
+                        for ref in gpu_refs:
+                            tensors[ref.tensor_idx].tensor[
+                                row, : ref.page_size_bytes
+                            ].zero_()
+                    except Exception:  # noqa: BLE001 - ids already reported
+                        pass
+        else:
+            stats = getattr(cw._connector_worker_meta, "transfer_stats", None)
+            if stats is not None:
+                try:
+                    stats.load.record(n_bytes, _time.monotonic() - t0)
+                except Exception:  # noqa: BLE001 - stats are best-effort
                     pass
-            cw._glm53_load_error_ids.add(int(row))
-    else:
-        stats = getattr(cw._connector_worker_meta, "transfer_stats", None)
-        if stats is not None:
-            try:
-                stats.load.record(n_bytes, _time.monotonic() - t0)
-            except Exception:  # noqa: BLE001 - stats are best-effort
-                pass
-        logger.info(
-            "%s disk load job %d restored %d chunk(s), %d bytes, %.3f s",
-            _GLM53_KVR_TAG,
-            job_id,
-            len(entries),
-            n_bytes,
-            _time.monotonic() - t0,
-        )
-    cw._glm53_disk_done.append(job_id)
+            logger.info(
+                "%s disk load job %d restored %d chunk(s), %d bytes, %.3f s",
+                _GLM53_KVR_TAG,
+                job_id,
+                len(entries),
+                n_bytes,
+                _time.monotonic() - t0,
+            )
+    finally:
+        if job_id not in cw._glm53_disk_done:
+            cw._glm53_disk_done.append(job_id)
 
 
-def expected_segments_at(expected_segments):
+def _glm53_json_norm(segments):
     """JSON round-trip normalization for the header comparison."""
-    return _glm53_json.loads(_glm53_json.dumps(expected_segments))
+    return _glm53_json.loads(_glm53_json.dumps(segments))
 
 
 '''
@@ -874,7 +1044,45 @@ PATCHED_R10 = """    manifests = []
         for k in _glm53_cand_idxs:
 """
 
+# R11: _build_store_jobs asserts every in-flight job of a request is a store
+# (fixture scheduler :1401-1403). A request whose disk LOAD job is still
+# registered (aborted mid-load, or worker output delayed a step under async
+# scheduling) can reach store-job construction and trip the assert (Codex
+# OFFLOAD2-REVIEW finding 1, BLOCKER). Defer store creation for that request
+# instead: the stock invariant IS "stores only when no load is pending", and
+# next_stored_chunk_idx is untouched so nothing is lost -- the next step
+# reconsiders after the load completes.
+MARK_R11 = "            if req_status.transfer_jobs and not self._jobs[  # [glm53-kv-offload-restore] R11\n"
+
+ANCHOR_R11 = """            req_status = self._req_status.get(req_id)
+            if req_status is None:
+                continue
+            req = req_status.req
+
+            if req.status is RequestStatus.FINISHED_ABORTED:
+"""
+
+PATCHED_R11 = """            req_status = self._req_status.get(req_id)
+            if req_status is None:
+                continue
+            if req_status.transfer_jobs and not self._jobs[  # [glm53-kv-offload-restore] R11
+                next(iter(req_status.transfer_jobs))
+            ].is_store:
+                # A disk-restore LOAD job is still registered for this
+                # request (per the connector invariant, the only job then):
+                # defer store-job creation to a later step -- reaching the
+                # is_store assert below would crash the scheduler, and the
+                # stock invariant is exactly "stores only when no load is
+                # pending". next_stored_chunk_idx is untouched: nothing is
+                # lost.
+                continue
+            req = req_status.req
+
+            if req.status is RequestStatus.FINISHED_ABORTED:
+"""
+
 SITES_SCHED = (
+    ("R11 store-jobs load-defer guard", MARK_R11, ANCHOR_R11, PATCHED_R11),
     ("R1 restore state class", MARK_R1, ANCHOR_R1, PATCHED_R1),
     ("R2 disk lookup route", MARK_R2, ANCHOR_R2, PATCHED_R2),
     ("R3 restore state init", MARK_R3, ANCHOR_R3, PATCHED_R3),
@@ -1001,7 +1209,7 @@ PATCHED_W7 = """        # In-memory manifest index for inline K-boundary retenti
         self._glm53_boot_id = f"{_glm53_time.time():.0f}-{id(self):x}"
 """
 
-MARK_W8 = "            self._glm53_manifest_events.append(  # [glm53-kv-offload-restore] publish\n"
+MARK_W8 = "                self._glm53_manifest_events.append(  # [glm53-kv-offload-restore] publish\n"
 
 ANCHOR_W8 = """        with self._lock:
             self._manifest_index[boundary_hash] = {
@@ -1017,19 +1225,20 @@ PATCHED_W8 = """        with self._lock:
                 "boundary": cand["boundary_token_index"],
                 "mamba_keys": [(boundary_hash, g) for g in cow_groups],
             }
-            self._glm53_manifest_events.append(  # [glm53-kv-offload-restore] publish
-                (
-                    "+",
-                    self._rank,
-                    self._namespace_hash,
-                    boundary_hash,
-                    cand["boundary_token_index"],
-                    self._glm53_boot_id,
+            if len(self._glm53_manifest_events) < 100000:  # bounded, fail closed
+                self._glm53_manifest_events.append(  # [glm53-kv-offload-restore] publish
+                    (
+                        "+",
+                        self._rank,
+                        self._namespace_hash,
+                        boundary_hash,
+                        cand["boundary_token_index"],
+                        self._glm53_boot_id,
+                    )
                 )
-            )
 """
 
-MARK_W9 = "                self._glm53_manifest_events.append(  # [glm53-kv-offload-restore] supersede\n"
+MARK_W9 = "                    self._glm53_manifest_events.append(  # [glm53-kv-offload-restore] supersede\n"
 
 ANCHOR_W9 = """            with self._lock:
                 self._manifest_index.pop(boundary_hash, None)
@@ -1037,19 +1246,20 @@ ANCHOR_W9 = """            with self._lock:
 
 PATCHED_W9 = """            with self._lock:
                 self._manifest_index.pop(boundary_hash, None)
-                self._glm53_manifest_events.append(  # [glm53-kv-offload-restore] supersede
-                    (
-                        "-",
-                        self._rank,
-                        self._namespace_hash,
-                        boundary_hash,
-                        entry["boundary"],
-                        self._glm53_boot_id,
+                if len(self._glm53_manifest_events) < 100000:  # bounded
+                    self._glm53_manifest_events.append(  # [glm53-kv-offload-restore] supersede
+                        (
+                            "-",
+                            self._rank,
+                            self._namespace_hash,
+                            boundary_hash,
+                            entry["boundary"],
+                            self._glm53_boot_id,
+                        )
                     )
-                )
 """
 
-MARK_W10 = "            self._glm53_manifest_events.append(  # [glm53-kv-offload-restore] write failure\n"
+MARK_W10 = "                self._glm53_manifest_events.append(  # [glm53-kv-offload-restore] write failure\n"
 
 ANCHOR_W10 = """        self._files_dropped += 1
         with self._lock:
@@ -1061,16 +1271,17 @@ PATCHED_W10 = """        self._files_dropped += 1
             self._failed_keys.add((hash_hex, group_idx))
             # The per-job store failure bit, on the wire: the scheduler's
             # disk lookup denies boundaries whose keys failed on ANY rank.
-            self._glm53_manifest_events.append(  # [glm53-kv-offload-restore] write failure
-                (
-                    "F",
-                    getattr(self, "_rank", -1),
-                    getattr(self, "_namespace_hash", ""),
-                    hash_hex,
-                    group_idx,
-                    self._glm53_boot_id,
+            if len(self._glm53_manifest_events) < 100000:  # bounded
+                self._glm53_manifest_events.append(  # [glm53-kv-offload-restore] write failure
+                    (
+                        "F",
+                        getattr(self, "_rank", -1),
+                        getattr(self, "_namespace_hash", ""),
+                        hash_hex,
+                        group_idx,
+                        self._glm53_boot_id,
+                    )
                 )
-            )
 """
 
 # W11: validated dedup branch + the validator/drain methods (finding 9).
@@ -1138,7 +1349,9 @@ PATCHED_W12 = """    # [glm53-kv-offload-restore] manifest validation + event dr
             if (boundary_hash, gidx) in failed:
                 return False
             try:
-                fh = glm53_read_chunk_header(self._file_path(boundary_hash, gidx))
+                fh = glm53_read_chunk_header(
+                    self._file_path(boundary_hash, gidx), verify_payload=True
+                )
             except (OSError, ValueError):
                 return False
             if (
@@ -1152,7 +1365,9 @@ PATCHED_W12 = """    # [glm53-kv-offload-restore] manifest validation + event dr
                 if (h, gidx) in failed:
                     return False
                 try:
-                    fh = glm53_read_chunk_header(self._file_path(h, gidx))
+                    fh = glm53_read_chunk_header(
+                        self._file_path(h, gidx), verify_payload=True
+                    )
                 except (OSError, ValueError):
                     return False
                 if (
@@ -1165,6 +1380,23 @@ PATCHED_W12 = """    # [glm53-kv-offload-restore] manifest validation + event dr
 
     # ---- manifests ------------------------------------------------------
     def _finish_job(self, job) -> None:
+"""
+
+# W13: the store writer's existing-chunk dedup must verify the PAYLOAD, not
+# only the header (Codex OFFLOAD2-REVIEW finding 4: a stale file with a valid
+# unchanged header but torn payload must be rewritten, not deduped).
+MARK_W13 = "                h = glm53_read_chunk_header(path, verify_payload=True)  # [glm53-kv-offload-restore] dedup\n"
+
+ANCHOR_W13 = """            try:
+                h = glm53_read_chunk_header(path)
+                if (
+                    h.get("namespace_hash") == self._namespace_hash
+"""
+
+PATCHED_W13 = """            try:
+                h = glm53_read_chunk_header(path, verify_payload=True)  # [glm53-kv-offload-restore] dedup
+                if (
+                    h.get("namespace_hash") == self._namespace_hash
 """
 
 SITES_WORKER = (
@@ -1180,6 +1412,7 @@ SITES_WORKER = (
     ("W10 write-failure event", MARK_W10, ANCHOR_W10, PATCHED_W10),
     ("W11 validated dedup", MARK_W11, ANCHOR_W11, PATCHED_W11),
     ("W12 validator + drain methods", MARK_W12, ANCHOR_W12, PATCHED_W12),
+    ("W13 payload-verifying chunk dedup", MARK_W13, ANCHOR_W13, PATCHED_W13),
 )
 
 
@@ -1271,13 +1504,18 @@ def verified_state(text: str, sites) -> bool:
 def prepare(source: str, sites, label: str) -> tuple[str, str]:
     marks = sum(source.count(mark) for _n, mark, _a, _p in sites)
     if marks:
+        # This overlay is the LAST of the kv-offload trio -- nothing edits
+        # inside its patched regions afterwards, so the already-present path
+        # can and MUST verify the full patched blocks, not just the marks
+        # (Codex OFFLOAD2-REVIEW finding 10: a tampered file that kept its
+        # marker lines would otherwise pass silently).
         if marks != len(sites) or any(
             source.count(mark) != 1 for _n, mark, _a, _p in sites
-        ):
+        ) or not verified_state(source, sites):
             raise ValueError(
-                f"partial/inconsistent kv-offload-restore patch in {label} "
-                f"(marks={marks}, expected {len(sites)}) -- refusing to touch "
-                "a half-patched file"
+                f"partial/inconsistent/tampered kv-offload-restore patch in "
+                f"{label} (marks={marks}, expected {len(sites)}) -- refusing "
+                "to touch the file"
             )
         return source, "already present"
     for name, _mark, anchor, _patched in sites:

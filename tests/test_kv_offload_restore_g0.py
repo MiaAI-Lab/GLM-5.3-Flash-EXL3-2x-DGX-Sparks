@@ -99,7 +99,23 @@ def test_patcher_hygiene() -> None:
         restore.prepare(tampered, restore.SITES_SCHED, "t")
         check(False, "A4 half-patched file refused")
     except ValueError as exc:
-        check("half-patched" in str(exc), "A4 half-patched file refused")
+        check("tampered" in str(exc), "A4 half-patched file refused")
+
+    # F10 (review): tampering INSIDE a patched block while keeping every
+    # marker line must be refused on the already-present path.
+    tampered2 = texts["scheduler"].replace(
+        "self._glm53_restore.job_started(load_job_id)",
+        "pass  # neutered gate",
+        1,
+    )
+    assert all(
+        tampered2.count(m) == 1 for _n, m, _a, _p in restore.SITES_SCHED
+    )
+    try:
+        restore.prepare(tampered2, restore.SITES_SCHED, "t")
+        check(False, "A4b marked-but-tampered file refused (review f10)")
+    except ValueError:
+        check(True, "A4b marked-but-tampered file refused (review f10)")
 
     # A store-less scheduler must fail anchors (R10 anchors store output).
     store_less = patched_texts(with_store=False)["scheduler"]
@@ -393,6 +409,92 @@ def test_scheduler_restore() -> None:
             cands[0], key=lambda m: m["boundary_token_index"]
         )] == [1, 2],
         f"B10 zero-cow manifest candidates cumulative per boundary (got {cands})",
+    )
+
+    # B12 (review f11): distinct num_tokens vs num_prompt_tokens — the
+    # lookup caps at num_tokens (a re-admitted request's decoded tokens are
+    # legitimately restorable; offload_prompt_only=false stores them).
+    req_d = stub.FakeRequest(
+        num_tokens=3 * 3584,
+        req_id="rq-decode",
+        num_prompt_tokens=2 * 3584,
+    )
+    req_d.block_hashes = req.block_hashes[: len(req_d.block_hashes)]
+    sched.on_new_request(req_d)
+    hit_d, _ = sched.get_num_new_matched_tokens(req_d, 0)
+    check(
+        hit_d == 10752,
+        f"B12 boundary past num_prompt but within num_tokens hits (got {hit_d})",
+    )
+
+    # B13: local prefix already AT the deepest boundary => no restore hit.
+    st_d = sched._req_status[req_d.request_id]
+    st_d.num_locally_computed_tokens = 10752
+    check(
+        rst.lookup(sched, st_d) == 0,
+        "B13 local == deepest boundary => 0 (nothing beyond to restore)",
+    )
+
+    # B14 (review f7/f8): garbage ranks never satisfy the quorum; a changed
+    # writer boot id retracts that rank's availability.
+    req_e = stub.FakeRequest(num_tokens=2 * 3584, req_id="rq-e", salt=b"e14")
+    sched.on_new_request(req_e)
+    b1e = _boundary_hash(req_e, 1)
+    rst.consume_events([("+", 0, "ns1", b1e, 7168, "boot0")])
+    rst.consume_events([("+", 7, "ns1", b1e, 7168, "boot0")])  # bogus rank
+    hit_e, _ = sched.get_num_new_matched_tokens(req_e, 0)
+    check(hit_e == 0, "B14 out-of-range rank never completes the quorum")
+    rst.consume_events([("+", 1, "ns1", b1e, 7168, "boot0")])
+    hit_e, _ = sched.get_num_new_matched_tokens(req_e, 0)
+    check(hit_e == 7168, "B14b real second rank completes it")
+    rst.consume_events([("+", 1, "ns1", "ff" * 32, 3584, "boot1")])  # restart
+    hit_e, _ = sched.get_num_new_matched_tokens(req_e, 0)
+    check(
+        hit_e == 0,
+        "B14c changed writer boot id retracts that rank's availability",
+    )
+    # Repair rank 1's availability under its new generation for B16 (the
+    # boot-id retraction dropped rank 1 from EVERY boundary, including the
+    # main chain's b1 that B16 relies on).
+    rst.consume_events([("+", 1, "ns1", b1, 7168, "boot1")])
+
+    # B15 (review f2): a short hash list ships an all-fail spec, never an
+    # IndexError out of update_state_after_alloc.
+    spec_bad = rst.build_load_spec(
+        SimpleNamespace(request_id="rq-short", block_hashes=[b"x" * 32]),
+        SimpleNamespace(num_locally_computed_tokens=0),
+        10752,
+        10752,
+    )
+    check(
+        spec_bad["entries"] == [] and spec_bad["glm53_disk_load"] == 1,
+        "B15 short hash list => empty-entry (all-fail) spec, no IndexError",
+    )
+
+    # B16 (review f1, BLOCKER): a request whose disk LOAD job is still
+    # registered must not reach _build_store_jobs' is_store assert — store
+    # creation is deferred instead.
+    req_f = stub.FakeRequest(num_tokens=2 * 3584 + 5, req_id="rq-f")
+    req_f.block_hashes = req.block_hashes[: len(req_f.block_hashes)]
+    sched.on_new_request(req_f)
+    hit_f, _ = sched.get_num_new_matched_tokens(req_f, 0)
+    check(hit_f == 7168, "B16 setup hit")
+    blocks_f = mods["kv_cache_manager"].KVCacheBlocks(
+        blocks=([FakeBlock(400), FakeBlock(401)],)
+    )
+    sched.update_state_after_alloc(req_f, blocks_f, hit_f)
+    sched._current_batch_load_jobs.clear()  # job registered in _jobs
+    so_f = SimpleNamespace(
+        num_scheduled_tokens={req_f.request_id: 5},
+        finished_req_ids=set(),
+        req_data={req_f.request_id: (None, False)},
+        partial_tail_offloads=None,
+    )
+    sched._update_req_states(so_f)
+    jobs_f = sched._build_store_jobs(so_f)  # would assert without R11
+    check(
+        jobs_f == {},
+        "B16b store-job creation deferred while the load job is in flight",
     )
 
     # B11: RESTORE=0 keeps the stage-1 short-circuit (no disk lookup).
@@ -726,6 +828,7 @@ def test_disk_loader() -> None:
 
         # C8 wrong-rank chunk header rejected.
         h0path = Path(writer._file_path(_hash(0), 0))
+        h0_orig_blob = h0path.read_bytes()
         h0 = store.read_chunk_header(str(h0path), verify_payload=True)
         payload = h0path.read_bytes()[16 + len(json.dumps(h0, sort_keys=True,
                                                           separators=(",", ":")).encode()):]
@@ -746,6 +849,7 @@ def test_disk_loader() -> None:
             and cw._glm53_load_error_ids == {60, 61, 62},
             "C8 wrong-rank header: failed from chunk 0 (never cross-rank bytes)",
         )
+        h0path.write_bytes(h0_orig_blob)
         cw._glm53_disk_done.clear()
         cw._glm53_load_error_ids.clear()
 
@@ -759,6 +863,115 @@ def test_disk_loader() -> None:
         )
         cw._glm53_disk_done.clear()
         cw._glm53_load_error_ids.clear()
+
+        # C10 (review f11): truncated chunk file.
+        v0 = Path(writer._file_path(_hash(0), 0))
+        v0_blob = v0.read_bytes()
+        v0.write_bytes(v0_blob[:-5])
+        ns["_glm53_run_disk_load"](
+            cw, 84, _load_spec(writer, 3), SimpleNamespace(block_ids=[70, 71, 72])
+        )
+        check(
+            cw._glm53_disk_done == [84]
+            and cw._glm53_load_error_ids == {70, 71, 72},
+            "C10 truncated chunk: failed from chunk 0, job done",
+        )
+        v0.write_bytes(v0_blob)
+        cw._glm53_disk_done.clear()
+        cw._glm53_load_error_ids.clear()
+
+        # C11: wrong spec_kind header rejected.
+        h0 = store.read_chunk_header(str(v0))
+        raw = v0.read_bytes()
+        hlen = int.from_bytes(raw[8:12], "little")
+        payload0 = raw[16 + hlen :]
+        h_bad = {
+            k: v
+            for k, v in h0.items()
+            if k not in ("payload_len", "payload_crc32", "crc_algo", "format_version")
+        }
+        h_bad["spec_kind"] = "MambaSpec"
+        v0.write_bytes(store.encode_chunk(h_bad, payload0))
+        ns["_glm53_run_disk_load"](
+            cw, 85, _load_spec(writer, 1), SimpleNamespace(block_ids=[75])
+        )
+        check(
+            cw._glm53_disk_done == [85] and cw._glm53_load_error_ids == {75},
+            "C11 wrong spec_kind rejected",
+        )
+        v0.write_bytes(v0_blob)
+        cw._glm53_disk_done.clear()
+        cw._glm53_load_error_ids.clear()
+
+        # C12: segment-table mismatch (tampered dtype) rejected.
+        h_bad2 = {
+            k: v
+            for k, v in h0.items()
+            if k not in ("payload_len", "payload_crc32", "crc_algo", "format_version")
+        }
+        import copy
+
+        h_bad2["segment_table"] = copy.deepcopy(h0["segment_table"])
+        h_bad2["segment_table"][0]["dtype"] = "torch.float16"
+        v0.write_bytes(store.encode_chunk(h_bad2, payload0))
+        ns["_glm53_run_disk_load"](
+            cw, 86, _load_spec(writer, 1), SimpleNamespace(block_ids=[76])
+        )
+        check(
+            cw._glm53_disk_done == [86] and cw._glm53_load_error_ids == {76},
+            "C12 segment-table mismatch rejected (byte count alone not enough)",
+        )
+        v0.write_bytes(v0_blob)
+        cw._glm53_disk_done.clear()
+        cw._glm53_load_error_ids.clear()
+
+        # C13: manifest chain tampered => all chunks failed.
+        m2p = Path(writer._manifest_path(_hash(2)))
+        m2_raw = json.loads(m2p.read_text())
+        m2_bad = dict(m2_raw)
+        m2_bad["chunk_hashes"] = [_hash(9), _hash(1), _hash(2)]
+        m2p.write_text(json.dumps(m2_bad, sort_keys=True))
+        ns["_glm53_run_disk_load"](
+            cw, 87, _load_spec(writer, 3), SimpleNamespace(block_ids=[80, 81, 82])
+        )
+        check(
+            cw._glm53_disk_done == [87]
+            and cw._glm53_load_error_ids == {80, 81, 82},
+            "C13 manifest chain divergence: all chunks failed",
+        )
+        m2p.write_text(json.dumps(m2_raw, sort_keys=True))
+        cw._glm53_disk_done.clear()
+        cw._glm53_load_error_ids.clear()
+
+        # C14: manifest per-chunk CRC ledger mismatch => that chunk fails.
+        m2_bad2 = json.loads(json.dumps(m2_raw))
+        m2_bad2["full_groups"]["0"][1][2] ^= 0xFF
+        m2p.write_text(json.dumps(m2_bad2, sort_keys=True))
+        ns["_glm53_run_disk_load"](
+            cw, 88, _load_spec(writer, 3), SimpleNamespace(block_ids=[90, 91, 92])
+        )
+        check(
+            cw._glm53_disk_done == [88]
+            and cw._glm53_load_error_ids == {91, 92},
+            "C14 ledger CRC mismatch: chunk 1 suffix failed",
+        )
+        m2p.write_text(json.dumps(m2_raw, sort_keys=True))
+        cw._glm53_disk_done.clear()
+        cw._glm53_load_error_ids.clear()
+
+        # C15 (review f3): unidentifiable destinations PROPAGATE (fail-stop,
+        # never an ack that could serve stale bytes).
+        try:
+            ns["_glm53_run_disk_load"](
+                cw, 89, _load_spec(writer, 1),
+                SimpleNamespace(block_ids=["not-an-int"]),
+            )
+            check(False, "C15 malformed dst_spec propagates (fail-stop)")
+        except (TypeError, ValueError):
+            check(
+                89 not in cw._glm53_disk_done,
+                "C15 malformed dst_spec propagates (fail-stop)",
+            )
     _cleanup_env()
 
 
