@@ -520,6 +520,7 @@ this Dockerfile instead. After CUDA compile, Python overlay edits
 | `overlay/patch_model_overrides.py` | `"exl3"` in ModelConfig overrides |
 | `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0` |
 | `tests/test_apc_fine_grained_hits.py` | host: 86 checks — anchors, transactional apply, drift/partial-marker refusal, composition with `patch_hybrid_prefix_hit.py` in both orders on live + pristine sources, kpool-invariant raise paths, kill-switch path (needs `GLM53_KV_COORDINATOR_PY_SRC`) |
+| `tests/test_launcher_rank_parity.py` | launcher (CPU-only, docker/ssh stubbed): `GLM53_APC_RETENTION_INTERVAL_SWA` guard matrix where wired, `restart` fails closed on a bad knob or a missing / mis-pointed / broken overlay (every artifact) before anything is stopped, overlay order pinned `hybrid -> per-group -> fine-grained` in both rank scripts, both ranks mount the same host artifacts (head mount = scp source = worker mount) and receive identical `GLM53_APC_RETENTION_INTERVAL[_SWA]` / `GLM53_FINEGRAINED_APC` values |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
 | `start.sh` / `stop.sh` / `download.sh` | 2-node launch; Hub fetch on the head only |
 | `files/chat_template.jinja` | GLM-5.3 MM template (`<|image|>` / `<|video|>`); checkpoint jinja is language-only |
