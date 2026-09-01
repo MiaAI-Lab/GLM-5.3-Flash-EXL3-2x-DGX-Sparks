@@ -245,7 +245,7 @@ GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
 # tokens, so `high` is the recommendation for agentic coding
 # (docs/RECEIPTS-default-reasoning-effort.md). Set per-request
 # chat_template_kwargs.reasoning_effort to override this default.
-# low | high | max; empty = send no flag. Default applies only when UNSET.
+# low | high | max; empty or unset = send no flag.
 GLM53_DEFAULT_REASONING_EFFORT="${GLM53_DEFAULT_REASONING_EFFORT-}"
 # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
 # exceed that without being a true hang. NCCL watchdog is still 600s.

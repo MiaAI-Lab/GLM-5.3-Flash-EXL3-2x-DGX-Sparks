@@ -45,10 +45,10 @@ Medians (n = 2 per arm):
 | Tool calls | 31 | 26 | 0.84× |
 | Compactions | 0 | 2 | — |
 
-Effective decode rate was comparable across arms (A-1 ≈ 27.8 completion tok/s, B-2 ≈ 28.3), so
-essentially the whole wall-time gap is **extra generated reasoning**, not slower serving.
-Every run was graded 80/80 and every run's own test suite passed, so tool-calling and structured
-output were exercised at both settings.
+Effective decode rate was comparable across arms (A-1 ≈ 27.8 completion tok/s, B-2 ≈ 28.3). That is
+consistent with most of the wall-time gap being **extra generated reasoning**; it does not isolate
+prompt-processing or tool latency. Every run was graded 80/80 and every run's own test suite passed, so
+the normal tool-calling protocol was exercised at both settings (guided JSON / `response_format` was not).
 
 **Recommendation: `high` for agentic coding.** Not `low` — a genuine `high`-vs-`low` quality A/B
 has not been run, so `low` is not evidenced here. Arm B was **not** `low`; it was `max`.
@@ -67,10 +67,11 @@ Four runs, alternating A,B,A,B, one at a time, server never reconfigured.
 
 Medians: wall 593 s vs 252.5 s, completion tokens 16,541 vs 7,241, grader 80.0 vs 79.5 (the lost point was a
 41-line README against a 40-line limit). A tool-call canary (`opencode run` with a `read` tool) passed at both efforts.
-Across v1 + v2 the three levels order monotonically at the grader ceiling: low 252 s < high 468–593 s < max 2,160 s.
+Across v1 + v2 the observed wall-time medians ordered low 252 s < high 468–593 s < max 2,160 s, with quality
+at or near the grader ceiling in every arm.
 
-Caveats that apply to both A/Bs: n = 2 per arm, one task, and a grader at its ceiling — the benchmark discriminates
-**cost**, not reasoning quality. `low` visibly does less exploration (half the turns and tool calls). That is why the
+Caveats that apply to both A/Bs: n = 2 per arm, one task, and a grader at or near its ceiling — these small runs
+primarily measure **cost**, not reasoning quality. `low` visibly does less exploration (half the turns and tool calls). That is why the
 recommendation stays `high`, and why `low` is documented as legal but not recommended.
 
 ## Live receipts (captured 2026-09-01)
