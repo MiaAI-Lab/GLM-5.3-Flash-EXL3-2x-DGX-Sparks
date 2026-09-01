@@ -189,15 +189,20 @@ FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-12.1a}"
 # 1..4 seqs × 3 tokens (must include 3). DFlash2 k=7 is 1..4 seqs × 8 tokens
 # (must include 8, 16, 24, 32).
 ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
+# The capture list this launcher generated (empty = eager, or the caller put
+# its own --cudagraph-capture-sizes in EXTRA_ARGS). validate_numeric_config
+# checks MAX_NUM_SEQS against its largest entry for the MTP list (issue #88).
+GLM53_CG_CAPTURE_SIZES=""
 if [ "${ENFORCE_EAGER}" != "1" ]; then
     case " ${EXTRA_ARGS:-} " in
         *" --cudagraph-capture-sizes "*|*" cudagraph-capture-sizes "*) ;;
         *)
             if [ "$SPEC_METHOD" = "dflash" ]; then
-                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 4 8 16 24 32"
+                GLM53_CG_CAPTURE_SIZES="1 2 4 8 16 24 32"
             else
-                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 3 4 6 8 12"
+                GLM53_CG_CAPTURE_SIZES="1 2 3 4 6 8 12"
             fi
+            EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes $GLM53_CG_CAPTURE_SIZES"
             ;;
     esac
 fi
@@ -300,6 +305,36 @@ validate_numeric_config() {
     _glm53_canonical_positive_int MAX_MODEL_LEN "$MAX_MODEL_LEN" 1000000 || return
     _glm53_canonical_positive_int MAX_NUM_SEQS "$MAX_NUM_SEQS" 4096 || return
     _glm53_canonical_positive_int MAX_NUM_BATCHED_TOKENS "$MAX_NUM_BATCHED_TOKENS" 8388608 || return
+    _glm53_validate_cudagraph_capture_envelope || return
+}
+
+# Issue #88: on this image vLLM's profile_cudagraph_memory() builds its
+# throwaway KV config with num_blocks = the largest capture size and calls
+# initialize_kv_cache() without is_profiling=True, so the Mamba guard in
+# compilation.py resolve_cudagraph_mode_and_sizes() raises
+#   max_num_seqs (N) exceeds available Mamba cache blocks (12)
+# in EngineCore init, after weight load. With the launcher's non-DFlash list
+# (1 2 3 4 6 8 12) that rejects every MAX_NUM_SEQS above 12 - and `restart`
+# would already have stopped the running server. Refuse the combination here,
+# before anything is stopped. Only the launcher-generated list is checked: a
+# caller's own --cudagraph-capture-sizes in EXTRA_ARGS is not parsed, and
+# the DFlash list (max 32) is not gated - its limit is unmeasured. Measured
+# for SPEC_METHOD=mtp; `none` and any other non-dflash value get the same
+# list and the same vLLM code path, so they are gated too.
+_glm53_validate_cudagraph_capture_envelope() {
+    local sizes="${GLM53_CG_CAPTURE_SIZES:-}" cap=0 size
+    [ "${SPEC_METHOD:-dflash}" != "dflash" ] || return 0
+    [ -n "$sizes" ] || return 0
+    for size in $sizes; do
+        if ! [[ "$size" =~ ^[0-9]+$ ]]; then
+            echo "internal error: launcher capture list is not numeric (GLM53_CG_CAPTURE_SIZES='$sizes')" >&2
+            return 2
+        fi
+        if [ "$size" -gt "$cap" ]; then cap="$size"; fi
+    done
+    [ "$MAX_NUM_SEQS" -gt "$cap" ] || return 0
+    echo "MAX_NUM_SEQS=$MAX_NUM_SEQS exceeds the largest CUDA-graph capture size ($cap) of the launcher's SPEC_METHOD=$SPEC_METHOD list ($sizes). On this image's vLLM that boot fails in EngineCore init, after weight load: profile_cudagraph_memory() builds a $cap-block throwaway KV config without is_profiling=True and raises 'max_num_seqs ($MAX_NUM_SEQS) exceeds available Mamba cache blocks ($cap)' - a profiling-path false positive, not a measured KV/scheduler limit (issue #88). Lower MAX_NUM_SEQS to at most $cap, set ENFORCE_EAGER=1 (no CUDA graphs), or supply a verified larger --cudagraph-capture-sizes list in EXTRA_ARGS (caller lists are not validated)." >&2
+    return 2
 }
 # GLM53 numeric config guard (end)
 
