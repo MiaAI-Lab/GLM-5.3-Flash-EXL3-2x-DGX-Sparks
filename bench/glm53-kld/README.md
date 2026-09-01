@@ -33,7 +33,7 @@ contexts / 221,076 positions (see "Our measured row"). Suite lives in
 | `glm53-kld-runs/fp8-anchor-bf16.json` | FP8 lane vs reference, 30 contexts: median per-context relative delta vs the published report **5.89e-5**, scope-mean drift **3.49e-5** - our scorer reproduces their numbers |
 | `glm53-kld-runs/fp8-anchor-111ctx.json` | 48 complete triples: mean **0.028057966** vs the published **0.028058384** for the same indices - scope-mean drift **1.49e-5**, median per-context delta 5.68e-5, all gates pass |
 | `glm53-kld-runs/fp8-anchor.json` | the same run in float32: delta 1.17e-2. Kept as the negative control that pinned the dtype rule below |
-| `selftest.py` | 12 CPU checks, all pass |
+| `selftest.py` | 13 named CPU checks, all pass |
 | lm_head bit-check | our AWQ `lm_head.weight` is bit-identical to the suite head |
 | lane geometry control | per-token RMS of our captured lane (min 0.670 / median 1.369 / max 1.445) against the teacher lane (0.660 / 1.370 / 1.445), the FP8 lane (0.616 / 1.369 / 1.445) and the published cut-point stats (0.784 / 1.380 / 1.442). Re-applying the norm would pin every row near ‖norm.weight‖ = 1.4315; capturing before it would show a much wider, depth-growing spread. The shape of the distribution is the evidence, not the mean |
 
@@ -144,7 +144,9 @@ bash fetch-fidelity-suite.sh SELECT=ref PARALLEL=10 # 512 reference shards, 8.6 
 
 ```
 candidate      cmp170hx-awq-w4a16  (wtdcode GLM-5.3-Flash-AWQ-W4A16, our vLLM fork, PP4 14,12,12,7)
-scope          108 contexts (tokens/context-0000..0114 present), 221,076 positions, 97 source clusters
+scope          108 contexts scored of 112 captured (indices 0-114; 63/68/90/113 have no
+                 reference shard - the reference-lane download is partial, see below),
+                 221,076 positions, 97 source clusters
 token_mean_kld 0.077026 nats      bootstrap 95% [0.069561, 0.085387]
 mean_jsd_bits  0.024241           top1_agreement 0.9085
 p95 / p999 / max  0.314 / 3.167 / 17.29 nats
@@ -155,6 +157,12 @@ report         ../glm53-kld-runs/awq-row-112ctx.json  report_sha256=c8135e5623dd
 Against the published rows on the **same 108 indices**: FP8 = 0.026898, so **AWQ measures 2.86x the
 FP8 row** and ranks below the published EXL3 K3 (0.0505) on the full 5,120-context scale
 (0.0137 K6 / 0.0255 TR3-4bpw / 0.0273 K4 / 0.0281 FP8 / 0.0505 K3 / **0.077 ours** / 0.155 K2).
+
+**Why 108 of 112**: 112 windows were captured (indices 0-114), but four (63, 68, 90, 113) have no
+reference shard on this host -- the reference-lane fetch stopped partway (384 shards present, index
+range 0-428, not contiguous; the FP8 lane has 243). The loss is scattered across indices rather than
+concentrated in a stratum, and finishing the fetch extends the row to 112 by re-scoring on CPU, no
+cards needed.
 
 `d(AWQ, official-FP8-lane) = 0.0836` over the 49 shared source clusters -- larger than
 `d(AWQ, BF16) = 0.0770`, i.e. our error is *independent* of FP8's, not an FP8-like perturbation.
@@ -275,11 +283,11 @@ Context for interpretation:
 | `score_hidden_kld.py` | head-only replay, per-context metrics, strata, bootstrap, offset audit, anchor gate |
 | `fetch-fidelity-suite.sh` | verified resumable download |
 | `probe_container.py` | engine preflight without loading weights |
-| `selftest.py` | 12 CPU checks: `python selftest.py` |
+| `selftest.py` | 13 named CPU checks: `python selftest.py` |
 
 ## Validation performed
 
-* `selftest.py`: 12/12 pass, including the cut-point refusal, the sealed-token
+* `selftest.py`: 13/13 named checks pass, including the cut-point refusal, the sealed-token
   refusal, head-only replay matching an independent float64 reference, the
   reference-vs-itself exact zero, the offset audit, and the tap's row gate;
 * `probe_container.py` inside `vllm/vllm-backport:cmp170hx`: tap installs,
