@@ -295,6 +295,39 @@ _glm53_canonical_positive_int() {
     export "$name"
 }
 
+# Prefix-cache retention intervals are token counts on the scheduler-block
+# grid. "" (unset = the overlay's automatic rule) and 0 pass as-is; anything
+# else must be a positive multiple of GLM53_APC_BLOCK_TOKENS no larger than
+# GLM53_APC_RETENTION_MAX -- the same rule overlay/patch_apc_per_group_retention.py
+# re-checks at coordinator init against the live scheduler_block_size. main()
+# runs this guard before `restart` stops anything, so a typo is a launcher
+# error with the healthy pair still serving, not a boot failure after the old
+# containers are already gone. The canonical value (leading zeros stripped) is
+# what both ranks receive.
+GLM53_APC_BLOCK_TOKENS=3584
+GLM53_APC_RETENTION_MAX=1000000
+_glm53_validate_retention_interval() {
+    local name="$1" value="$2" canonical
+    [ -n "$value" ] || return 0
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        echo "$name must be empty, 0, or a positive multiple of $GLM53_APC_BLOCK_TOKENS <= $GLM53_APC_RETENTION_MAX (got: $value)" >&2
+        return 2
+    fi
+    canonical="$value"
+    while [ "${canonical#0}" != "$canonical" ]; do canonical="${canonical#0}"; done
+    [ -n "$canonical" ] || canonical=0
+    if [ "$canonical" != 0 ] \
+       && { [ "${#canonical}" -gt "${#GLM53_APC_RETENTION_MAX}" ] \
+            || [ "$canonical" -gt "$GLM53_APC_RETENTION_MAX" ] \
+            || [ $((canonical % GLM53_APC_BLOCK_TOKENS)) -ne 0 ]; }; then
+        echo "$name must be empty, 0, or a positive multiple of $GLM53_APC_BLOCK_TOKENS <= $GLM53_APC_RETENTION_MAX (got: $value)" >&2
+        return 2
+    fi
+    printf -v "$name" '%s' "$canonical"
+    # shellcheck disable=SC2163
+    export "$name"
+}
+
 validate_numeric_config() {
     if ! [[ "$GPU_MEM_UTIL" =~ ^(0([.][0-9]+)?|[.][0-9]+|1([.]0+)?)$ ]] \
        || ! awk -v u="$GPU_MEM_UTIL" 'BEGIN { exit !(u > 0 && u <= 1) }'; then
@@ -304,8 +337,90 @@ validate_numeric_config() {
     _glm53_canonical_positive_int MAX_MODEL_LEN "$MAX_MODEL_LEN" 1000000 || return
     _glm53_canonical_positive_int MAX_NUM_SEQS "$MAX_NUM_SEQS" 4096 || return
     _glm53_canonical_positive_int MAX_NUM_BATCHED_TOKENS "$MAX_NUM_BATCHED_TOKENS" 8388608 || return
+    # GLM53_APC_RETENTION_INTERVAL (global knob, PR #79) takes the same
+    # validator wherever that launcher wiring is present.
+    _glm53_validate_retention_interval GLM53_APC_RETENTION_INTERVAL_SWA "${GLM53_APC_RETENTION_INTERVAL_SWA-}" || return
 }
 # GLM53 numeric config guard (end)
+
+# GLM53 overlay artifact guard (begin)
+# Every file both rank containers mount. main() runs validate_overlay_artifacts
+# on start|restart BEFORE `restart` stops anything: a missing, empty,
+# mis-pointed, truncated or syntactically broken input is a launcher error
+# with the healthy pair left serving, not a container that dies at boot after
+# the old one is gone. Python overlays: path|identity string|last line -
+# the identity string (MARK / target path / hook marker) is distinct per file
+# so a *_PATCH_HOST pointed at a different overlay is caught, and the last
+# non-blank line must match exactly so a copy truncated anywhere before EOF
+# (even one that still parses) is caught too. This guards against operator
+# error (wrong path, stale checkout, truncated copy); it is not a
+# tamper-proof manifest. Needs python3 on the head (DGX OS ships it).
+# preflight() re-checks existence later; this is the fail-closed early gate.
+validate_overlay_artifacts() {
+    # Sentinels that contain quotes live in single-quoted locals.
+    local main_guard='    sys.exit(main())'
+    local video_end='    print("glm53: overlay install ok aligned=True", file=sys.stderr)'
+    local ablit_marker='MARKER = "ABLIT-HOOK"'
+    local -a artifacts=(
+        "$VIDEO_PATCH_HOST|vllm/model_executor/layers/|$video_end"
+        "$STOP_PATCH_HOST|[suppress-stops-in-reasoning]|    raise SystemExit(main(sys.argv))"
+        "$SCHED_PATCH_HOST|[glm53-decode-floor]|$main_guard"
+        "$DRAFTER_PATCH_HOST|vllm/v1/core/kv_cache_utils.py|$main_guard"
+        "$APC_PATCH_HOST|[glm53-hybrid-apc]|$main_guard"
+        "$PERGROUP_PATCH_HOST|[glm53-apc-per-group]|$main_guard"
+        "$XGRAMMAR_PATCH_HOST|vllm/v1/structured_output/|$main_guard"
+        "$KPOOL_TAIL_PATCH_HOST|[glm53-kpool-tail-slotmap]|$main_guard"
+        "$SCRIPT_DIR/overlay/patch_ablit.py|$ablit_marker|    main()"
+        "$SCRIPT_DIR/overlay/ablit_runtime.py|o_proj abliteration (ABLIT)|    return report"
+    )
+    local entry path rest tag tail last
+    if [ "${#artifacts[@]}" -eq 0 ]; then
+        echo "overlay artifact list is empty - refusing to launch" >&2
+        return 2
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "python3 is required on the head to verify overlay artifacts before launch" >&2
+        return 2
+    fi
+    for entry in "${artifacts[@]}"; do
+        path="${entry%%|*}"
+        rest="${entry#*|}"
+        tag="${rest%%|*}"
+        tail="${rest#*|}"
+        if [ ! -f "$path" ] || [ ! -r "$path" ] || [ ! -s "$path" ]; then
+            echo "overlay artifact missing, unreadable or empty: $path" >&2
+            return 2
+        fi
+        if ! grep -qF -- "$tag" "$path"; then
+            echo "overlay artifact $path does not carry its identity string '$tag' (wrong file?)" >&2
+            return 2
+        fi
+        # `|| true`: under pipefail a whitespace-only file makes grep exit 1,
+        # which must surface as the rc=2 diagnostic below, not a bare exit 1.
+        last="$(grep -v '^[[:space:]]*$' "$path" | tail -n 1 || true)"
+        if [ "$last" != "$tail" ]; then
+            echo "overlay artifact $path does not end with '$tail' (truncated copy? last line: '$last')" >&2
+            return 2
+        fi
+        # Parse-only: proves the file is importable Python without executing it
+        # or leaving __pycache__ litter in the checkout.
+        if ! python3 -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' "$path" 2>/dev/null; then
+            echo "overlay artifact does not parse as Python: $path" >&2
+            return 2
+        fi
+    done
+    # Non-Python inputs both ranks mount: the chat template and the ablit
+    # layer map (the .pt payloads are ABLIT's own concern at hook time).
+    if [ ! -f "$CHAT_TEMPLATE_HOST" ] || [ ! -r "$CHAT_TEMPLATE_HOST" ] || [ ! -s "$CHAT_TEMPLATE_HOST" ]; then
+        echo "chat template missing, unreadable, empty or not a regular file: $CHAT_TEMPLATE_HOST" >&2
+        return 2
+    fi
+    if ! python3 -c 'import json, sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$SCRIPT_DIR/ablit/LAYER_MAP.json" 2>/dev/null; then
+        echo "ablit layer map missing or not JSON: $SCRIPT_DIR/ablit/LAYER_MAP.json" >&2
+        return 2
+    fi
+}
+# GLM53 overlay artifact guard (end)
 
 banner() {
     local label="${1:-start.sh}"
@@ -1412,7 +1527,7 @@ logs() {
 main() {
     local cmd="${1:-start}"
     case "$cmd" in
-        start|restart) validate_numeric_config ;;
+        start|restart) validate_numeric_config; validate_overlay_artifacts ;;
     esac
     case "$cmd" in
         stop)     banner stop.sh ;;
