@@ -429,7 +429,10 @@ class Glm53RestoreState:
                 # Restore concurrency = 1: defer; the stock deferred-lookup
                 # machinery re-queries this request later.
                 return None
-            # The job vanished (reset/terminal path missed): self-heal.
+            # The job vanished (reset/terminal path missed): self-heal --
+            # and drop its id from the disk-job set so stale ids never
+            # accumulate (final-confirm minor).
+            self._disk_jobs.discard(self._inflight_job)
             self._inflight_job = None
         max_chunk = min(req.num_tokens // tpc, len(req.block_hashes) // hpc)
         for k in range(max_chunk - 1, local // tpc - 1, -1):
@@ -1479,19 +1482,26 @@ ANCHOR_W13 = """            try:
                 h = glm53_read_chunk_header(path)
                 if (
                     h.get("namespace_hash") == self._namespace_hash
+                    and h.get("hash") == hash_hex
+                    and h.get("group_idx") == group_idx
+                ):
 """
 
 PATCHED_W13 = """            try:
                 # [glm53-kv-offload-restore] dedup: bounded payload verification
-                # (review f4 + confirm N3): identity and length equality
-                # FIRST -- length equality with THIS job's payload caps the
-                # verifying read -- then a full CRC pass; a stale file with a
-                # valid header but torn payload is rewritten, never deduped.
+                # (review f4 + confirm N3, ordering per the final confirm):
+                # identity and length equality FIRST -- length equality with
+                # THIS job's payload caps the verifying read -- then a full
+                # CRC pass; a stale file with a valid header but torn payload
+                # is rewritten, never deduped.
                 h = glm53_read_chunk_header(path)
                 if (
                     h.get("payload_len") == len(payload)
-                    and glm53_read_chunk_header(path, verify_payload=True)
                     and h.get("namespace_hash") == self._namespace_hash
+                    and h.get("hash") == hash_hex
+                    and h.get("group_idx") == group_idx
+                    and glm53_read_chunk_header(path, verify_payload=True)
+                ):
 """
 
 SITES_WORKER = (
