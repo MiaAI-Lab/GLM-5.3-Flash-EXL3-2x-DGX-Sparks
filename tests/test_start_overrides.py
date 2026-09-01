@@ -55,7 +55,7 @@ def _run_preamble(env_file: str, caller: dict[str, str], probe: str) -> str:
         (tmp / ".env").write_text(env_file)
 
         env = {k: v for k, v in os.environ.items()
-               if k not in ("GLM53_INDEXER_WORKSPACE",)}
+               if k not in ("GLM53_INDEXER_WORKSPACE", "GLM53_SPINWAIT_MS")}
         env.update(caller)
         result = subprocess.run(
             ["bash", str(script)], check=True, capture_output=True, text=True, env=env
@@ -89,7 +89,23 @@ def test_indexer_workspace_caller_capture_is_setness_aware() -> None:
     assert _run_preamble("", {}, probe) == "V=[UNSET]"
 
 
+def test_spinwait_caller_capture_is_setness_aware() -> None:
+    probe = '\nprintf "V=[%s]\\n" "${GLM53_SPINWAIT_MS-UNSET}"\n'
+    env_file = "GLM53_SPINWAIT_MS=16\n"
+
+    assert _run_preamble(env_file, {}, probe) == "V=[16]"
+    assert _run_preamble(
+        env_file, {"GLM53_SPINWAIT_MS": "stock"}, probe
+    ) == "V=[stock]"
+    assert _run_preamble(
+        env_file, {"GLM53_SPINWAIT_MS": ""}, probe
+    ) == "V=[]"
+    assert _run_preamble("", {"GLM53_SPINWAIT_MS": ""}, probe) == "V=[]"
+    assert _run_preamble("", {}, probe) == "V=[UNSET]"
+
+
 if __name__ == "__main__":
     test_max_num_seqs_inline_override_wins()
     test_indexer_workspace_caller_capture_is_setness_aware()
+    test_spinwait_caller_capture_is_setness_aware()
     print("start.sh caller override regression OK")
