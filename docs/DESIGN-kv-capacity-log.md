@@ -88,11 +88,17 @@ hashed, block-aligned hits). The 'GPU KV cache size' line above is max_concurren
 figure.` with `A = lcm(block sizes of all groups)` — what the coordinator asserts its scheduler block size to be
 (`C:621-626`).
 
-Per-spec policy (`_glm53_ids_per_segment`), by class name in the MRO so subclasses inherit their base's rule:
-opted-out → 0; `MambaSpec` in `align`/`all` → `A / bs`; `SlidingWindowSpec` family → `min(cdiv(window − 1, bs) +
-eagle, A / bs)`; `FullAttentionSpec` family → `A / bs`; `ChunkedLocalAttentionSpec`, `CrossAttentionSpec`,
-`EncoderOnlyAttentionSpec`, mamba mode `none`, a window-less sliding-window spec, an unknown kind → **unmodelled**:
-the summary names the group and withholds the capacity figure instead of guessing.
+Per-spec policy (`_glm53_ids_per_segment`), by **exact** class name of the unwrapped spec — a subclass may come
+with its own manager and reservation rule (`SinkFullAttentionSpec` keeps permanent sink blocks, `KpoolTailSpec` is
+scratch, `TQFullAttentionSpec` / `RSWASpec` / `HiddenStateCacheSpec` carry other semantics), so nothing is costed
+by its base class: opted-out → 0; `MambaSpec` in `align`/`all` → `A / bs`, the mode read from the spec the manager
+acts on (`I:795`; a uniform group whose members disagree is "mixed"); `SlidingWindowSpec` / `SlidingWindowMLASpec`
+→ `min(cdiv(window − 1, bs) + eagle, A / bs)`; `FullAttentionSpec` / `MLAAttentionSpec` → `A / bs`; everything
+else (chunked-local, cross/encoder, sink, mamba mode `none`/mixed, a window-less SWA spec, unknown kinds) →
+**unmodelled**: the summary names the group and withholds the capacity figure. The figure is also withheld
+under `decode_context_parallel_size > 1` or `prefill_context_parallel_size > 1`, where the resolver rescales
+block sizes per rank and the raw lcm is no longer the scheduler alignment (not this kit: both are 1, and the
+SWA spec asserts DCP == 1).
 
 EAGLE detection mirrors `C:637-651` with `patch_hybrid_prefix_hit.py` applied: `group.is_eagle_group` when any
 group carries it; else, when `speculative_config.use_eagle()`, the groups whose unwrapped spec is an exact

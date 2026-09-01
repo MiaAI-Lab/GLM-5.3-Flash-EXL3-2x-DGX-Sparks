@@ -531,13 +531,21 @@ from the same config objects, one line per group and one summary — on the 643-
 
 `blocks/request` is the same `cdiv` expression the stock line is built from (its column sum, 414, is the stock
 denominator). "Ids per cached segment" is the dense-retention cost with block-aligned hits — what each manager's
-`reachable_block_mask` hashes with no retention interval: every block for full/MLA attention and mamba (`align`),
-`min(cdiv(window − 1, 64) + 1 (EAGLE), 3584 / 64)` = 33 for the drafter, 0 for the kpool tail (opts out of prefix
-caching). The alignment is the lcm of the group block sizes (the coordinator's scheduler block). The figure is an
-upper bound: a running request holds its own blocks, and PR #83's per-group retention lowers the drafter's cost
-to boundary tails only (not modelled here — the summary states its assumption). Spec kinds the derivation does
-not model are reported as such and the capacity is withheld rather than guessed. The current rightsized boot
-(820 ids) reads `usable block ids: 819 … ≈ 75,264 tokens = 21 segments`.
+`reachable_block_mask` hashes with no retention interval: every block for `FullAttentionSpec` / `MLAAttentionSpec`
+and for `MambaSpec` in `align`/`all` mode (read from the spec the manager acts on),
+`min(cdiv(window − 1, 64) + 1 (EAGLE), 3584 / 64)` = 33 for the drafter (`SlidingWindowSpec` /
+`SlidingWindowMLASpec`), 0 for the kpool tail (opts out of prefix caching). Exact class names only: any other
+spec — subclasses such as `SinkFullAttentionSpec` included, since they come with their own manager rule — is
+reported as unmodelled and the capacity is withheld rather than guessed, as it is under DCP/PCP > 1 (block sizes
+are rescaled per rank there). The alignment is the lcm of the group block sizes (the coordinator's scheduler
+block). The figure is an upper bound: a running request holds its own blocks, and PR #83's per-group retention
+lowers the drafter's cost to boundary tails only (not modelled here — the summary states its assumption).
+
+The numbers move with the boot, the arithmetic does not: the figures elsewhere in this README (690 blocks /
+1,754,237 tokens / 1.75× at 1M) are the same quantity on the reference kit's boot (690 / 1.75 ≈ 394 ids per
+1M-token request under that config); our 2026-08-31 boot had 643 ids at 414 per request, and the current
+rightsized-workspace boot 820 (`usable block ids: 819 … ≈ 75,264 tokens = 21 segments`). Read your own boot's
+summary line rather than any number in this section.
 
 ## Image / overlay
 
@@ -575,7 +583,7 @@ this Dockerfile instead. After CUDA compile, Python overlay edits
 | `overlay/patch_kpool_tail_slotmap.py` | clamp KpoolTail one-block circular slot mapping; identity for other KV groups |
 | `tests/test_kpool_tail_slotmap.py` | circular addressing math, exact kernel patch, idempotence, fail-closed drift, launcher wiring |
 | `overlay/patch_kv_capacity_log.py` | log-only: after the stock `GPU KV cache size` line (kept byte-identical) log per-group `blocks/request` (the stock line's own denominator) and the usable-block-ids / ids-per-aligned-segment / cached-conversation-capacity summary; unmodelled spec kinds withhold the figure; knob `GLM53_KV_CAPACITY_LOG` (0/1); two pinned anchors, preflighted before either is written, atomic, idempotent |
-| `tests/test_kv_capacity_log.py` | host: pure-python replica of the derivation against the deployment's hybrid layout (blocks/request `[280,1,9,9,9,9,97]` = 414, 643 ids → the logged `1,553,140` / `1.55x`, 642 usable, alignment 3584, ids per segment `[1,0,1,1,1,1,33]` = 38, ≈ 57,344 tokens; the 820-id boot → 75,264), single-group / uniform-type / non-EAGLE / unmodelled / null-block edge cases, knob matrix, the exec'd helpers are the shipped text; apply on a vendored fixture of the in-image `kv_cache_utils.py` (and the real file when present): stock line untouched, idempotent, per-anchor drift refuses with nothing written, partial marker refused; launcher 0/1 guard and wiring |
+| `tests/test_kv_capacity_log.py` | host: pure-python replica of the derivation against the deployment's hybrid layout (blocks/request `[280,1,9,9,9,9,97]` = 414, 643 ids → the logged `1,553,140` / `1.55x`, 642 usable, alignment 3584, ids per segment `[1,0,1,1,1,1,33]` = 38, ≈ 57,344 tokens; the 820-id boot → 75,264), single-group / uniform-type / non-EAGLE / subclass-unmodelled / mamba-mode-from-spec / DCP-withheld / null-block edge cases, knob matrix, the exec'd helpers are the shipped text; apply on a vendored fixture of the in-image `kv_cache_utils.py` (and the real file when present): stock line untouched, idempotent, per-anchor drift refuses with nothing written, partial marker refused; launcher 0/1 guard and wiring |
 | `tests/test_launcher_rank_parity.py` | launcher (CPU-only, docker/ssh stubbed): `restart` fails closed on a bad knob or a missing / mis-pointed / broken overlay (every artifact) before anything is stopped, overlay order pinned in one list emitted into both rank scripts (kv-capacity-log after the drafter-group patch it shares a file with), both ranks mount the same host artifacts (head mount = scp source = worker mount) and receive identical `GLM53_KV_CAPACITY_LOG` values |
 | `overlay/ablit_runtime.py` | load-time o_proj transplant / projection (`ABLIT=1`); no-op when off |
 | `overlay/patch_ablit.py` | install the load_weights hook; bind-mounted and run on both ranks |

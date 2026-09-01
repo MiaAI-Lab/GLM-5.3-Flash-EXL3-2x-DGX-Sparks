@@ -52,11 +52,13 @@ What the summary models (and what it does not)
 i.e. what the managers' ``reachable_block_mask`` hashes when no retention
 interval is set and hits end on scheduler-block boundaries:
 
-* ``FullAttentionSpec`` family (incl. MLA): every block is hashed ->
-  ``alignment / block_size`` ids (1 here);
-* ``MambaSpec`` in ``align`` / ``all`` cache mode: one state per block ->
-  ``alignment / block_size`` ids per group (1 each here);
-* ``SlidingWindowSpec`` family: ``min(need, alignment / block_size)`` with
+* exactly ``FullAttentionSpec`` / ``MLAAttentionSpec``: every block is hashed
+  -> ``alignment / block_size`` ids (1 here);
+* exactly ``MambaSpec`` in ``align`` / ``all`` cache mode (read from the spec
+  the manager acts on): one state per block -> ``alignment / block_size`` ids
+  per group (1 each here);
+* exactly ``SlidingWindowSpec`` / ``SlidingWindowMLASpec``:
+  ``min(need, alignment / block_size)`` with
   ``need = cdiv(window - 1, block_size) + (1 if EAGLE group)`` -- the
   contiguous run a hit needs (``SlidingWindowManager._contiguous_blocks_for_hit``;
   33 of 56 here);
@@ -64,9 +66,12 @@ interval is set and hits end on scheduler-block boundaries:
   per request, never a cached one.
 
 Alignment is the lcm of every group's block size, which is what the
-coordinator asserts its scheduler block size to be (3584 here). Anything else
-(chunked-local, cross/encoder attention, mamba cache mode ``none``, a block
-size that does not divide the alignment) is reported as UNMODELLED and the
+coordinator asserts its scheduler block size to be (3584 here) when no
+context parallelism rescales block sizes; under DCP/PCP > 1 the figure is
+withheld. Any other spec class -- subclasses included, because a subclass
+may come with its own manager and reservation rule (``SinkFullAttentionSpec``
+keeps permanent sink blocks; ``KpoolTailSpec`` is scratch) -- and mamba cache
+mode ``none`` / a mixed uniform group are reported as UNMODELLED and the
 capacity figure is withheld rather than guessed. Not modelled on purpose: the
 per-group retention overlay (#83) makes the drafter cost boundary tails only,
 and fine-grained hits (#84) change where a segment may end; both are decided
@@ -198,7 +203,6 @@ def _glm53_kv_capacity_rows(vllm_config, kv_cache_config) -> list:
     this column IS that function's denominator.
     """
     eagle = _glm53_eagle_group_ids(vllm_config, kv_cache_config)
-    mamba_mode = getattr(getattr(vllm_config, "cache_config", None), "mamba_cache_mode", None)
     rows = []
     for index, group in enumerate(kv_cache_config.kv_cache_groups):
         spec = group.kv_cache_spec
@@ -224,9 +228,23 @@ def _glm53_kv_capacity_rows(vllm_config, kv_cache_config) -> list:
             window = getattr(inner, "sliding_window", None)
             row["sliding_window"] = int(window) if window is not None else None
         if "MambaSpec" in kinds:
-            row["mamba_cache_mode"] = mamba_mode
+            row["mamba_cache_mode"] = _glm53_mamba_cache_mode(spec)
         rows.append(row)
     return rows
+
+
+def _glm53_mamba_cache_mode(spec):
+    """The mode the managers act on: each resolved MambaSpec's own field
+    (set from cache_config at spec creation, but the spec is what the manager
+    reads). A uniform group whose members disagree is reported as "mixed" and
+    left unmodelled.
+    """
+    members = getattr(spec, "kv_cache_specs", None)
+    specs = list(members.values()) if isinstance(members, dict) and members else [spec]
+    modes = {getattr(s, "mamba_cache_mode", None) for s in specs}
+    if len(modes) != 1:
+        return "mixed"
+    return modes.pop()
 
 
 def _glm53_ids_per_segment(row: dict, alignment: int):
@@ -241,15 +259,16 @@ def _glm53_ids_per_segment(row: dict, alignment: int):
     if block_size <= 0 or alignment % block_size:
         return None
     per_segment = alignment // block_size
-    kinds = row["kinds"]
-    if "MambaSpec" in kinds:
+    # EXACT class names only. A subclass may come with its own manager and its
+    # own reservation rule (SinkFullAttentionSpec keeps permanent sink blocks,
+    # KpoolTailSpec is a scratch buffer, TQ/RSWA/HiddenState carry other
+    # semantics), so anything not listed is unmodelled, never costed by its
+    # base class.
+    kind = row["spec"]
+    if kind == "MambaSpec":
         # align: one state snapshot per block position; all: every block.
         return per_segment if row["mamba_cache_mode"] in ("align", "all") else None
-    if "ChunkedLocalAttentionSpec" in kinds:
-        return None
-    if "CrossAttentionSpec" in kinds or "EncoderOnlyAttentionSpec" in kinds:
-        return None
-    if "SlidingWindowSpec" in kinds:
+    if kind in ("SlidingWindowSpec", "SlidingWindowMLASpec"):
         window = row["sliding_window"]
         if not window:
             return None
@@ -258,26 +277,39 @@ def _glm53_ids_per_segment(row: dict, alignment: int):
         # caches every block once need >= per_segment.
         need = cdiv(window - 1, block_size) + (1 if row["eagle"] else 0)
         return min(need, per_segment)
-    if "FullAttentionSpec" in kinds:
+    if kind in ("FullAttentionSpec", "MLAAttentionSpec"):
         # FullAttentionManager keeps the base reachable_block_mask (None):
         # every block is hashed.
         return per_segment
     return None
 
 
-def _glm53_kv_capacity_summary(rows: list, num_blocks: int) -> dict:
+def _glm53_context_parallel_sizes(vllm_config) -> tuple:
+    pc = getattr(vllm_config, "parallel_config", None)
+    dcp = int(getattr(pc, "decode_context_parallel_size", 1) or 1)
+    pcp = int(getattr(pc, "prefill_context_parallel_size", 1) or 1)
+    return dcp, pcp
+
+
+def _glm53_kv_capacity_summary(rows: list, num_blocks: int, vllm_config=None) -> dict:
     num_blocks = int(num_blocks)
     usable = max(num_blocks - 1, 0)  # block id 0 is BlockPool's null block
     blocks_per_request = sum(int(r["blocks_per_request"]) for r in rows)
+    # lcm of the raw group block sizes == the coordinator's scheduler block
+    # size when no context parallelism scales the per-rank block sizes.
     alignment = 1
     for r in rows:
         alignment = math.lcm(alignment, max(int(r["block_size"]), 1))
     per_group = [_glm53_ids_per_segment(r, alignment) for r in rows]
     unmodelled = [r["index"] for r, v in zip(rows, per_group) if v is None]
+    withheld = None
+    dcp, pcp = _glm53_context_parallel_sizes(vllm_config) if vllm_config is not None else (1, 1)
+    if dcp > 1 or pcp > 1:
+        withheld = f"context parallelism (dcp={dcp}, pcp={pcp}) rescales block sizes; alignment not derived here"
     total = sum(v for v in per_group if v)
     capacity = None
     segments = None
-    if rows and not unmodelled and total > 0:
+    if rows and not unmodelled and withheld is None and total > 0:
         segments = usable // total
         capacity = segments * alignment
     return {
@@ -287,6 +319,7 @@ def _glm53_kv_capacity_summary(rows: list, num_blocks: int) -> dict:
         "alignment": alignment,
         "per_group": per_group,
         "unmodelled": unmodelled,
+        "withheld": withheld,
         "total": total,
         "segments": segments,
         "capacity_tokens": capacity,
@@ -322,6 +355,8 @@ def _glm53_kv_capacity_lines(rows: list, summary: dict, max_model_len: int) -> l
             why = "unmodelled: " + ", ".join(
                 f"group {r['index']} {r['spec']}" for r in rows if r["index"] in summary["unmodelled"]
             )
+        elif summary.get("withheld"):
+            why = summary["withheld"]
         else:
             why = "no prefix-cacheable group costs ids"
         lines.append(
@@ -351,7 +386,7 @@ def _glm53_log_kv_capacity(vllm_config, kv_cache_config, max_model_len) -> None:
         return
     try:
         rows = _glm53_kv_capacity_rows(vllm_config, kv_cache_config)
-        summary = _glm53_kv_capacity_summary(rows, kv_cache_config.num_blocks)
+        summary = _glm53_kv_capacity_summary(rows, kv_cache_config.num_blocks, vllm_config)
         lines = _glm53_kv_capacity_lines(rows, summary, max_model_len)
     except Exception as exc:  # diagnostic only: never take the server down
         logger.warning_once(

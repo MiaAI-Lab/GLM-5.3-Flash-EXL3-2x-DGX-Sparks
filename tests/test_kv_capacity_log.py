@@ -120,12 +120,13 @@ class KpoolTailSpec(SlidingWindowSpec):  # I:739-786
 
 
 class MambaSpec(KVCacheSpec):  # I:790-821
-    def __init__(self, block_size: int, page: int, num_speculative_blocks: int):
+    def __init__(self, block_size: int, page: int, num_speculative_blocks: int, mamba_cache_mode: str = "align"):
         super().__init__(block_size, page)
         self.num_speculative_blocks = num_speculative_blocks
+        self.mamba_cache_mode = mamba_cache_mode  # set from cache_config at spec creation (abstract.py:74)
 
     def max_memory_usage_bytes(self, cfg) -> int:
-        mode = cfg.cache_config.mamba_cache_mode
+        mode = cfg.cache_config.mamba_cache_mode  # the fork reads cache_config here (I:813-818)
         if mode == "all":
             return (P.cdiv(cfg.model_config.max_model_len, self.block_size) + self.num_speculative_blocks) * self.page_size_bytes
         if mode == "align":
@@ -141,6 +142,18 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
 class CrossAttentionSpec(AttentionSpec):
     def max_memory_usage_bytes(self, cfg) -> int:
         return 2 * self.page_size_bytes
+
+
+class SinkFullAttentionSpec(FullAttentionSpec):  # I:866: its manager keeps permanent sink blocks
+    pass
+
+
+class TQFullAttentionSpec(FullAttentionSpec):  # I:392
+    pass
+
+
+class RSWASpec(FullAttentionSpec):  # I:508
+    pass
 
 
 class UniformTypeKVCacheSpecs(KVCacheSpec):  # I:920-948
@@ -174,26 +187,27 @@ LIVE_SPEC_TOKENS = 7
 MLA_PAGE = 2_351_104 * 11  # 3584 x 656 B x 11 layers (fp8_ds_mla), uniform group
 
 
-def live_cfg(max_model_len=LIVE_MAX_MODEL_LEN, mamba_mode="align", use_eagle=True, in_flight=LIVE_IN_FLIGHT):
+def live_cfg(max_model_len=LIVE_MAX_MODEL_LEN, mamba_mode="align", use_eagle=True, in_flight=LIVE_IN_FLIGHT, dcp=1, pcp=1):
     spec_cfg = _Ns(use_eagle=(lambda: use_eagle)) if use_eagle is not None else None
     return _Ns(
         model_config=_Ns(max_model_len=max_model_len),
         cache_config=_Ns(mamba_cache_mode=mamba_mode),
+        parallel_config=_Ns(decode_context_parallel_size=dcp, prefill_context_parallel_size=pcp),
         speculative_config=spec_cfg,
         max_in_flight_tokens=in_flight,
     )
 
 
-def live_groups():
+def live_groups(mamba_mode="align"):
     return (
         [group(MLAAttentionSpec(3584, MLA_PAGE), 11), group(KpoolTailSpec(4, 1024, 4), 11)]
-        + [group(MambaSpec(3584, 4096, LIVE_SPEC_TOKENS), 9) for _ in range(4)]
+        + [group(MambaSpec(3584, 4096, LIVE_SPEC_TOKENS, mamba_mode), 9) for _ in range(4)]
         + [group(SlidingWindowSpec(64, 8192, 2048), 1)]
     )
 
 
-def kv_config(num_blocks: int, groups=None):
-    return _Ns(num_blocks=num_blocks, kv_cache_groups=live_groups() if groups is None else groups)
+def kv_config(num_blocks: int, groups=None, mamba_mode="align"):
+    return _Ns(num_blocks=num_blocks, kv_cache_groups=live_groups(mamba_mode) if groups is None else groups)
 
 
 def stock_line(num_blocks: int, bpr: int, max_model_len: int) -> tuple[str, str]:
@@ -329,20 +343,37 @@ def part_a() -> None:
     check(sw["per_group"] == [1, 56], "A9 window wider than the segment: need 65 >= 56 -> every block of the segment (reachable_block_mask returns None)")
 
     # Unmodelled kinds withhold the capacity instead of guessing.
-    for label, mode in (("mamba_cache_mode=none", "none"),):
-        rr = P.kv_capacity_rows(live_cfg(mamba_mode=mode), kv_config(643))
-        ss = P.kv_capacity_summary(rr, 643)
-        check(ss["unmodelled"] == [2, 3, 4, 5] and ss["capacity_tokens"] is None and ss["segments"] is None, f"A10 {label}: mamba groups unmodelled, capacity withheld")
-        ll = P.kv_capacity_lines(rr, ss, LIVE_MAX_MODEL_LEN)[-1]
-        check("not derived (unmodelled: group 2 MambaSpec" in ll and "cached-conversation capacity at this alignment: not derived" in ll and "≈" not in ll, "A10 ... and the summary line says so")
-    rr = P.kv_capacity_rows(live_cfg(mamba_mode="all"), kv_config(643))
+    rr = P.kv_capacity_rows(live_cfg(mamba_mode="none"), kv_config(643, mamba_mode="none"))
+    ss = P.kv_capacity_summary(rr, 643)
+    check(ss["unmodelled"] == [2, 3, 4, 5] and ss["capacity_tokens"] is None and ss["segments"] is None, "A10 mamba_cache_mode=none: mamba groups unmodelled, capacity withheld")
+    ll = P.kv_capacity_lines(rr, ss, LIVE_MAX_MODEL_LEN)[-1]
+    check("not derived (unmodelled: group 2 MambaSpec" in ll and "cached-conversation capacity at this alignment: not derived" in ll and "≈" not in ll, "A10 ... and the summary line says so")
+    rr = P.kv_capacity_rows(live_cfg(mamba_mode="align"), kv_config(643, mamba_mode="none"))
+    ss = P.kv_capacity_summary(rr, 643)
+    check(rr[2]["mamba_cache_mode"] == "none" and ss["unmodelled"] == [2, 3, 4, 5], "A10 the mode is read from the MambaSpec the manager acts on, not cache_config (spec none / config align -> unmodelled)")
+    mixed_mamba = UniformTypeKVCacheSpecs({"a": MambaSpec(3584, 8, 7, "align"), "b": MambaSpec(3584, 8, 7, "none")})
+    rr = P.kv_capacity_rows(cfg, kv_config(10, [group(mixed_mamba, 2)]))
+    check(rr[0]["mamba_cache_mode"] == "mixed" and P.kv_capacity_summary(rr, 10)["per_group"] == [None], "A10 a uniform mamba group with disagreeing member modes is 'mixed' and unmodelled")
+    rr = P.kv_capacity_rows(live_cfg(mamba_mode="all"), kv_config(643, mamba_mode="all"))
     ss = P.kv_capacity_summary(rr, 643)
     check([r["blocks_per_request"] for r in rr][2] == 287 and ss["per_group"][2] == 1 and ss["total"] == 38, "A10 mamba all-mode: 280+7 blocks/request, still one state per block position")
+    for cls in (SinkFullAttentionSpec, TQFullAttentionSpec, RSWASpec):
+        rr = P.kv_capacity_rows(c1, kv_config(100, [group(cls(16, 1), 1)]))
+        check(P.kv_capacity_summary(rr, 100)["per_group"] == [None], f"A10 {cls.__name__} (a FullAttentionSpec subclass with its own manager rule) is unmodelled, never costed as dense")
+    rr = P.kv_capacity_rows(live_cfg(use_eagle=None), kv_config(10, [group(MLAAttentionSpec(3584, 1), 1), group(SlidingWindowMLASpec(64, 1, 2048), 1)]))
+    check(P.kv_capacity_summary(rr, 10)["per_group"] == [1, 32], "A10 SlidingWindowMLASpec is costed by the window rule (exact-name allowlist), no EAGLE without a speculative config")
+    for label, kw in (("dcp=2", {"dcp": 2}), ("pcp=2", {"pcp": 2})):
+        rr = P.kv_capacity_rows(live_cfg(**kw), kv_config(643))
+        ss = P.kv_capacity_summary(rr, 643, live_cfg(**kw))
+        ll = P.kv_capacity_lines(rr, ss, LIVE_MAX_MODEL_LEN)[-1]
+        check(ss["capacity_tokens"] is None and ss["withheld"] and "context parallelism" in ll and "not derived" in ll, f"A10 {label}: the figure is withheld (block sizes are rescaled per rank; alignment not derived here)")
+    ss = P.kv_capacity_summary(rows, 643, cfg)
+    check(ss["withheld"] is None and ss["capacity_tokens"] == 57_344, "A10 dcp=pcp=1 (this kit): nothing withheld")
     mixed = [group(FullAttentionSpec(16, 1), 1), group(ChunkedLocalAttentionSpec(16, 1), 1), group(CrossAttentionSpec(16, 1), 1)]
     sm = P.kv_capacity_summary(P.kv_capacity_rows(c1, kv_config(100, mixed)), 100)
     check(sm["per_group"] == [1, None, None] and sm["unmodelled"] == [1, 2] and sm["capacity_tokens"] is None, "A10 chunked-local / cross attention are unmodelled")
-    check(P.ids_per_segment({"prefix_cacheable": True, "block_size": 16, "kinds": ("WeirdSpec", "KVCacheSpec", "object"), "eagle": False, "sliding_window": None, "mamba_cache_mode": None}, 16) is None, "A10 an unknown spec kind is unmodelled (never silently costed)")
-    check(P.ids_per_segment({"prefix_cacheable": True, "block_size": 64, "kinds": ("SlidingWindowSpec", "AttentionSpec", "KVCacheSpec", "object"), "eagle": True, "sliding_window": None, "mamba_cache_mode": None}, 3584) is None, "A10 a sliding-window spec without a window is unmodelled")
+    check(P.ids_per_segment({"prefix_cacheable": True, "block_size": 16, "spec": "WeirdSpec", "kinds": ("WeirdSpec", "KVCacheSpec", "object"), "eagle": False, "sliding_window": None, "mamba_cache_mode": None}, 16) is None, "A10 an unknown spec kind is unmodelled (never silently costed)")
+    check(P.ids_per_segment({"prefix_cacheable": True, "block_size": 64, "spec": "SlidingWindowSpec", "kinds": ("SlidingWindowSpec", "AttentionSpec", "KVCacheSpec", "object"), "eagle": True, "sliding_window": None, "mamba_cache_mode": None}, 3584) is None, "A10 a sliding-window spec without a window is unmodelled")
 
     # Null block / tiny pools / max_model_len below the alignment.
     for nb, usable, cap in ((1, 0, 0), (0, 0, 0), (38, 37, 0), (39, 38, 3584)):
