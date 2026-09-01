@@ -533,6 +533,12 @@ this Dockerfile instead. After CUDA compile, Python overlay edits
 | `tests/test_xgrammar_termination.py` | exact two-file patch, idempotence, cross-file fail-closed drift, termination/rollback/reset and post-reasoning draft behavior, launcher wiring |
 | `overlay/patch_kpool_tail_slotmap.py` | clamp KpoolTail one-block circular slot mapping; identity for other KV groups |
 | `tests/test_kpool_tail_slotmap.py` | circular addressing math, exact kernel patch, idempotence, fail-closed drift, launcher wiring |
+| `overlay/patch_kv_offload_scope.py` | offloading-connector eligible-group scoping (port of vllm#54743 onto this image): prefix-cacheable groups minus the drafter policy exclusion, original indices preserved, full-length worker layout; unblocks the connector on the hybrid layout (KpoolTail scratch crashed it at boot) |
+| `overlay/patch_kv_offload_store_local.py` | stage-1 store-only disk KV tier (`GLM53_KV_OFFLOAD=1`): worker-local per-rank chunk files with versioned headers + segment tables, boundary manifests, inline keep-K retention; restore hard-off (`GLM53_KV_OFFLOAD_RESTORE` refused at 1); see `docs/DESIGN-kv-offload-store-only.md` |
+| `overlay/kv_offload_store_gc.py` | store verifier/GC: header+CRC checks, orphan/corrupt reporting (dry-run default), manifest-mediated keep-K sweep |
+| `tests/test_kv_offload_scope.py` | patcher preflight/idempotence/drift on pinned image fixtures; eligibility predicate; patched-runtime drive under a stubbed vllm (eligible {0,2,3,4,5}, original-index keys, full-length group_sizes, store-only lookup short-circuit) |
+| `tests/test_kv_offload_store_local.py` | header codec + torn-file rejection, store-job meta alignment + pickle, writer real-bytes/segment-table/manifest-ordering/retention/ENOSPC/rank-guard/delayed-ack, GC tool |
+| `tests/test_launcher_kv_offload.py` | knob guard matrix, fail-closed pre-stop gate, knob=0 no-mount parity, knob=1 both-rank env/mount/scp/JSON parity, overlay order pin |
 | `overlay/ablit_runtime.py` | load-time o_proj transplant / projection (`ABLIT=1`); no-op when off |
 | `overlay/patch_ablit.py` | install the load_weights hook; bind-mounted and run on both ranks |
 | `ablit/` | direction vectors + `LAYER_MAP.json` from drowzeys' published recipe; `fetch_transplant.py` + `transplant/` for the donor o_proj byte-copy |
