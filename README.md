@@ -418,7 +418,7 @@ The Hub `generation_config.json` stamps `temperature=1.0` / `top_p=0.95` unless
 the request overrides. The launcher sets
 `--chat-template /opt/glm53/chat_template.jinja` (checkpoint jinja is language-only).
 
-Needs: Docker (no sudo) on both nodes, passwordless SSH head → worker,
+Needs: Docker (no sudo) on both nodes, python3 on the head (verifies the overlay artifacts before `restart` stops anything), passwordless SSH head → worker,
 `hf` / `huggingface-cli` + `curl` + `rsync` on the head, ~180 GiB free per
 node for the first download. The GHCR image is public; login is only needed
 if you hit anonymous pull rate limits (`GHCR_TOKEN` + `GHCR_USER`).
