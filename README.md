@@ -54,6 +54,11 @@ python3 tests/bench_decode.py --phase structured --structured --runs 5 --max-tok
 python3 tests/bench_decode.py --phase prose --runs 5 --max-tokens 400 --skip-coherence --out /tmp/glm53-prose.json
 ```
 
+A separate [matched native B12X experiment](docs/b12x-matched-ab.md) kept the
+weights, DFlash K=7 width, prompts, and 750K site-specific context fixed. It is
+documented separately because its TP1 and memory-constrained deployment does
+not match the official 1M-context results above.
+
 ## Quality (KLD)
 
 Independent teacher-logit panel from
