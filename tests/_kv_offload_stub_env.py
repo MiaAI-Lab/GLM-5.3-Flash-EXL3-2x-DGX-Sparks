@@ -447,7 +447,11 @@ def install_fake_vllm() -> dict:
             )
             self.tokens_per_hash = config.cache.tokens_per_hash
             self.blocks_per_chunk = config.cache.blocks_per_chunk
-            self.offload_prompt_only = False
+            # Mirror upstream: DEFAULT TRUE — the launcher must explicitly
+            # pass offload_prompt_only=false or decoded tokens are not stored.
+            self.offload_prompt_only = bool(
+                config.extra_config.get("offload_prompt_only", True)
+            )
 
     for name, obj in dict(
         Medium=Medium,
@@ -654,7 +658,9 @@ class FakeSchedSpec:
         )
         self.tokens_per_hash = offloading_config.cache.tokens_per_hash
         self.blocks_per_chunk = offloading_config.cache.blocks_per_chunk
-        self.offload_prompt_only = False
+        self.offload_prompt_only = bool(
+            offloading_config.extra_config.get("offload_prompt_only", True)
+        )
         self.kv_events_config = None
         self._manager = manager or FakeManager(mods)
 

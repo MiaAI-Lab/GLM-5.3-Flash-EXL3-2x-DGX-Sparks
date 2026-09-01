@@ -45,15 +45,22 @@ the other Spark: the scheduler-side view's rank-1 slots are never written,
 and the stock fs tier would persist rank-0 bytes + uninitialised garbage as
 rank-1 halves — corruption that only surfaces at restore. So:
 
-- the connector JSON configures **CPU staging only** (no `secondary_tiers`);
+- the connector JSON configures **CPU staging only** (no `secondary_tiers`)
+  and sets `offload_prompt_only: false` — the upstream default (true) would
+  silently skip decoded tokens, and a parked session must cover its
+  responses too;
 - store jobs carry a metadata side-channel (`TransferJob.glm53_store_meta`):
   ordered `(hash, group_idx, chunk_idx)` aligned with the job's block order,
   plus boundary-manifest candidates (cumulative chunk-hash chains);
-- each worker, after its GPU→CPU DMA completes, writes **its own bytes** from
-  **its own mmap** to **its own NVMe** under
-  `GLM53_KV_OFFLOAD_DIR/glm53kv_<model>_<ns>_r<rank>/…`, and only then acks
-  the store job (staging stays pinned until every worker acks, so bytes
-  cannot be evicted under the writer);
+- each worker SNAPSHOTS the job's bytes out of its own staging mmap
+  synchronously at DMA completion (capture-then-write; adversarial-review
+  finding 1: `reset_cache()` frees staging rows regardless of pending disk
+  work, so async reads from the mmap could tear) — at `get_finished` before
+  its ack, or right after `worker.wait()` on the flush/reset path — then a
+  2-thread pool writes the private buffers (512 MB budget, over-budget
+  captures dropped as lost stores) to **its own NVMe** under
+  `GLM53_KV_OFFLOAD_DIR/glm53kv_<model>_<ns>_r<rank>/…`; acks are never
+  deferred;
 - rank is the initialized TP rank cross-checked against the connector
   config's rank — disagreement disables the writer rather than risking
   cross-rank mixing.
@@ -78,8 +85,11 @@ descriptor, format_version. Any change forks the directory. Retention K is
 recorded in the namespace file but does NOT fence the hash.
 
 **Boundary manifests**: per (chain, boundary), keyed by the boundary hash,
-published only after all four mamba payloads AND the cumulative full-attn
-chunks are durable on that rank (fsync file+dir, tmp+rename). No manifest ⇒
+published only after all four mamba payloads AND every cumulative full-attn
+chunk are durable AND header-verified on that rank (namespace + hash + group
+identity; per-chunk `[hash, len, crc]` recorded for full groups too; dedup of
+an existing file likewise requires a verifying header, else it is rewritten).
+fsync file+dir, tmp+rename. No manifest ⇒
 the boundary does not exist for stage-2 lookup. Cross-rank rule (stage 2): a
 boundary is restore-eligible iff BOTH ranks hold a valid manifest.
 
@@ -94,7 +104,8 @@ Cross-boot leftovers: `overlay/kv_offload_store_gc.py` (dry-run default).
 
 | failure | behaviour |
 |---|---|
-| write fails | tmp unlinked, one log line, key enters the failed ledger (never manifested this boot), job acked — lost store only |
+| write fails | tmp unlinked, one log line, key enters the failed ledger (never manifested this boot) — lost store only |
+| capture over budget | write dropped (lost store), key stays manifest-eligible for a later re-store |
 | ENOSPC | writer pauses (all further writes dropped, one log); serving unaffected |
 | crash between group writes | orphan payloads, no live manifest; GC reports/sweeps |
 | torn/truncated file | header+CRC verification rejects at read (stage 2 / GC) |

@@ -43,6 +43,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from patch_kv_offload_store_local import read_chunk_header  # noqa: E402
 
 
+def find_stale_temps(base: Path):
+    """Yield every leftover ``*.tmp.*`` under the base (payloads, manifests,
+    namespace records). Any temp is stale by definition: publication is
+    tmp+rename, so a temp only survives a crash mid-write."""
+    yield from base.rglob("*.tmp.*")
+
+
 def find_chunk_files(base: Path):
     """Yield (path, hash_hex, group_idx) for every .bin under the base."""
     for sub1 in sorted(base.iterdir()):
@@ -134,28 +141,51 @@ def main(argv=None) -> int:
             continue
         headers[(hash_hex, group_idx)] = h
 
+    stale_temps = list(find_stale_temps(base))
+    for t in stale_temps:
+        print(f"STALE-TEMP {t}")
+    if not dry:
+        for t in stale_temps:
+            t.unlink(missing_ok=True)
+            print(f"DELETED {t}")
+
     manifests = load_manifests(base)
     broken_manifests = [m for m in manifests if "_error" in m]
     for m in broken_manifests:
         print(f"BAD-MANIFEST {m['_path']}: {m['_error']}")
 
-    # Retention: keep K most recent per chain (by boundary_token_index).
+    # Retention: the same keep-set rule as the writer's inline retention — a
+    # manifest survives while it is within the K most recent boundaries of
+    # ANY chain containing it. Chains are parent-linked via chunk_hashes
+    # (parent = chunk_hashes[-2]); walking up from every leaf keeps shared
+    # divergence-point ancestors alive as long as any branch needs them.
     superseded: list[dict] = []
-    chains = assign_chains(manifests)
-    if args.keep_boundaries > 0:
-        for chain in chains:
-            chain.sort(key=lambda m: m.get("boundary_token_index", 0), reverse=True)
-            for m in chain[args.keep_boundaries :]:
-                superseded.append(m)
+    chains = assign_chains(manifests)  # reporting only
+    valid = [m for m in manifests if "_error" not in m and m.get("chunk_hashes")]
+    if args.keep_boundaries > 0 and valid:
+        by_hash = {m["chunk_hashes"][-1]: m for m in valid}
+        parents = {
+            h: (m["chunk_hashes"][-2] if len(m["chunk_hashes"]) > 1 else None)
+            for h, m in by_hash.items()
+        }
+        child_count = {h: 0 for h in by_hash}
+        for h, parent in parents.items():
+            if parent in child_count:
+                child_count[parent] += 1
+        keep: set[str] = set()
+        for leaf in [h for h, c in child_count.items() if c == 0]:
+            node, kept = leaf, 0
+            while node is not None and kept < args.keep_boundaries:
+                if node in by_hash:
+                    keep.add(node)
+                    kept += 1
+                node = parents.get(node)
+        superseded = [m for h, m in by_hash.items() if h not in keep]
         for m in superseded:
             print(f"SUPERSEDE {m['_path']} (boundary {m.get('boundary_token_index')})")
             if not dry:
                 m["_path"].unlink(missing_ok=True)
-        live = [
-            m
-            for m in manifests
-            if "_error" not in m and m not in superseded
-        ]
+        live = [m for m in valid if m not in superseded]
     else:
         live = [m for m in manifests if "_error" not in m]
 
@@ -178,22 +208,37 @@ def main(argv=None) -> int:
             ):
                 print(f"MANIFEST-PAYLOAD-MISMATCH {m['_path']}: g{gidx_s}")
                 ok = False
-        for gidx_s in (m.get("full_groups") or {}):
+        for gidx_s, entry in (m.get("full_groups") or {}).items():
+            # entry: [[hash, payload_len, payload_crc32], ...] (current) or a
+            # bare chunk count (early format) — hashes come from chunk_hashes.
+            expected = {
+                e[0]: (e[1], e[2]) for e in entry
+            } if isinstance(entry, list) else {}
             for hh in chunk_hashes:
                 key = (hh, int(gidx_s))
                 live_keys.add(key)
-                if key not in headers:
+                h = headers.get(key)
+                if h is None:
                     print(f"MANIFEST-MISSING-PAYLOAD {m['_path']}: g{gidx_s} {hh[:12]}")
+                    ok = False
+                elif hh in expected and (
+                    h.get("payload_len"), h.get("payload_crc32")
+                ) != expected[hh]:
+                    print(f"MANIFEST-PAYLOAD-MISMATCH {m['_path']}: g{gidx_s} {hh[:12]}")
                     ok = False
         if not ok:
             incomplete_manifests += 1
 
-    # Orphans: mamba-group payloads no live manifest references. Full-attn
+    # Orphans: mamba-group payloads no live manifest references. Mamba-ness
+    # comes from the chunk HEADERS (spec_kind == MambaSpec), so a store whose
+    # crash predates its first manifest still reports its orphans. Full-attn
     # chunks without a manifest are NOT orphans by default (a boundary may
-    # legitimately be mid-store); report them only under retention mode.
+    # legitimately be mid-store); they count only under retention mode.
     mamba_groups = {
-        int(g) for m in live for g in (m.get("cow_groups") or {})
+        gidx for (_h, gidx), hdr in headers.items()
+        if hdr.get("spec_kind") == "MambaSpec"
     }
+    mamba_groups |= {int(g) for m in live for g in (m.get("cow_groups") or {})}
     orphans = [
         (key, h)
         for key, h in headers.items()
@@ -216,9 +261,20 @@ def main(argv=None) -> int:
         f"SUMMARY files={n_files} bytes={total_bytes} manifests={len(manifests)} "
         f"chains={len(chains)} corrupt={len(corrupt)} orphans={len(orphans)} "
         f"superseded={len(superseded)} incomplete_manifests={incomplete_manifests} "
+        f"stale_temps={len(stale_temps)} "
         f"broken_manifests={len(broken_manifests)} mode={'DRY-RUN' if dry else 'SWEEP'}"
     )
-    return 1 if (corrupt or orphans or broken_manifests or incomplete_manifests) else 0
+    return (
+        1
+        if (
+            corrupt
+            or orphans
+            or broken_manifests
+            or incomplete_manifests
+            or stale_temps
+        )
+        else 0
+    )
 
 
 if __name__ == "__main__":

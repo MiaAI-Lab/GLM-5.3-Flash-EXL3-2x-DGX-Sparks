@@ -924,6 +924,16 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
     preflight_only = "--preflight" in argv[1:]
 
+    if "--check-injected" in argv[1:]:
+        # Host-side gate mode: compile the injected helper source standalone
+        # (no target access needed) so a truncated/corrupted string literal
+        # inside this file fails BEFORE the launcher stops a healthy pair.
+        compile(HELPERS_SRC, "<glm53-kv-offload-scope helpers>", "exec")
+        compile(S0_HELPER, "<glm53-kv-offload-scope unwrap>", "exec")
+        load_helpers()
+        print("patch_kv_offload_scope.py: injected sources compile OK")
+        return 0
+
     # Preflight EVERY target before writing ANY (fail-closed: a drifted
     # scheduler must not leave a patched config.py behind).
     prepared: list[tuple[Path, str, str, str]] = []

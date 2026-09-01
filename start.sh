@@ -267,6 +267,10 @@ GLM53_KV_OFFLOAD_DRAFTER="${GLM53_KV_OFFLOAD_DRAFTER-0}"
 # Inline manifest retention: keep the K most recent boundary manifests per
 # chain (plan §7; 0 = dense, no inline supersede).
 GLM53_KV_OFFLOAD_KEEP_BOUNDARIES="${GLM53_KV_OFFLOAD_KEEP_BOUNDARIES:-2}"
+# Build identity for the store namespace fence: the recipe checkout SHA (an
+# overlay change that alters byte semantics forks the store). "unpinned"
+# when the checkout is not a git repo.
+GLM53_KV_OFFLOAD_BUILD_ID="${GLM53_KV_OFFLOAD_BUILD_ID:-$(git -C "$SCRIPT_DIR" rev-parse --short=12 HEAD 2>/dev/null || echo unpinned)}"
 # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
 # exceed that without being a true hang. NCCL watchdog is still 600s.
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
@@ -429,6 +433,15 @@ validate_kv_offload_artifacts() {
         fi
         if ! python3 -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' "$path" 2>/dev/null; then
             echo "kv-offload artifact does not parse as Python: $path" >&2
+            return 2
+        fi
+    done
+    # The two patchers embed their in-container code as string literals; a
+    # file that parses can still carry a truncated literal. --check-injected
+    # compiles every injected source standalone (no image access needed).
+    for entry in "$KVOFFLOAD_SCOPE_PATCH_HOST" "$KVOFFLOAD_STORE_PATCH_HOST"; do
+        if ! python3 "$entry" --check-injected >/dev/null 2>&1; then
+            echo "kv-offload artifact failed its injected-source self-check: $entry" >&2
             return 2
         fi
     done
@@ -1029,7 +1042,7 @@ if [ "${GLM53_KV_OFFLOAD:-0}" = "1" ]; then
     # tier is byte-invalid on 2-node TP, see the overlay header).
     ARGS+=(--kv-transfer-config "$(python3 -S -c 'import json,os
 gb=int(os.environ["GLM53_KV_OFFLOAD_CPU_GB"])
-cfg={"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":gb*(1<<30),"blocks_per_chunk":1}}
+cfg={"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":gb*(1<<30),"blocks_per_chunk":1,"offload_prompt_only":False}}
 print(json.dumps(cfg,separators=(",",":")))')")
 fi
 if [ "${SPEC_METHOD:-mtp}" = "dflash" ]; then
@@ -1110,7 +1123,7 @@ if [ "${GLM53_KV_OFFLOAD:-0}" = "1" ]; then
     # tier is byte-invalid on 2-node TP, see the overlay header).
     ARGS+=(--kv-transfer-config "$(python3 -S -c 'import json,os
 gb=int(os.environ["GLM53_KV_OFFLOAD_CPU_GB"])
-cfg={"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":gb*(1<<30),"blocks_per_chunk":1}}
+cfg={"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":gb*(1<<30),"blocks_per_chunk":1,"offload_prompt_only":False}}
 print(json.dumps(cfg,separators=(",",":")))')")
 fi
 if [ "${SPEC_METHOD:-mtp}" = "dflash" ]; then
@@ -1224,6 +1237,7 @@ launch_cluster() {
         -e "GLM53_KV_OFFLOAD_RESTORE=$GLM53_KV_OFFLOAD_RESTORE"
         -e "GLM53_KV_OFFLOAD_DRAFTER=$GLM53_KV_OFFLOAD_DRAFTER"
         -e "GLM53_KV_OFFLOAD_KEEP_BOUNDARIES=$GLM53_KV_OFFLOAD_KEEP_BOUNDARIES"
+        -e "GLM53_KV_OFFLOAD_BUILD_ID=$GLM53_KV_OFFLOAD_BUILD_ID"
         -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
         -e "TILELANG_CACHE_DIR=$TILELANG_CACHE_DIR"
         -e "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=$VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"

@@ -13,12 +13,17 @@ C  Worker-local writer on a miniature 7-group layout: per-(hash,group) files
    with REAL (unpadded) bytes gathered ref-by-ref from the staging tensors,
    headers with KDA conv/temporal segment split (shape/dtype/stride),
    manifest publish ordering (missing any mamba payload or any cumulative
-   full-attn chunk => no manifest), inline K-boundary retention, dedup,
-   failed-key ledger, ENOSPC pause, rank-disagreement disable, delayed-ack
-   drain semantics, namespace forking on num_spec change.
-D  GC tool (overlay/kv_offload_store_gc.py): dry-run reports orphans and
-   corrupt files without deleting; --sweep removes them; --keep-boundaries
-   preserves cumulative full-attn references (plan §4 C1).
+   full-attn chunk => no manifest), inline K-boundary retention,
+   header-verified dedup, failed-key ledger, ENOSPC pause,
+   rank-disagreement disable, capture-then-write snapshot isolation (the
+   reset_cache()/row-reuse regression: staging mutated after capture must
+   not change disk bytes), flush-path capture, namespace forking on
+   num_spec change.
+D  GC tool (overlay/kv_offload_store_gc.py): dry-run reports orphans (found
+   from headers even with zero manifests), corrupt files and stale temps
+   without deleting; --sweep removes them; --keep-boundaries applies the
+   writer's leaf-walk keep-set (forked chains: shared divergence ancestors
+   survive) and preserves cumulative full-attn references (plan §4 C1).
 
 Run:  python3 tests/test_kv_offload_store_local.py   (or pytest)
 """
@@ -409,11 +414,22 @@ def test_writer() -> None:
 
         meta = _job_meta(2)
         rows = list(range(len(meta["keys"])))
-        deferred = writer.submit_job(7, meta, rows)
-        check(deferred, "C3 job ack deferred to the disk writer")
+        # Capture-then-write (review finding 1): the capture snapshots bytes
+        # synchronously; mutating the staging rows AFTERWARDS must not change
+        # what lands on disk (this is the reset_cache()/row-reuse regression).
+        g2_row = rows[meta["keys"].index((_hash(0), 2, 0, 3584))]
+        pre0 = tensors[0].rows[g2_row][:28]
+        pre1 = tensors[1].rows[g2_row][:28]
+        writer.capture_job(7, meta, rows)
+        for t in tensors:
+            t.rows = [bytes(len(r)) for r in t.rows]  # zero every staging row
         writer.shutdown(timeout=20)
         done = writer.drain_done()
-        check(done == [7], "C4 job completion surfaces via the done queue")
+        check(done == [7], "C3 job completion surfaces via the done queue")
+        check(
+            writer.capture_job(7, meta, rows) is None,
+            "C4 capture is idempotent per job id and never defers acks",
+        )
 
         base = Path(writer._base)
         g2_path = base / _hash(0)[:3] / f"{_hash(0)[3:5]}_g2" / f"{_hash(0)}.bin"
@@ -435,12 +451,14 @@ def test_writer() -> None:
             and segs[2]["offset"] == 28,
             "C7 KDA segment table: conv/temporal split with shape/dtype/stride",
         )
-        # Payload bytes must equal the staging rows' unpadded prefixes, in
-        # group layer order (row = dst cpu block of that key).
-        g2_row = rows[meta["keys"].index((_hash(0), 2, 0, 3584))]
-        expected = tensors[0].rows[g2_row][:28] + tensors[1].rows[g2_row][:28]
+        # Payload bytes must equal the PRE-MUTATION staging snapshot, in
+        # group layer order — proof the writer worked from private buffers.
+        expected = pre0 + pre1
         blob = g2_path.read_bytes()
-        check(blob.endswith(expected), "C8 payload bytes == staging real bytes per ref")
+        check(
+            blob.endswith(expected) and any(expected),
+            "C8 payload == pre-mutation staging snapshot (private buffers)",
+        )
 
         g0_path = base / _hash(0)[:3] / f"{_hash(0)[3:5]}_g0" / f"{_hash(0)}.bin"
         h0 = store.read_chunk_header(str(g0_path))
@@ -450,11 +468,13 @@ def test_writer() -> None:
         m1 = base / "manifests" / _hash(1)[:3] / f"{_hash(1)}.json"
         check(m0.is_file() and m1.is_file(), "C10 manifests published for both boundaries")
         man = json.loads(m1.read_text())
+        g0_chunks = man["full_groups"]["0"]
         check(
             man["chunk_hashes"] == [_hash(0), _hash(1)]
             and set(man["cow_groups"]) == {"2", "3", "4", "5"}
-            and man["full_groups"] == {"0": 2},
-            "C11 manifest carries cumulative chunk chain + per-group entries",
+            and [c[0] for c in g0_chunks] == [_hash(0), _hash(1)]
+            and all(c[1] == 136 and isinstance(c[2], int) for c in g0_chunks),
+            "C11 manifest: cumulative chain + per-chunk [hash, len, crc] per group",
         )
         n_files = len(list(base.rglob("*.bin")))
         check(n_files == 10, f"C12 5 groups x 2 boundaries = 10 chunk files (got {n_files})")
@@ -464,7 +484,7 @@ def test_writer() -> None:
         del_idx = meta3["keys"].index((_hash(2), 3, 2, 3584))
         meta3["keys"] = meta3["keys"][:del_idx] + meta3["keys"][del_idx + 1 :]
         meta3["manifests"] = meta3["manifests"][2:]  # only the new boundary
-        writer.submit_job(8, meta3, list(range(len(meta3["keys"]))))
+        writer.capture_job(8, meta3, list(range(len(meta3["keys"]))))
         writer.shutdown(timeout=20)
         m2 = base / "manifests" / _hash(2)[:3] / f"{_hash(2)}.json"
         check(
@@ -487,7 +507,7 @@ def test_writer() -> None:
                 }
             ],
         }
-        writer.submit_job(9, meta_fk, [40])
+        writer.capture_job(9, meta_fk, [40])
         writer.shutdown(timeout=20)
         check(
             not m2.is_file(),
@@ -509,7 +529,7 @@ def test_writer() -> None:
             return real_open(path, mode, *a, **k)
 
         ns["open"] = enospc_open
-        writer.submit_job(1, _job_meta(1), list(range(5)))
+        writer.capture_job(1, _job_meta(1), list(range(5)))
         writer.shutdown(timeout=20)
         check(
             writer._paused_reason == "ENOSPC" and writer.drain_done() == [1],
@@ -533,7 +553,7 @@ def test_writer() -> None:
         ns = store.load_writer_helpers(logger3)
         cw, _, _ = _mini_env()
         writer = ns["Glm53LocalStoreWriter"](cw, logger3)
-        writer.submit_job(1, _job_meta(2), list(range(10)))
+        writer.capture_job(1, _job_meta(2), list(range(10)))
         writer.shutdown(timeout=20)
         base = Path(writer._base)
         m0 = base / "manifests" / _hash(0)[:3] / f"{_hash(0)}.json"
@@ -566,9 +586,10 @@ def test_writer() -> None:
                 and "disagrees" in writer._disabled_reason,
                 "C20 TP-rank/config-rank disagreement DISABLES the writer",
             )
+            writer.capture_job(1, _job_meta(1), list(range(5)))
             check(
-                writer.submit_job(1, _job_meta(1), list(range(5))) is False,
-                "C21 disabled writer never defers acks (jobs flow normally)",
+                not list(Path(td).rglob("*.bin")),
+                "C21 disabled writer captures nothing (jobs flow normally)",
             )
     finally:
         ps.get_tensor_model_parallel_rank = old
@@ -588,7 +609,7 @@ def test_writer() -> None:
             "C22 num_speculative_tokens forks the namespace hash",
         )
 
-    # Delayed-ack drain semantics through the connector-worker helpers.
+    # Capture helpers through the connector-worker seam (both call sites).
     logger6 = _TestLogger()
     with tempfile.TemporaryDirectory() as td:
         os.environ["GLM53_KV_OFFLOAD_DIR"] = td
@@ -596,20 +617,30 @@ def test_writer() -> None:
         cw, _, _ = _mini_env()
         dst = SimpleNamespace(block_ids=list(range(5)))
         cw._glm53_job_meta[42] = (_job_meta(1), dst)
-        intercepted = ns["_glm53_intercept_store_completion"](cw, 42)
+        ns["_glm53_capture_store_job"](cw, 42)
         check(
-            intercepted and cw._connector_worker_meta.completed == [],
-            "C23 store completion intercepted: no immediate ack",
+            42 not in cw._glm53_job_meta
+            and cw._glm53_store_writer is not None,
+            "C23 get_finished capture consumes the job meta",
         )
         cw._glm53_store_writer.shutdown(timeout=20)
-        ns["_glm53_drain_finished_disk_writes"](cw)
+        base = Path(cw._glm53_store_writer._base)
         check(
-            cw._connector_worker_meta.completed == [42],
-            "C24 ack lands via drain after the disk write finishes",
+            len(list(base.rglob("*.bin"))) == 5,
+            "C24 captured job's files land on disk",
         )
+        ns["_glm53_capture_store_job"](cw, 43)
         check(
-            ns["_glm53_intercept_store_completion"](cw, 43) is False,
-            "C25 jobs without meta (loads) are never intercepted",
+            43 not in cw._glm53_job_meta,
+            "C25 jobs without meta (loads) are a no-op capture",
+        )
+        # Flush/reset path: capture fires for exactly the flushed store jobs.
+        cw._glm53_job_meta[44] = (_job_meta(1), dst)
+        ns["_glm53_capture_flushed_store_jobs"](cw, {44, 45})
+        cw._glm53_store_writer.shutdown(timeout=20)
+        check(
+            44 not in cw._glm53_job_meta,
+            "C26 flush-path capture consumes flushed store jobs (reset-safe)",
         )
     _cleanup_env()
 
@@ -630,7 +661,7 @@ def test_gc_tool() -> None:
         ns = store.load_writer_helpers(logger)
         cw, _, _ = _mini_env()
         writer = ns["Glm53LocalStoreWriter"](cw, logger)
-        writer.submit_job(1, _job_meta(2), list(range(10)))
+        writer.capture_job(1, _job_meta(2), list(range(10)))
         writer.shutdown(timeout=20)
         base = Path(writer._base)
 
@@ -646,7 +677,7 @@ def test_gc_tool() -> None:
             "manifests": [],
         }
         writer2 = ns["Glm53LocalStoreWriter"](cw, logger)
-        writer2.submit_job(2, meta3, [50])
+        writer2.capture_job(2, meta3, [50])
         writer2.shutdown(timeout=20)
         orphan = base / _hash(9)[:3] / f"{_hash(9)[3:5]}_g2" / f"{_hash(9)}.bin"
         check(orphan.is_file(), "D2 orphan payload staged")
@@ -675,6 +706,78 @@ def test_gc_tool() -> None:
         check(
             g0_b0.is_file() and not g2_b0.is_file(),
             "D7 cumulative full-attn refs protected; superseded mamba swept",
+        )
+
+    # Crash-before-first-manifest: orphans must be found from HEADERS alone.
+    logger7 = _TestLogger()
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["GLM53_KV_OFFLOAD_DIR"] = td
+        os.environ["GLM53_KV_OFFLOAD_KEEP_BOUNDARIES"] = "0"
+        ns = store.load_writer_helpers(logger7)
+        cw, _, _ = _mini_env()
+        w = ns["Glm53LocalStoreWriter"](cw, logger7)
+        meta = {
+            "v": 1,
+            "keys": [(_hash(3), 4, 3, 3584)],
+            "cow_groups": [2, 3, 4, 5],
+            "full_groups": [0],
+            "manifests": [],
+        }
+        w.capture_job(1, meta, [7])
+        w.shutdown(timeout=20)
+        base = Path(w._base)
+        out = gc_tool.main([str(base)])
+        check(
+            out == 1,
+            "D8 orphan reported with ZERO manifests present (header-based)",
+        )
+        # Stale temp: any *.tmp.* is reported and swept.
+        t = base / _hash(3)[:3] / f"{_hash(3)[3:5]}_g4" / "x.bin.tmp.r0.1.2"
+        t.write_bytes(b"partial")
+        check(gc_tool.main([str(base)]) == 1, "D9 stale temp flagged by dry-run")
+        gc_tool.main([str(base), "--sweep"])
+        check(not t.exists(), "D10 --sweep removes stale temps")
+
+    # Forked chains: a shared divergence-point boundary survives while ANY
+    # branch still keeps it (writer rule mirrored in the GC tool).
+    logger8 = _TestLogger()
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["GLM53_KV_OFFLOAD_DIR"] = td
+        os.environ["GLM53_KV_OFFLOAD_KEEP_BOUNDARIES"] = "0"
+        ns = store.load_writer_helpers(logger8)
+        cw, _, _ = _mini_env()
+        w = ns["Glm53LocalStoreWriter"](cw, logger8)
+        keys = []
+        for k, h in ((0, _hash(0)), (1, _hash(10)), (1, _hash(11))):
+            for g in (0, 2, 3, 4, 5):
+                keys.append((h, g, k, 3584))
+        meta = {
+            "v": 1,
+            "keys": keys,
+            "cow_groups": [2, 3, 4, 5],
+            "full_groups": [0],
+            "manifests": [
+                {"boundary_token_index": 3584, "chunk_hashes": [_hash(0)]},
+                {"boundary_token_index": 7168, "chunk_hashes": [_hash(0), _hash(10)]},
+                {"boundary_token_index": 7168, "chunk_hashes": [_hash(0), _hash(11)]},
+            ],
+        }
+        w.capture_job(1, meta, list(range(len(keys))))
+        w.shutdown(timeout=20)
+        base = Path(w._base)
+        m_shared = base / "manifests" / _hash(0)[:3] / f"{_hash(0)}.json"
+        check(m_shared.is_file(), "D11 forked store staged (shared ancestor manifested)")
+        gc_tool.main([str(base), "--sweep", "--keep-boundaries", "2"])
+        check(
+            m_shared.is_file(),
+            "D12 K=2: shared divergence-point ancestor kept (both branches need it)",
+        )
+        gc_tool.main([str(base), "--sweep", "--keep-boundaries", "1"])
+        m_a = base / "manifests" / _hash(10)[:3] / f"{_hash(10)}.json"
+        m_b = base / "manifests" / _hash(11)[:3] / f"{_hash(11)}.json"
+        check(
+            m_a.is_file() and m_b.is_file() and not m_shared.is_file(),
+            "D13 K=1: both leaves kept, only the shared ancestor superseded",
         )
     _cleanup_env()
 

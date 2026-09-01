@@ -44,16 +44,19 @@ manifest-aggregating lookup replaces it on the read side.
 3. ``offloading/worker.py`` — the worker-local writer:
    - store-job metadata is captured per job (both the ``prepare_store_kv``
      and the ``handle_preemptions`` flush path);
-   - when a store job's GPU->CPU DMA completes, the job is NOT acked to the
-     scheduler yet; a small writer pool (2 threads) writes one file per
-     (block-hash, group): real (unpadded) bytes only, gathered from the
-     worker's own CPU staging tensors via the same CanonicalKVCacheRef layout
-     the DMA used, with a §4 chunk header (format v1: magic, versioned JSON
-     header with namespace hash, ORIGINAL group index, per-layer segment
-     table incl. the KDA conv/temporal split, payload CRC, header CRC);
-   - the job is acked only after its writes finish — staging blocks stay
-     pinned by the store protocol until every worker acks, so the bytes
-     cannot be evicted or rewritten under the disk writer;
+   - when a store job's GPU->CPU DMA completes, the job's bytes are
+     SNAPSHOTTED synchronously out of the staging mmap (capture-then-write;
+     Codex OFFLOAD1-REVIEW finding 1) — at get_finished before this rank's
+     ack (rows pinned until complete_store) or right after worker.wait() on
+     the flush/reset path, before any new DMA can reuse the rows: staging
+     reuse after reset_cache()/preemption/shutdown can never tear a payload.
+     A small writer pool (2 threads) then writes one file per (block-hash,
+     group) from PRIVATE buffers (budget-capped, drop-over-budget = lost
+     store): real (unpadded) bytes only, via the same CanonicalKVCacheRef
+     layout the DMA used, with a §4 chunk header (format v1: magic,
+     versioned JSON header with namespace hash, ORIGINAL group index,
+     per-layer segment table incl. the KDA conv/temporal split, payload
+     CRC, header CRC); acks are never deferred;
    - after a job's payloads are durable (write+fsync+rename+parent-dir
      fsync, unique pid-suffixed temp names), boundary manifests are
      published (existence-verified cumulative references, tmp+rename with
@@ -397,6 +400,7 @@ class Glm53LocalStoreWriter:
         self._lock = _glm53_threading.Lock()
         self._files_written = 0
         self._files_dropped = 0
+        self._outstanding_bytes = 0
         # Keys whose write failed THIS boot: a manifest must never reference
         # them even if a stale file appears on disk later (plan §8).
         self._failed_keys: set = set()
@@ -437,14 +441,23 @@ class Glm53LocalStoreWriter:
         # config's parallel.rank must agree; disagreement disables the
         # writer rather than risking cross-rank mixing.
         rank = None
+        rank_source = "tp-group"
         try:
             from vllm.distributed.parallel_state import (
                 get_tensor_model_parallel_rank as _glm53_tp_rank,
             )
 
             rank = int(_glm53_tp_rank())
-        except Exception:  # noqa: BLE001 - group not initialized: fall back
+        except Exception as exc:  # noqa: BLE001 - group not initialized
             rank = None
+            rank_source = f"config-fallback ({type(exc).__name__})"
+            self._log.warning(
+                "%s TP rank unavailable (%s); falling back to "
+                "OffloadingParallelConfig.rank -- the two-node R0 receipt is "
+                "the live check for this path",
+                _GLM53_KVO_STORE_TAG,
+                exc,
+            )
         cfg_rank = parallel.rank
         if rank is None:
             rank = cfg_rank
@@ -467,6 +480,7 @@ class Glm53LocalStoreWriter:
         self._keep_boundaries = int(keep_raw)
 
         self._rank = rank
+        self._rank_source = rank_source
         self._world = world
         self._cpu_tensors = handler.dst_tensors
         self._refs_per_group = handler.layer_refs_per_group
@@ -529,6 +543,7 @@ class Glm53LocalStoreWriter:
         # the on-disk namespace record for operators but must NOT fence the
         # namespace hash (changing K must not orphan the whole store).
         namespace_fields["keep_boundaries"] = self._keep_boundaries
+        namespace_fields["rank_source"] = rank_source
         canonical = _glm53_json.dumps(
             namespace_fields, sort_keys=True, separators=(",", ":")
         )
@@ -538,10 +553,23 @@ class Glm53LocalStoreWriter:
         )
         _os.makedirs(self._base, exist_ok=True)
         ns_path = f"{root}/glm53kv_{safe_model}_{self._namespace_hash}.json"
-        if not _os.path.exists(ns_path):
+        if _os.path.exists(ns_path):
+            with open(ns_path, encoding="utf-8") as f:
+                existing = f.read()
+            if existing != canonical:
+                # Same 12-hex namespace, different canonical record: either a
+                # truncated write or a hash collision -- both disqualify the
+                # store (fail closed rather than mixing semantics).
+                raise ValueError(
+                    f"namespace record mismatch at {ns_path} -- refusing to "
+                    "write into a store whose recorded config differs"
+                )
+        else:
             tmp = ns_path + f".tmp.r{rank}.{_os.getpid()}"
             with open(tmp, "w", encoding="utf-8") as f:
                 f.write(canonical)
+                f.flush()
+                _os.fsync(f.fileno())
             _os.replace(tmp, ns_path)
         for _ in range(2):
             t = _glm53_threading.Thread(
@@ -576,11 +604,27 @@ class Glm53LocalStoreWriter:
         return abi
 
     # ---- job intake ----------------------------------------------------
-    def submit_job(self, job_id: int, meta: dict, dst_block_ids) -> bool:
-        """Queue a completed-DMA store job for disk writing. Returns True when
-        the ack must be deferred until the writes finish."""
+    # CAPTURE-THEN-WRITE (Codex OFFLOAD1-REVIEW finding 1, BLOCKER): payload
+    # bytes are SNAPSHOTTED OUT of the staging mmap synchronously at capture
+    # time -- while the job's rows are still guaranteed live (normal path:
+    # before this rank's ack, rows pinned until complete_store; flush/reset
+    # path: immediately after worker.wait(), before any new DMA is submitted).
+    # The async writer threads then work on private buffers only, so staging
+    # reuse after reset_cache(), preemption fencing, or shutdown/mmap cleanup
+    # can never tear a payload. Bounded by _BUFFER_BUDGET (drop-oldest-style:
+    # new captures over budget are dropped as lost stores, plan §7).
+    _BUFFER_BUDGET_BYTES = 512 * 1024 * 1024
+
+    def capture_job(self, job_id: int, meta: dict, dst_block_ids) -> None:
+        """Snapshot a completed-DMA store job's bytes and queue disk writes.
+
+        Synchronous copy, asynchronous write. Idempotent per job_id. Never
+        defers the job's ack: correctness no longer depends on ack timing."""
         if self._disabled_reason is not None:
-            return False
+            return
+        with self._lock:
+            if job_id in self._pending_jobs:
+                return
         keys = meta.get("keys") or []
         rows = [int(b) for b in dst_block_ids]
         if len(keys) != len(rows):
@@ -592,22 +636,60 @@ class Glm53LocalStoreWriter:
                 len(keys),
                 len(rows),
             )
-            return False
+            return
         job = {
             "job_id": job_id,
             "meta": meta,
-            "remaining": len(keys),
+            "remaining": 0,
             "written": [],
         }
+        tasks = []
+        for (hash_hex, group_idx, chunk_idx, n_tokens), row in zip(keys, rows):
+            group_idx = int(group_idx)
+            if self._paused_reason is not None:
+                self._files_dropped += 1
+                continue
+            try:
+                if group_idx not in self._eligible_groups:
+                    raise ValueError(
+                        f"ineligible group {group_idx} reached the writer"
+                    )
+                payload, segments = self._gather_payload(group_idx, row)
+            except Exception as exc:  # noqa: BLE001 - lost store only
+                self._on_write_error(hash_hex, group_idx, exc)
+                continue
+            with self._lock:
+                if (
+                    self._outstanding_bytes + len(payload)
+                    > self._BUFFER_BUDGET_BYTES
+                ):
+                    over_budget = True
+                else:
+                    over_budget = False
+                    self._outstanding_bytes += len(payload)
+            if over_budget:
+                # Lost store, not a failure: the key may be re-stored later
+                # and stays manifest-eligible if a durable file appears.
+                self._files_dropped += 1
+                continue
+            tasks.append(
+                (
+                    job,
+                    hash_hex,
+                    group_idx,
+                    int(chunk_idx),
+                    int(n_tokens),
+                    payload,
+                    segments,
+                )
+            )
+        job["remaining"] = len(tasks)
         with self._lock:
             self._pending_jobs[job_id] = job
-        for (hash_hex, group_idx, chunk_idx, n_tokens), row in zip(keys, rows):
-            self._task_queue.put(
-                (job, hash_hex, int(group_idx), int(chunk_idx), int(n_tokens), row)
-            )
-        if not keys:
+        for task in tasks:
+            self._task_queue.put(task)
+        if not tasks:
             self._finish_job(job)
-        return True
 
     def drain_done(self):
         done = []
@@ -637,15 +719,18 @@ class Glm53LocalStoreWriter:
 
     def _writer_loop(self) -> None:
         while True:
-            job, hash_hex, group_idx, chunk_idx, n_tokens, row = (
+            job, hash_hex, group_idx, chunk_idx, n_tokens, payload, segments = (
                 self._task_queue.get()
             )
             try:
-                self._write_one(job, hash_hex, group_idx, chunk_idx, n_tokens, row)
+                self._write_one(
+                    job, hash_hex, group_idx, chunk_idx, n_tokens, payload, segments
+                )
             except Exception as exc:  # noqa: BLE001 - lost store only
                 self._on_write_error(hash_hex, group_idx, exc)
             finally:
                 with self._lock:
+                    self._outstanding_bytes -= len(payload)
                     job["remaining"] -= 1
                     finished = job["remaining"] <= 0
                 if finished:
@@ -675,21 +760,10 @@ class Glm53LocalStoreWriter:
             exc,
         )
 
-    def _write_one(self, job, hash_hex, group_idx, chunk_idx, n_tokens, row):
-        import os as _os
-
-        if self._paused_reason is not None or self._disabled_reason is not None:
-            self._files_dropped += 1
-            return
-        if group_idx not in self._eligible_groups:
-            raise ValueError(f"ineligible group {group_idx} reached the writer")
-        path = self._file_path(hash_hex, group_idx)
-        if _os.path.exists(path):
-            _os.utime(path)  # dedup refresh, mtime stays meaningful
-            with self._lock:
-                job["written"].append((hash_hex, group_idx))
-            return
-
+    def _gather_payload(self, group_idx: int, row: int):
+        """Copy one (group, staging-row) chunk OUT of the mmap: real bytes
+        per CanonicalKVCacheRef, in group layer order. Runs synchronously at
+        capture time (rows guaranteed live); returns (payload, segments)."""
         refs = self._refs_per_group[group_idx]
         group = self._kv_groups[group_idx]
         layer_names = list(group.layer_names)
@@ -705,8 +779,50 @@ class Glm53LocalStoreWriter:
                 self._layer_segments(group, layer, offset, ref.page_size_bytes)
             )
             offset += ref.page_size_bytes
-        payload = b"".join(parts)
+        return b"".join(parts), segments
 
+    def _write_one(
+        self, job, hash_hex, group_idx, chunk_idx, n_tokens, payload, segments
+    ):
+        import os as _os
+
+        if self._paused_reason is not None or self._disabled_reason is not None:
+            self._files_dropped += 1
+            return
+        path = self._file_path(hash_hex, group_idx)
+        if _os.path.exists(path):
+            # Dedup ONLY when the existing file verifies as ours (header
+            # identity: namespace + hash + group). A corrupt or foreign file
+            # under our name is unlinked and rewritten (Codex OFFLOAD1-REVIEW
+            # finding 3: existence alone must not certify).
+            try:
+                h = glm53_read_chunk_header(path)
+                if (
+                    h.get("namespace_hash") == self._namespace_hash
+                    and h.get("hash") == hash_hex
+                    and h.get("group_idx") == group_idx
+                ):
+                    _os.utime(path)  # dedup refresh, mtime stays meaningful
+                    with self._lock:
+                        job["written"].append((hash_hex, group_idx))
+                    return
+                raise ValueError("header identity mismatch")
+            except (OSError, ValueError) as exc:
+                self._log.warning(
+                    "%s existing chunk %s g%d failed verification (%s) -- "
+                    "rewriting",
+                    _GLM53_KVO_STORE_TAG,
+                    hash_hex[:12],
+                    group_idx,
+                    exc,
+                )
+                try:
+                    _os.unlink(path)
+                except OSError:
+                    pass
+
+        group = self._kv_groups[group_idx]
+        refs = self._refs_per_group[group_idx]
         inner = _glm53_unwrap_kv_spec(group.kv_cache_spec)
         header = {
             "namespace_hash": self._namespace_hash,
@@ -727,7 +843,10 @@ class Glm53LocalStoreWriter:
         blob = glm53_encode_chunk(header, payload)
 
         _os.makedirs(_os.path.dirname(path), exist_ok=True)
-        tmp = f"{path}.tmp.r{self._rank}.{_os.getpid()}"
+        tmp = (
+            f"{path}.tmp.r{self._rank}.{_os.getpid()}"
+            f".{_glm53_threading.get_ident()}"
+        )
         try:
             with open(tmp, "wb") as f:
                 f.write(blob)
@@ -852,6 +971,13 @@ class Glm53LocalStoreWriter:
                 except (OSError, ValueError):
                     complete = False
                     break
+                if (
+                    fheader.get("namespace_hash") != self._namespace_hash
+                    or fheader.get("hash") != boundary_hash
+                    or fheader.get("group_idx") != gidx
+                ):
+                    complete = False
+                    break
                 groups_entry[str(gidx)] = {
                     "hash": boundary_hash,
                     "payload_len": fheader["payload_len"],
@@ -859,15 +985,29 @@ class Glm53LocalStoreWriter:
                 }
             if not complete:
                 continue
+            full_entry = {}
             for gidx in full_groups:
+                chunks = []
                 for h in chunk_hashes:
-                    if (h, gidx) in failed or not _os.path.exists(
-                        self._file_path(h, gidx)
+                    if (h, gidx) in failed:
+                        complete = False
+                        break
+                    try:
+                        fh = glm53_read_chunk_header(self._file_path(h, gidx))
+                    except (OSError, ValueError):
+                        complete = False
+                        break
+                    if (
+                        fh.get("namespace_hash") != self._namespace_hash
+                        or fh.get("hash") != h
+                        or fh.get("group_idx") != gidx
                     ):
                         complete = False
                         break
+                    chunks.append([h, fh["payload_len"], fh["payload_crc32"]])
                 if not complete:
                     break
+                full_entry[str(gidx)] = chunks
             if not complete:
                 continue
             manifest = {
@@ -876,12 +1016,17 @@ class Glm53LocalStoreWriter:
                 "boundary_token_index": cand["boundary_token_index"],
                 "chunk_hashes": chunk_hashes,
                 "cow_groups": groups_entry,
-                "full_groups": {str(g): len(chunk_hashes) for g in full_groups},
+                # Per-chunk [hash, payload_len, payload_crc32], cumulative
+                # 0..boundary (plan §4: hashes + sizes + crcs per group).
+                "full_groups": full_entry,
                 "rank": self._rank,
                 "created_at": _glm53_time.time(),
             }
             _os.makedirs(_os.path.dirname(mpath), exist_ok=True)
-            tmp = f"{mpath}.tmp.r{self._rank}.{_os.getpid()}"
+            tmp = (
+                f"{mpath}.tmp.r{self._rank}.{_os.getpid()}"
+                f".{_glm53_threading.get_ident()}"
+            )
             try:
                 with open(tmp, "w", encoding="utf-8") as f:
                     _glm53_json.dump(manifest, f, sort_keys=True)
@@ -974,32 +1119,33 @@ def _glm53_get_store_writer(connector_worker):
     return writer
 
 
-def _glm53_drain_finished_disk_writes(connector_worker) -> None:
-    writer = connector_worker._glm53_store_writer
-    if writer is None:
-        return
-    for job_id in writer.drain_done():
-        connector_worker._connector_worker_meta.mark_completed(job_id)
+def _glm53_capture_store_job(connector_worker, job_id: int) -> None:
+    """Snapshot a DMA-complete store job's bytes out of the staging mmap.
 
-
-def _glm53_intercept_store_completion(connector_worker, job_id: int) -> bool:
-    """Route a DMA-complete store job into the local disk writer. Returns True
-    when the ack is deferred until the disk write finishes."""
+    Called at the two points where the job's rows are guaranteed still live:
+    get_finished (before this rank's ack -- staging pinned until
+    complete_store) and immediately after worker.wait() on the flush/reset
+    path (before any new DMA can reuse the rows). Never defers the ack; the
+    disk write proceeds on private buffers."""
     captured = connector_worker._glm53_job_meta.pop(job_id, None)
     if captured is None:
-        return False
+        return
     meta, dst_spec = captured
     try:
         writer = _glm53_get_store_writer(connector_worker)
-        return writer.submit_job(job_id, meta, dst_spec.block_ids)
+        writer.capture_job(job_id, meta, dst_spec.block_ids)
     except Exception as exc:  # noqa: BLE001 - never block serving on the tier
         logger.error(
-            "%s store interception failed (job acked, store lost): %s: %s",
+            "%s store capture failed (store lost, serving unaffected): %s: %s",
             _GLM53_KVO_STORE_TAG,
             type(exc).__name__,
             exc,
         )
-        return False
+
+
+def _glm53_capture_flushed_store_jobs(connector_worker, job_ids) -> None:
+    for job_id in list(job_ids or ()):
+        _glm53_capture_store_job(connector_worker, job_id)
 
 
 '''
@@ -1200,32 +1346,31 @@ PATCHED_W4 = """        for job_id, entry in metadata.store_jobs.items():
                 self._glm53_job_meta[job_id] = (_glm53_meta, entry.dst_spec)
 """
 
-MARK_W5 = "        _glm53_drain_finished_disk_writes(self)  # [glm53-kv-offload-store]\n"
-
-ANCHOR_W5 = """        assert self.worker is not None
-        finished_recving: set[str] = set()
-        for transfer_result in self.worker.get_finished():
-"""
-
-PATCHED_W5 = """        assert self.worker is not None
-        finished_recving: set[str] = set()
-        _glm53_drain_finished_disk_writes(self)  # [glm53-kv-offload-store]
-        for transfer_result in self.worker.get_finished():
-"""
-
-MARK_W5B = "            if _glm53_intercept_store_completion(self, job_id):  # [glm53-kv-offload-store]\n"
+MARK_W5B = "            _glm53_capture_store_job(self, job_id)  # [glm53-kv-offload-store]\n"
 
 ANCHOR_W5B = """            self._connector_worker_meta.mark_completed(job_id)
             req_id = self._load_jobs.pop(job_id, None)
 """
 
-PATCHED_W5B = """            if _glm53_intercept_store_completion(self, job_id):  # [glm53-kv-offload-store]
-                # DMA done; the ack is deferred until this rank's disk write
-                # finishes (staging stays pinned by the store protocol, so
-                # the bytes cannot be evicted under the writer).
-                continue
+PATCHED_W5B = """            _glm53_capture_store_job(self, job_id)  # [glm53-kv-offload-store]
             self._connector_worker_meta.mark_completed(job_id)
             req_id = self._load_jobs.pop(job_id, None)
+"""
+
+# Flush/reset path: reset_cache() frees ALL staging rows and the very next
+# step may DMA new stores into them -- capture the flushed jobs' bytes
+# synchronously right after their DMA wait, before returning to the step.
+MARK_W5C = "            _glm53_capture_flushed_store_jobs(  # [glm53-kv-offload-store]\n"
+
+ANCHOR_W5C = """        if kv_connector_metadata.jobs_to_flush:
+            self.worker.wait(kv_connector_metadata.jobs_to_flush)
+"""
+
+PATCHED_W5C = """        if kv_connector_metadata.jobs_to_flush:
+            self.worker.wait(kv_connector_metadata.jobs_to_flush)
+            _glm53_capture_flushed_store_jobs(  # [glm53-kv-offload-store]
+                self, kv_connector_metadata.jobs_to_flush
+            )
 """
 
 MARK_W6 = "        if self._glm53_store_writer is not None:  # [glm53-kv-offload-store]\n"
@@ -1245,8 +1390,8 @@ SITES_WORKER = (
     ("W2 worker state", MARK_W2, ANCHOR_W2, PATCHED_W2),
     ("W3 flush-path meta capture", MARK_W3, ANCHOR_W3, PATCHED_W3),
     ("W4 store meta capture", MARK_W4, ANCHOR_W4, PATCHED_W4),
-    ("W5 drain finished writes", MARK_W5, ANCHOR_W5, PATCHED_W5),
-    ("W5B intercept completion", MARK_W5B, ANCHOR_W5B, PATCHED_W5B),
+    ("W5B capture at completion", MARK_W5B, ANCHOR_W5B, PATCHED_W5B),
+    ("W5C capture at flush", MARK_W5C, ANCHOR_W5C, PATCHED_W5C),
     ("W6 shutdown drain", MARK_W6, ANCHOR_W6, PATCHED_W6),
 )
 
@@ -1323,6 +1468,21 @@ def clear_pyc(target: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
     preflight_only = "--preflight" in argv[1:]
+
+    if "--check-injected" in argv[1:]:
+        # Host-side gate mode: compile every injected source standalone (no
+        # target access) so a truncated/corrupted string literal inside this
+        # file fails BEFORE the launcher stops a healthy pair.
+        for name, src in (
+            ("mode helpers", MODE_HELPERS_SRC),
+            ("codec", CODEC_SRC),
+            ("meta builder", META_BUILDER_SRC),
+            ("writer", WRITER_SRC),
+        ):
+            compile(src, f"<glm53-kv-offload-store {name}>", "exec")
+        load_helpers()
+        print("patch_kv_offload_store_local.py: injected sources compile OK")
+        return 0
 
     sched_source = TARGET_SCHED.read_text() if TARGET_SCHED.is_file() else ""
     if SCOPE_MARK not in sched_source:

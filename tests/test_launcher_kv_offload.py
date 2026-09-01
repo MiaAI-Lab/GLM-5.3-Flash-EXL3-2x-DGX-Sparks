@@ -421,6 +421,7 @@ def part_d(h: Harness) -> None:
             and extra["spec_name"] == "TieringOffloadingSpec"
             and extra["cpu_bytes_to_use"] == 6 * (1 << 30)
             and extra["blocks_per_chunk"] == 1
+            and extra["offload_prompt_only"] is False
             and "secondary_tiers" not in extra,
             f"D10 connector JSON shape (got {cfg})",
         )
