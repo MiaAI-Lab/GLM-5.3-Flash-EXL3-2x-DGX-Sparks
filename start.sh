@@ -190,6 +190,7 @@ DRAFTER_PATCH_HOST="${DRAFTER_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm5_drafter
 APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py}"
 KVOFFLOAD_SCOPE_PATCH_HOST="${KVOFFLOAD_SCOPE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kv_offload_scope.py}"
 KVOFFLOAD_STORE_PATCH_HOST="${KVOFFLOAD_STORE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kv_offload_store_local.py}"
+KVOFFLOAD_RESTORE_PATCH_HOST="${KVOFFLOAD_RESTORE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kv_offload_restore_g0.py}"
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
@@ -360,10 +361,11 @@ validate_numeric_config() {
     _glm53_validate_bool_flag GLM53_KV_OFFLOAD "${GLM53_KV_OFFLOAD-0}" || return
     _glm53_validate_bool_flag GLM53_KV_OFFLOAD_RESTORE "${GLM53_KV_OFFLOAD_RESTORE-0}" || return
     _glm53_validate_bool_flag GLM53_KV_OFFLOAD_DRAFTER "${GLM53_KV_OFFLOAD_DRAFTER-0}" || return
-    # Stage-1 hard rule: the restore path is not built yet; refusing here is
-    # fail-closed (the flag exists so stage 2 flips exactly one default).
-    if [ "${GLM53_KV_OFFLOAD_RESTORE-0}" = 1 ]; then
-        echo "GLM53_KV_OFFLOAD_RESTORE=1 is refused: stage 1 is store-only (restore lands in stage 2)" >&2
+    # Stage-2 rule: restore reads the store tier, so RESTORE=1 without the
+    # store knob is meaningless (a lookup with nothing behind it) and is
+    # refused fail-closed pre-stop.
+    if [ "${GLM53_KV_OFFLOAD_RESTORE-0}" = 1 ] && [ "${GLM53_KV_OFFLOAD-0}" != 1 ]; then
+        echo "GLM53_KV_OFFLOAD_RESTORE=1 requires GLM53_KV_OFFLOAD=1 (the restore path reads the store tier)" >&2
         return 2
     fi
     if [ "${GLM53_KV_OFFLOAD-0}" = 1 ]; then
@@ -404,6 +406,7 @@ validate_kv_offload_artifacts() {
     local -a artifacts=(
         "$KVOFFLOAD_SCOPE_PATCH_HOST|[glm53-kv-offload-scope]|$main_guard"
         "$KVOFFLOAD_STORE_PATCH_HOST|[glm53-kv-offload-store]|$main_guard"
+        "$KVOFFLOAD_RESTORE_PATCH_HOST|[glm53-kv-offload-restore]|$main_guard"
         "$SCRIPT_DIR/overlay/kv_offload_store_gc.py|glm53kv_<model>_<ns>_r<rank>|$gc_guard"
     )
     if ! command -v python3 >/dev/null 2>&1; then
@@ -439,7 +442,7 @@ validate_kv_offload_artifacts() {
     # The two patchers embed their in-container code as string literals; a
     # file that parses can still carry a truncated literal. --check-injected
     # compiles every injected source standalone (no image access needed).
-    for entry in "$KVOFFLOAD_SCOPE_PATCH_HOST" "$KVOFFLOAD_STORE_PATCH_HOST"; do
+    for entry in "$KVOFFLOAD_SCOPE_PATCH_HOST" "$KVOFFLOAD_STORE_PATCH_HOST" "$KVOFFLOAD_RESTORE_PATCH_HOST"; do
         if ! python3 "$entry" --check-injected >/dev/null 2>&1; then
             echo "kv-offload artifact failed its injected-source self-check: $entry" >&2
             return 2
@@ -977,9 +980,11 @@ sync_weights() {
 #     -> patch_apc_fine_grained_hits (per-group = PR #83, fine-grained =
 #     PR #84 — [ -f ]-guarded no-ops unless those branches' artifacts are
 #     mounted);
-#   - the kv-offload pair is order-dependent: patch_kv_offload_scope MUST
+#   - the kv-offload trio is order-dependent: patch_kv_offload_scope MUST
 #     precede patch_kv_offload_store_local (the store overlay anchors on the
-#     scope overlay's scheduler output and refuses an unscoped tree).
+#     scope overlay's scheduler output and refuses an unscoped tree), and
+#     patch_kv_offload_restore_g0 MUST come last of the three (it anchors on
+#     BOTH overlays' output and refuses a tree missing either mark).
 # Entries that are not mounted are skipped in-container (`[ -f ]`); which ones
 # MUST exist is decided by the artifact guards above, not here.
 GLM53_OVERLAY_ORDER=(
@@ -992,6 +997,7 @@ GLM53_OVERLAY_ORDER=(
     patch_apc_fine_grained_hits.py
     patch_kv_offload_scope.py
     patch_kv_offload_store_local.py
+    patch_kv_offload_restore_g0.py
     patch_xgrammar_termination.py
     patch_kpool_tail_slotmap.py
     patch_ablit.py
@@ -1204,6 +1210,8 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$KVOFFLOAD_SCOPE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kv_offload_scope.py"
     [ -f "$KVOFFLOAD_STORE_PATCH_HOST" ] || die "missing $KVOFFLOAD_STORE_PATCH_HOST"
     scp -q -o BatchMode=yes "$KVOFFLOAD_STORE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kv_offload_store_local.py"
+    [ -f "$KVOFFLOAD_RESTORE_PATCH_HOST" ] || die "missing $KVOFFLOAD_RESTORE_PATCH_HOST"
+    scp -q -o BatchMode=yes "$KVOFFLOAD_RESTORE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kv_offload_restore_g0.py"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "missing $XGRAMMAR_PATCH_HOST"
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
@@ -1310,6 +1318,7 @@ launch_cluster() {
         -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
         -v '/tmp/patch_kv_offload_scope.py:/opt/glm53/patch_kv_offload_scope.py:ro' \
         -v '/tmp/patch_kv_offload_store_local.py:/opt/glm53/patch_kv_offload_store_local.py:ro' \
+        -v '/tmp/patch_kv_offload_restore_g0.py:/opt/glm53/patch_kv_offload_restore_g0.py:ro' \
         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
         -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
@@ -1344,6 +1353,7 @@ launch_cluster() {
         -v "$APC_PATCH_HOST:/opt/glm53/patch_hybrid_prefix_hit.py:ro" \
         -v "$KVOFFLOAD_SCOPE_PATCH_HOST:/opt/glm53/patch_kv_offload_scope.py:ro" \
         -v "$KVOFFLOAD_STORE_PATCH_HOST:/opt/glm53/patch_kv_offload_store_local.py:ro" \
+        -v "$KVOFFLOAD_RESTORE_PATCH_HOST:/opt/glm53/patch_kv_offload_restore_g0.py:ro" \
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
         -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
