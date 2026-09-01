@@ -44,8 +44,10 @@ out of one shared pool (MLA + 4 mamba + drafter SWA here), which amplifies the e
   `cache_salt`" cannot be taken literally.
 - **Strict values**: bool, int `0`/`1`, str `"0"`/`"1"`. Everything else (floats incl. `1.0`, `"true"`,
   `"yes"`, `2`, lists) is rejected. `bool("0")` is `True`, so a lenient parser would let string-valued clients
-  silently *enable* the flag (Codex finding). JSON `true`/`false` never reach vLLM: `vllm_xargs` is typed
-  `dict[str, str | int | float | list[...]]` and pydantic v2 rejects a bool in that union (400).
+  silently *enable* the flag (Codex finding). JSON `true`/`false` in `vllm_xargs` (typed
+  `dict[str, str | int | float | list[...]]`) are **coerced by pydantic v2 to `1`/`0`** before vLLM sees them
+  (VERIFIED on pydantic 2.13; test B1) — the intended meaning, so booleans are accepted; an earlier draft
+  claimed they were rejected, which Codex's final review corrected.
 - **Where rejection happens and why**: `Request` is materialised in the engine-core input thread
   (`EngineCore.preprocess_add_request` → `Request.from_engine_core_request`), not in the API server, so a
   `ValueError` raised from `Request.__init__` is **not** a request-scoped 400. Validation therefore runs in
@@ -65,7 +67,12 @@ out of one shared pool (MLA + 4 mamba + drafter SWA here), which amplifies the e
 - **Receipts** (`logger.info_once`, no request id in the args so they really are one line per process):
   `[glm53-apc-no-store] first request resolved skip_writing_prefix_cache=1` at resolution — emitted even for
   a warm request that has nothing new to store — and `[glm53-apc-no-store] suppressing prefix-cache store
-  (full site)` / `(partial site)` when a store is actually cut. Per-request ids go to `debug`.
+  (full site)` / `(partial site)` when a store is actually cut. Per-request ids go to `debug`. The partial
+  site is reached only where the fork's fine-grained partial-hit producer is enabled (#84,
+  `patch_apc_fine_grained_hits.py`; upstream's coordinator vetoes it for this model otherwise) and, for the
+  mamba path, only when the prompt length is a `hash_block_size` (64) multiple that is not a 3584 multiple
+  (`_cache_partial_tail_block:1866-1874`); the full-attention path fires for any prompt whose 64-token
+  boundary is not a 3584 multiple.
 
 ### 2.2 Where the guard goes — and why *not* `kv_cache_manager.py:552`
 
@@ -190,6 +197,12 @@ offload-decision symmetry; tests mirroring C1–C6. Not filed yet — gated on t
 
 - Codex design advisory (research train, 12 findings): kept the `BlockPool` placement; adopted strict value
   parsing, explicit read semantics, connector scope statement, same-turn A/B, hybrid/CoW/preemption tests.
+- Codex final-diff review (`CODEX-PR4-REVIEW.md`, ship-with-changes, 4 findings): JSON boolean claim corrected
+  (coerced, not rejected — accepted with the intended meaning; the proposed pre-validation in the three API
+  models is not adopted: it would add entrypoint anchors for a case that is already semantically exact);
+  equivalence probe origin/invocation stated (it ships on #79, not on this branch); partial-site receipt
+  stimulus corrected; patcher now verifies every generated snippet verbatim on an already-marked file and
+  writes atomically (temp file + `os.replace`). `move_block_hashes` rebuttal accepted as sound.
 - Codex build-plan advisory (`CODEX-PR4-PLAN.md`, build-with-changes, 9 findings): adopted — isolated C1 legs,
   live 6/7-group fixture, both preemption cases, API-boundary validation (finding 5 matched an independent
   read of `EngineCore.preprocess_add_request`), typed PoolingParams dropped, resolution-time receipt,

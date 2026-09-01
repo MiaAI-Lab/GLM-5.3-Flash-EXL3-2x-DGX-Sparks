@@ -337,10 +337,26 @@ def part_a(root: Path | None) -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
         staged = stage(tmp, root, pristine_only=True)
+        run_patcher(staged)
+        bp = staged["GLM53_BLOCK_POOL_PY"]
+        text = bp.read_text()
+        # every MARK still present, but one guard body edited -> not "complete"
+        edited = text.replace('_glm53_log_nostore(request, "full")', 'pass  # edited', 1)
+        check(edited != text and edited.count(MARK) == text.count(MARK), "A5 fixture: marks intact, one snippet altered")
+        bp.write_text(edited)
+        r = run_patcher(staged)
+        check(r.returncode != 0 and "lacks the verbatim snippet" in r.stderr and bp.read_text() == edited, f"A5 fully-marked file with an altered snippet is refused (rc={r.returncode}), not skipped as applied")
+        bp.write_text(text[: len(text) // 2])
+        r = run_patcher(staged)
+        check(r.returncode != 0 and bp.read_text() == text[: len(text) // 2], f"A5 truncated (already-marked) file is refused (rc={r.returncode})")
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        staged = stage(tmp, root, pristine_only=True)
         missing = staged["GLM53_REQUEST_PY"]
         missing.unlink()
         r = run_patcher(staged)
         check(r.returncode != 0 and "missing" in r.stderr and MARK not in staged["GLM53_SAMPLING_PARAMS_PY"].read_text(), "A6 missing target -> refused, nothing written")
+        check(not [p for p in tmp.iterdir() if p.suffix == ".glm53"], "A6 no temp-file litter left behind")
 
 
 BLOCK_POOL_PARTIAL_LINE = '        if getattr(request, "skip_writing_prefix_cache", False):  # [glm53-apc-no-store]\n'
@@ -421,6 +437,17 @@ def part_b() -> None:
     rejected = [2, -1, 1.0, 0.0, "true", "false", "yes", "no", " 1", "1 ", "01", "", None, [1], {"a": 1}, b"1", "True"]
     for value in rejected:
         check(raises_value_error(parse, value, "t"), f"B1 reject {value!r}")
+
+    try:
+        from pydantic import TypeAdapter
+        xargs_type = dict[str, str | int | float | list[str | int | float]] | None
+        ta = TypeAdapter(xargs_type)
+        coerced = {j: ta.validate_json(j)["skip_writing_prefix_cache"] for j in ('{"skip_writing_prefix_cache": true}', '{"skip_writing_prefix_cache": false}', '{"skip_writing_prefix_cache": "1"}', '{"skip_writing_prefix_cache": 1.0}')}
+        check(coerced['{"skip_writing_prefix_cache": true}'] == 1 and coerced['{"skip_writing_prefix_cache": false}'] == 0 and all(not isinstance(v, bool) for v in coerced.values()), f"B1 pydantic coerces a JSON boolean in the vllm_xargs type to int 1/0 (never a bool) -> {coerced}")
+        check(parse(coerced['{"skip_writing_prefix_cache": true}'], "t") is True and parse(coerced['{"skip_writing_prefix_cache": false}'], "t") is False, "B1 ... which the strict parser accepts with the intended meaning")
+        check(raises_value_error(parse, coerced['{"skip_writing_prefix_cache": 1.0}'], "t"), "B1 ... while JSON 1.0 stays a float and is rejected")
+    except ImportError:
+        print("  --   B1 pydantic not importable here: vllm_xargs coercion leg skipped (runs in the image / venv)")
 
     validate = ns["_glm53_validate_no_store_params"]
     resolve = ns["_glm53_resolve_no_store"]

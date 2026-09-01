@@ -516,10 +516,11 @@ curl -s "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{
   "vllm_xargs": {"skip_writing_prefix_cache": 1}}'
 ```
 
-Send the **integer `1`** (or `"1"`): `vllm_xargs` is typed `dict[str, str | int | float | list]`,
-so JSON `true` is a pydantic 400 before it reaches vLLM, and any value other than `0`/`1`/`"0"`/`"1"`
-is rejected with HTTP 400 naming the field (validated in `SamplingParams.__post_init__`, i.e. in
-the API server — never a silent no-op). The request then:
+Send the integer `1` (`"1"` and JSON `true` also work: `vllm_xargs` is typed
+`dict[str, str | int | float | list]` and pydantic coerces a JSON boolean to `1`/`0` — verified on
+pydantic 2.13). Any other value (`1.0`, `"yes"`, `2`, …) is rejected with HTTP 400 naming the field
+(validated in `SamplingParams.__post_init__`, i.e. in the API server — never a silent no-op). The
+request then:
 
 - is **still allowed to read** the cache (a lane that shares the system prompt gets the free prefix;
   reading touches blocks, i.e. refreshes their LRU position — the flag is write-only);
@@ -535,8 +536,10 @@ the API server — never a silent no-op). The request then:
 
 Server-log receipts (each once per process): `[glm53-apc-no-store] first request resolved
 skip_writing_prefix_cache=1` (the flag reached the engine) and `[glm53-apc-no-store] suppressing
-prefix-cache store (full site)` / `(partial site)` (a store was actually cut). If the first line never
-appears, the flag did not reach the engine — do not trust an A/B measured without it. Not covered:
+prefix-cache store (full site)` / `(partial site)` (a store was actually cut; the partial site only
+fires where fine-grained hits are enabled, i.e. with `patch_apc_fine_grained_hits.py`, for a prompt whose
+64-token boundary is not a 3584 multiple). If the first line never appears, the flag did not reach the
+engine — do not trust an A/B measured without it. Not covered:
 KV connectors / CPU offload (none on this kit), pooling requests. Kill switch: `GLM53_APC_NO_STORE=0`.
 Design + receipts protocol: `docs/DESIGN-apc-no-store.md`.
 

@@ -60,9 +60,10 @@ Surface:
   ``SamplingParams.extra_args`` by the fork; zero entrypoint edits). Values are
   STRICT -- bool, int 0/1, str "0"/"1" -- and validated in
   ``SamplingParams.__post_init__`` (API-server side; a bad value is an HTTP 400
-  via the ValueError handler, never a silent no-op). JSON ``true`` is rejected
-  even earlier by pydantic (``vllm_xargs`` is ``dict[str, str|int|float|list]``):
-  send the integer 1. ``Request`` is materialised in the engine-core input
+  via the ValueError handler, never a silent no-op). ``vllm_xargs`` is typed
+  ``dict[str, str|int|float|list]``; pydantic v2 coerces JSON ``true``/``false``
+  to ``1``/``0`` there (verified, pydantic 2.13), which is exactly the intended
+  meaning, so booleans work too. ``Request`` is materialised in the engine-core input
   thread, so its resolver never raises; an unparseable value there (unreachable
   through the API) logs once and stores normally.
 
@@ -80,13 +81,16 @@ Receipts in the server log (both ``logger.info_once``):
 
 Fail closed if any anchor drifts: every anchor in every file is checked
 BEFORE anything is written; a file that already carries the MARK must carry
-the complete set of its markers (else refuse); complete files are skipped.
+every generated snippet verbatim and still parse (else refuse); complete files
+are skipped; each write is a temp-file + os.replace (never a truncated target).
 """
 
 from __future__ import annotations
 
+import ast
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 MARK = "# [glm53-apc-no-store]"
@@ -116,7 +120,8 @@ SP_FIELD_NEW = '''    skip_reading_prefix_cache: bool | None = None
     queue instead of queueing them behind -- and thereby evicting -- other
     sessions' cached blocks. For one-off batch lanes whose prefix will never be
     reused. Also reachable as ``vllm_xargs: {"skip_writing_prefix_cache": 1}``
-    (``extra_args``); accepted values are bool, int 0/1 and str "0"/"1"."""
+    (``extra_args``); accepted values are bool, int 0/1 and str "0"/"1"
+    (pydantic coerces a JSON boolean in ``vllm_xargs`` to 1/0)."""
 '''
 
 # 2. module-level helpers, inserted before the SamplingParams class.
@@ -142,8 +147,8 @@ def _glm53_parse_no_store(value, where):  # [glm53-apc-no-store]
     if isinstance(value, str) and value in ("0", "1"):
         return value == "1"
     raise ValueError(
-        f"{where} must be 0 or 1 (int) or \\"0\\"/\\"1\\" (str); got {value!r}. "
-        "JSON true/false is not accepted by vllm_xargs; send the integer 1."
+        f"{where} must be 0 or 1 (int), \\"0\\"/\\"1\\" (str) or a JSON boolean; "
+        f"got {value!r}."
     )
 
 
@@ -401,11 +406,20 @@ def expected_marks(edits) -> int:
 # ------------------------------------------------------------------ apply ----
 
 
+def _parses(text: str, path: Path) -> None:
+    try:
+        ast.parse(text, str(path))
+    except SyntaxError as exc:
+        raise SystemExit(f"{path}: does not parse: {exc}") from None
+
+
 def preflight(name: str, path: Path, edits, requires) -> str | None:
     """Return the patched text, or None if the file is already complete.
 
     Raises SystemExit on a missing file, a drifted anchor, or a file that
-    carries the MARK without the complete set of this overlay's edits.
+    carries the MARK without every one of this overlay's generated snippets
+    (verbatim, exactly once) -- a partially applied, edited or truncated
+    target is refused rather than skipped as "already done".
     """
     if not path.is_file():
         raise SystemExit(f"missing {path}")
@@ -413,12 +427,14 @@ def preflight(name: str, path: Path, edits, requires) -> str | None:
     have = text.count(MARK)
     want = expected_marks(edits)
     if have:
-        if have != want:
+        missing = [label for label, _old, new in edits if text.count(new) != 1]
+        if have != want or missing:
             raise SystemExit(
-                f"{path}: carries {have} '{MARK}' marker(s) but a complete "
-                f"application has {want}; refusing to patch a partially "
-                "modified file (restore the pristine file first)"
+                f"{path}: carries {have} '{MARK}' marker(s) (complete = {want}) "
+                f"and lacks the verbatim snippet(s) {missing}; refusing to patch "
+                "a partially modified file (restore the pristine file first)"
             )
+        _parses(text, path)
         return None
     for needle in requires:
         if text.count(needle) != 1:
@@ -430,7 +446,24 @@ def preflight(name: str, path: Path, edits, requires) -> str | None:
         text = text.replace(old, new, 1)
     if text.count(MARK) != want:
         raise SystemExit(f"{path}: internal error, marker count after apply")
+    _parses(text, path)
     return text
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Write via a sibling temp file + os.replace: the target is never left
+    truncated, even if this process dies mid-write."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".glm53", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def main() -> int:
@@ -443,7 +476,7 @@ def main() -> int:
             staged[name] = (path, patched)
     # Every anchor in every file has been verified; only now write anything.
     for name, (path, patched) in staged.items():
-        path.write_text(patched)
+        atomic_write(path, patched)
         print(f"patched {path.name} ({name}: {expected_marks(PLAN[name][1])} marks)")
     if staged:
         print(
