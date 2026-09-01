@@ -448,6 +448,8 @@ COPY overlay/patch_hybrid_prefix_hit.py /opt/glm53/patch_hybrid_prefix_hit.py
 COPY tests/test_hybrid_prefix_hit.py /opt/glm53/test_hybrid_prefix_hit.py
 COPY overlay/patch_xgrammar_termination.py /opt/glm53/patch_xgrammar_termination.py
 COPY tests/test_xgrammar_termination.py /opt/glm53/test_xgrammar_termination.py
+COPY overlay/patch_kv_capacity_log.py /opt/glm53/patch_kv_capacity_log.py
+COPY tests/test_kv_capacity_log.py /opt/glm53/test_kv_capacity_log.py
 COPY overlay/patch_kpool_tail_slotmap.py /opt/glm53/patch_kpool_tail_slotmap.py
 COPY tests/test_kpool_tail_slotmap.py /opt/glm53/test_kpool_tail_slotmap.py
 COPY overlay/ablit_runtime.py /opt/glm53/ablit_runtime.py
@@ -461,6 +463,12 @@ RUN python3 /opt/glm53/patch_glm5_drafter_group.py
 RUN python3 /opt/glm53/patch_suppress_stops_in_reasoning.py
 RUN python3 /opt/glm53/patch_scheduler_decode_floor.py
 RUN python3 /opt/glm53/patch_hybrid_prefix_hit.py
+# Runs AFTER patch_glm5_drafter_group.py (same file) and BEFORE its own patch:
+# the host test preflights the real kv_cache_utils.py (both anchors present,
+# stock 'GPU KV cache size' line untouched) and replays the derivation against
+# the deployment's synthetic hybrid layout (642 usable ids / 38 ids per segment).
+RUN GLM53_KV_CACHE_UTILS_PY=/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_utils.py GLM53_REQUIRE_TARGET=1 python3 /opt/glm53/test_kv_capacity_log.py
+RUN python3 /opt/glm53/patch_kv_capacity_log.py
 RUN python3 /opt/glm53/patch_xgrammar_termination.py
 RUN python3 /opt/glm53/patch_kpool_tail_slotmap.py
 RUN python3 /opt/glm53/patch_ablit.py
