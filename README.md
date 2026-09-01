@@ -278,6 +278,76 @@ Keep **`SKIP_MM_PROFILING=1`** — a max-size image+video dummy profile OOMs thi
 **NVFP4 KV is not available here.** FlashInfer’s SM12x NVFP4 kernels are dense MHA,
 not sparse MLA. Do not confuse that with NVFP4 **weights** (`--moe-backend marlin`).
 
+## KV cache offload to disk (optional, `GLM53_OFFLOAD_MMAP_DIR`)
+
+Off by default. When set, vLLM's CPU offload staging region is backed by a
+**sparse file on each node's own NVMe**, so a prefix that has been evicted from
+the GPU pool is *restored from disk* instead of recomputed. Capacity becomes the
+size of that file rather than RAM — useful when several people share the box and
+the GPU pool alone cannot hold everyone's context.
+
+Measured on this kit (105k-token prompt, evicted by 6 × 168k-token floods,
+100 GB per-node store, thinking off, temp 0):
+
+| | |
+|---|---|
+| Restore | **8.54 s** vs **130 s** to recompute (**15×**) |
+| Output | byte-correct |
+| Read from disk | 1.68 GB (`kv_offload` `CPU_to_GPU`) |
+| Host | stable, 6–8 GB free throughout |
+| Capacity | 3,162 blocks ≈ **11.3M tokens** in 160 GB/node |
+
+Decode is unaffected with it enabled: `tests/bench_decode.py` (median of 5 × 400)
+gives structured **66.4** tok/s / prose **26.7** against the 65.1 / 27.1 above.
+
+```bash
+GLM53_OFFLOAD_MMAP_DIR=/root/.cache/vllm/kv-mmap \
+GLM53_OFFLOAD_RELEASE_BYTES=2000000000 \
+GLM53_ALLOC_CONF=expandable_segments:False \
+EXTRA_ARGS='--kv-transfer-config {"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":171798691840,"eviction_policy":"lru"}}' \
+./start.sh restart
+```
+
+`overlay/patch_kv_offload_groups.py` is what makes this possible; without it the
+engine aborts at boot (`KpoolTailSpec`'s 4-token block cannot align to the
+64-token hash granularity). It also:
+
+- excludes the kpool tail and the DFlash2 drafter from offloading — sub-block
+  groups otherwise emit ~56× more keys than the 3584-token groups and starve
+  the staging tier so the MLA/mamba chunks never reach disk. Drafter KV rebuilds
+  inside its own window after a restore; a stale draft costs acceptance, never
+  correctness, since the target verifies every token.
+- forces the per-layer copy path — the packed whole-row path clobbers other
+  groups' live pages on restore for a multi-block-size hybrid.
+- bounds the staging region's page cache (`msync` + `MADV_DONTNEED`). Required on
+  GB10: CPU and GPU share one pool, so an unbounded region starves the GPU and
+  the worker rank dies mid-prefill with no traceback.
+
+**Why per-node and not an `fs` secondary tier:** secondary tiers and their
+promotions run scheduler-side on the head only. Under 2-node TP rank 1's shard
+is never written (every file lands `..._r0`) and its restores return stale bytes
+— confidently wrong output, with healthy-looking `kv_offload` counters. Backing
+the CPU *primary* tier per node avoids that by construction. Details in #57.
+
+⚠️ **Offload rejects `expandable_segments:True` — do not simply switch it off.**
+Running without expandable segments is fatal on GB10: the caching allocator
+retains reserved blocks after a large prefill and never returns them. A
+337k-token request took host available memory 10358 MB → 1352 MB, did not
+recover once the request finished, and wedged both Sparks. Take the guard's
+documented exemption — keep `expandable_segments:True` and add
+`--enable-cumem-allocator`, which puts the KV pool on stable physical pages
+(what the guard actually protects) while the rest of the engine keeps expandable
+segments. The same request then dipped ~560 MB and completed in 397 s.
+
+⚠️ Do **not** set `PYTHONHASHSEED` with offload on (the tier docs suggest it for
+cross-process key stability): it invalidates the Triton JIT cache keys and the
+mid-collective recompile kills the worker rank.
+
+⚠️ Sizing: a restore is admitted only when every group's chunks are resident
+together, so keep `cpu_bytes_to_use` ≥ `row_bytes × (restore_tokens / 3584 + 8)`.
+Undersized, stores still succeed and metrics still climb while no restore ever
+serves.
+
 ## Prefix caching (this kit, 2026-08-30)
 
 `--enable-prefix-caching` is on. The OpenAI API is **stateless**: the client
