@@ -311,12 +311,17 @@ def _env_of_head(head_run: list[str]) -> dict[str, str]:
 
 
 def _env_of_worker(worker_cmd: str) -> dict[str, str]:
+    # Only count KEY=value tokens that immediately follow a -e flag: a malformed
+    # worker command whose env assignment drifted away from its -e must FAIL the
+    # env checks, not pass on a stray token (Codex 087b5ea review, finding 1).
     envs: dict[str, str] = {}
-    for tok in shlex.split(worker_cmd):
-        if "=" in tok and tok.split("=", 1)[0].replace("_", "").isalnum():
-            k, v = tok.split("=", 1)
-            if k.isupper():
-                envs[k] = v
+    toks = shlex.split(worker_cmd)
+    for i in range(len(toks) - 1):
+        if toks[i] != "-e" or "=" not in toks[i + 1]:
+            continue
+        k, v = toks[i + 1].split("=", 1)
+        if k.replace("_", "").isalnum() and k.isupper():
+            envs[k] = v
     return envs
 
 
@@ -383,7 +388,8 @@ def part_d(h: Harness) -> None:
             f"D1 {k}={v!r} present and identical on BOTH ranks "
             f"(head={henv.get(k)!r} worker={wenv.get(k)!r})",
         )
-    # vLLM refuses OffloadingConnector + expandable_segments:True (VMM remap
+    # vLLM refuses OffloadingConnector + expandable_segments:True unless the
+    # CuMem allocator is enabled — it is not on this deployment (VMM remap
     # under pinned KV memory; live receipt-window finding): knob=1 must DROP
     # the env on both ranks; knob=0 keeps the stock value (see part_c).
     check(
