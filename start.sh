@@ -21,8 +21,10 @@
 #                   worker is missing that digest, try docker pull there,
 #                   then fall back to docker save --platform | ssh docker
 #                   load (issue #8). SKIP_PULL=1 keeps a local copy.
-#                   BUILD=1 rebuilds from this repo instead. Local-only
-#                   tags (no slash) skip pull. SKIP_SHIP=1 never copies.
+#                   BUILD=1 rebuilds from this repo. A git pull that changes
+#                   Dockerfile/overlay also rebuilds once (recipe stamp);
+#                   SKIP_BUILD=1 keeps GHCR. Local-only tags (no slash) skip
+#                   pull. SKIP_SHIP=1 never copies.
 #   3. download   — EXL3/TR3 (+ DFlash2) into the local HF cache if missing
 #   4. sync       — rsync that cache to the worker (each rank loads local disk)
 #   5. launch     — worker --headless, then head + `vllm serve` (both
@@ -41,7 +43,7 @@
 #   ./start.sh logs worker        follow worker container logs
 #
 # Node IPs live in .env (copied from .env.example on first run).
-# Handy overrides: SKIP_DOWNLOAD=1 SKIP_SYNC=1 SKIP_PULL=1 SKIP_SHIP=1 PULL=1 BUILD=1 TAIL=1 HF_TOKEN=...
+# Handy overrides: SKIP_DOWNLOAD=1 SKIP_SYNC=1 SKIP_PULL=1 SKIP_SHIP=1 SKIP_BUILD=1 PULL=1 BUILD=1 TAIL=1 HF_TOKEN=...
 # ============================================================================
 set -euo pipefail
 
@@ -62,6 +64,9 @@ _cli_eager="${ENFORCE_EAGER-}"
 _cli_fused="${EXL3_FUSED_MOE-}"
 _cli_row_tile="${EXL3_MOE_ROW_TILE-}"
 _cli_temp_rows="${EXL3_TEMP_ROWS_FUSED-}"
+_cli_fat_sorted="${EXL3_FAT_SORTED-}"
+_cli_fat_batched="${EXL3_FAT_BATCHED-}"
+_cli_fat_kernel="${EXL3_FAT_KERNEL-}"
 _cli_mnbt="${MAX_NUM_BATCHED_TOKENS-}"
 _cli_image="${IMAGE-}"
 _cli_util="${GPU_MEM_UTIL-}"
@@ -73,6 +78,12 @@ _cli_ablit_direction="${ABLIT_DIRECTION-}"
 _cli_ablit_layers="${ABLIT_LAYERS-}"
 _cli_ablit_alpha="${ABLIT_ALPHA-}"
 _cli_ablit_mtp="${ABLIT_INCLUDE_MTP-}"
+# Setness-aware: an explicitly empty caller value is an operator error and
+# must reach validate_numeric_config, not be swallowed by a .env value.
+_cli_indexer_workspace_set="${GLM53_INDEXER_WORKSPACE+1}"
+_cli_indexer_workspace="${GLM53_INDEXER_WORKSPACE-}"
+_cli_spinwait_ms_set="${GLM53_SPINWAIT_MS+1}"
+_cli_spinwait_ms="${GLM53_SPINWAIT_MS-}"
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
@@ -83,6 +94,9 @@ set +a
 [ -n "${_cli_fused}" ] && EXL3_FUSED_MOE="$_cli_fused"
 [ -n "${_cli_row_tile}" ] && EXL3_MOE_ROW_TILE="$_cli_row_tile"
 [ -n "${_cli_temp_rows}" ] && EXL3_TEMP_ROWS_FUSED="$_cli_temp_rows"
+[ -n "${_cli_fat_sorted}" ] && EXL3_FAT_SORTED="$_cli_fat_sorted"
+[ -n "${_cli_fat_batched}" ] && EXL3_FAT_BATCHED="$_cli_fat_batched"
+[ -n "${_cli_fat_kernel}" ] && EXL3_FAT_KERNEL="$_cli_fat_kernel"
 [ -n "${_cli_mnbt}" ] && MAX_NUM_BATCHED_TOKENS="$_cli_mnbt"
 [ -n "${_cli_image}" ] && IMAGE="$_cli_image"
 [ -n "${_cli_util}" ] && GPU_MEM_UTIL="$_cli_util"
@@ -94,6 +108,8 @@ set +a
 [ -n "${_cli_ablit_layers}" ] && ABLIT_LAYERS="$_cli_ablit_layers"
 [ -n "${_cli_ablit_alpha}" ] && ABLIT_ALPHA="$_cli_ablit_alpha"
 [ -n "${_cli_ablit_mtp}" ] && ABLIT_INCLUDE_MTP="$_cli_ablit_mtp"
+[ -n "${_cli_indexer_workspace_set}" ] && GLM53_INDEXER_WORKSPACE="$_cli_indexer_workspace"
+[ -n "${_cli_spinwait_ms_set}" ] && GLM53_SPINWAIT_MS="$_cli_spinwait_ms"
 
 # ----------------------------- configuration -------------------------------
 MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"
@@ -164,8 +180,8 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-1000000}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.87}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
 # 8192 chunk × long history oversubscribes GB10 persistent_topk smem (300k crash).
-# P1 ladder 2026-08-29: 2048 keep; 3584/4096 revert (fat LinearEXL3 tax).
-MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-2048}"
+# E2 one-shot 2026-09-01: 7168 keep (100k ~1148 / 300k ~1107); 2048/3548 similar or slower.
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-7168}"
 # Decode hygiene (issue #43): the OpenAI layer backs an omitted max_tokens with
 # max_model_len - prompt (~1M here), so a single unbounded request may decode
 # for effectively forever, growing KV until it preempts everything else.
@@ -184,6 +200,7 @@ DRAFTER_PATCH_HOST="${DRAFTER_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm5_drafter
 APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py}"
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
+SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
@@ -217,6 +234,14 @@ EXL3_FUSED_MOE="${EXL3_FUSED_MOE:-1}"
 EXL3_MOE_ROW_TILE="${EXL3_MOE_ROW_TILE:-0}"
 # Fused exl3_moe temp rows/expert. 1024 was slower than 128+fallback (P2b).
 EXL3_TEMP_ROWS_FUSED="${EXL3_TEMP_ROWS_FUSED:-128}"
+# Sorted routing tier; higher tiers imply it even when this is 0.
+EXL3_FAT_SORTED="${EXL3_FAT_SORTED:-0}"
+# E1 batched tier: persistent scratch + combined gate/up; implies SORTED=1.
+EXL3_FAT_BATCHED="${EXL3_FAT_BATCHED:-0}"
+# E2 direct trellis kernel (default on). Implies BATCHED=1 and SORTED=1.
+# Needs the patched extension — start.sh rebuilds when the recipe stamp drifts.
+# Set all three flags to 0 for the legacy fat-expert path.
+EXL3_FAT_KERNEL="${EXL3_FAT_KERNEL:-1}"
 
 # --- abliteration (ablit/) --------------------------------------------------
 # Load-time o_proj orthogonalization (overlay/ablit_runtime.py). Published
@@ -236,6 +261,15 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # Mixed-step prefill policy when a peer is already decoding (issue #6).
 # skip = do not mix; N>0 = cap tokens; 0 = off.
 GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
+# Sparse-indexer prefill gather workspace (overlay/patch_indexer_workspace.py).
+# stock = max_model_len * 40 entries (5036.40 MB locked at 1M, measured);
+# rightsize = the legal per-step maximum, ~+26% KV. Default applies only
+# when UNSET: an explicitly empty value is an operator error and
+# validate_numeric_config rejects it rather than guessing a serving mode.
+GLM53_INDEXER_WORKSPACE="${GLM53_INDEXER_WORKSPACE-stock}"
+# SpinCondition reader busy-loop window. "stock" preserves vLLM's 1 s default;
+# 1..1000 selects milliseconds. The frozen TP=2 sweep selected 16 ms.
+GLM53_SPINWAIT_MS="${GLM53_SPINWAIT_MS-stock}"
 # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
 # exceed that without being a true hang. NCCL watchdog is still 600s.
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
@@ -295,9 +329,36 @@ _glm53_canonical_positive_int() {
         return 2
     fi
     printf -v "$name" '%s' "$canonical"
-    # $name is one of three fixed names below.
+    # $name is a validated integer configuration variable.
     # shellcheck disable=SC2163
     export "$name"
+}
+
+# Enum knobs are exactly one of a fixed set. Not "non-empty means on": a
+# typo'd knob must not silently pick a serving mode. GLM53_INDEXER_WORKSPACE
+# sizes the sparse-indexer prefill workspace, and the patched
+# get_max_prefill_buffer_size itself raises on anything but stock/rightsize
+# (overlay/patch_indexer_workspace.py, _glm53_workspace_mode), so catching it
+# here turns a container boot failure into a launcher error. The match is
+# literal on both sides -- the "-stock" default applies only to an UNSET var,
+# so "", " rightsize " and "RIGHTSIZE" all fail here and would fail there.
+_glm53_validate_enum() {
+    local name="$1" value="$2" allowed
+    shift 2
+    for allowed in "$@"; do
+        [ "$value" = "$allowed" ] && return 0
+    done
+    echo "$name must be one of: $* (got: $value)" >&2
+    return 2
+}
+
+_glm53_validate_spinwait_ms() {
+    if [ "$GLM53_SPINWAIT_MS" = "stock" ]; then
+        export GLM53_SPINWAIT_MS
+        return 0
+    fi
+    _glm53_canonical_positive_int \
+        GLM53_SPINWAIT_MS "$GLM53_SPINWAIT_MS" 1000
 }
 
 validate_numeric_config() {
@@ -309,6 +370,9 @@ validate_numeric_config() {
     _glm53_canonical_positive_int MAX_MODEL_LEN "$MAX_MODEL_LEN" 1000000 || return
     _glm53_canonical_positive_int MAX_NUM_SEQS "$MAX_NUM_SEQS" 4096 || return
     _glm53_canonical_positive_int MAX_NUM_BATCHED_TOKENS "$MAX_NUM_BATCHED_TOKENS" 8388608 || return
+    _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-stock}" \
+        stock rightsize || return
+    _glm53_validate_spinwait_ms || return
 }
 # GLM53 numeric config guard (end)
 
@@ -446,6 +510,7 @@ preflight() {
     [ -f "$APC_PATCH_HOST" ] || die "$APC_PATCH_HOST missing"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "$XGRAMMAR_PATCH_HOST missing"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "$KPOOL_TAIL_PATCH_HOST missing"
+    [ -f "$SPINWAIT_PATCH_HOST" ] || die "$SPINWAIT_PATCH_HOST missing"
     [ -f "$SCRIPT_DIR/overlay/patch_ablit.py" ] || die "$SCRIPT_DIR/overlay/patch_ablit.py missing"
     [ -f "$SCRIPT_DIR/overlay/ablit_runtime.py" ] || die "$SCRIPT_DIR/overlay/ablit_runtime.py missing"
     [ -f "$SCRIPT_DIR/ablit/LAYER_MAP.json" ] || die "$SCRIPT_DIR/ablit/LAYER_MAP.json missing"
@@ -523,9 +588,35 @@ image_platform() {
     printf '%s' "${p:-linux/arm64}"
 }
 
+# Hash of Dockerfile + overlay/tests/files/ablit inputs that docker COPY.
+# Compared to LABEL glm53.recipe.stamp so a git pull rebuilds once.
+overlay_recipe_hash() {
+    {
+        printf '%s\n' "$SCRIPT_DIR/Dockerfile"
+        find "$SCRIPT_DIR/overlay" "$SCRIPT_DIR/files" "$SCRIPT_DIR/tests" \
+            "$SCRIPT_DIR/ablit" \
+            -type f \
+            ! -path '*/__pycache__/*' \
+            ! -path '*/ablit/transplant/*' \
+            ! -name '*.pyc' \
+            2>/dev/null
+    } | LC_ALL=C sort | xargs -d '\n' -r sha256sum | sha256sum | awk '{print $1}'
+}
+
+image_recipe_stamp() {
+    local stamp
+    stamp="$(docker image inspect -f '{{ index .Config.Labels "glm53.recipe.stamp" }}' "$IMAGE" 2>/dev/null || true)"
+    case "$stamp" in
+        ""|"<no value>"|"<nil>") printf '' ;;
+        *) printf '%s' "$stamp" ;;
+    esac
+}
+
 build_image() {
-    log "building ${IMAGE} from Dockerfile (log: $LOGDIR/build-sm121.log) ..."
-    docker build -t "$IMAGE" "$SCRIPT_DIR" \
+    local stamp
+    stamp="$(overlay_recipe_hash)"
+    log "building ${IMAGE} from Dockerfile stamp=${stamp:0:12} (log: $LOGDIR/build-sm121.log) ..."
+    docker build --build-arg "GLM53_RECIPE_STAMP=$stamp" -t "$IMAGE" "$SCRIPT_DIR" \
         >"$LOGDIR/build-sm121.log" 2>&1 \
         || { tail -n 40 "$LOGDIR/build-sm121.log" >&2; die "docker build of $IMAGE failed"; }
 }
@@ -537,7 +628,7 @@ pull_image() {
     die "docker pull ${IMAGE} failed.
   :exl3 is a public GHCR package — check network / disk.
   If you still get 401/403: echo YOUR_PAT | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
-  Or set GHCR_TOKEN + GHCR_USER in .env. Overlay rebuild: BUILD=1 ./start.sh"
+  Overlay rebuild: BUILD=1 ./start.sh. Recipe-stamp drift also rebuilds; SKIP_BUILD=1 keeps GHCR."
 }
 
 pull_image_on_worker() {
@@ -579,6 +670,18 @@ ensure_image() {
     fi
     local skip_pull="${SKIP_PULL:-0}"
     [ "${PULL:-0}" = "1" ] && skip_pull=0
+    local wanted_stamp have_stamp
+    wanted_stamp="$(overlay_recipe_hash)"
+    have_stamp=""
+    [ "$head_ok" = "1" ] && have_stamp="$(image_recipe_stamp)"
+    if [ "${BUILD:-0}" != "1" ] && [ "${SKIP_BUILD:-0}" != "1" ]; then
+        if [ "$head_ok" = "0" ] || [ "$have_stamp" != "$wanted_stamp" ]; then
+            log "image recipe ${have_stamp:-none} != repo ${wanted_stamp:0:12} — rebuilding (SKIP_BUILD=1 keeps GHCR)"
+            BUILD=1
+        fi
+    elif [ "${SKIP_BUILD:-0}" = "1" ] && [ "$have_stamp" != "$wanted_stamp" ]; then
+        warn "SKIP_BUILD=1 — not rebuilding; stamp ${have_stamp:-none} != repo ${wanted_stamp:0:12}"
+    fi
     if [ "${BUILD:-0}" = "1" ]; then
         build_image
         head_key="$(local_image_key)"
@@ -912,6 +1015,12 @@ fi
 if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
     python3 /opt/glm53/patch_kpool_tail_slotmap.py
 fi
+if [ -f /opt/glm53/patch_spinwait.py ]; then
+    python3 /opt/glm53/patch_spinwait.py
+fi
+if [ -f /opt/glm53/patch_indexer_workspace.py ]; then
+    python3 /opt/glm53/patch_indexer_workspace.py
+fi
 if [ -f /opt/glm53/patch_ablit.py ]; then
     python3 /opt/glm53/patch_ablit.py
 fi
@@ -1003,6 +1112,12 @@ fi
 if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
     python3 /opt/glm53/patch_kpool_tail_slotmap.py
 fi
+if [ -f /opt/glm53/patch_spinwait.py ]; then
+    python3 /opt/glm53/patch_spinwait.py
+fi
+if [ -f /opt/glm53/patch_indexer_workspace.py ]; then
+    python3 /opt/glm53/patch_indexer_workspace.py
+fi
 if [ -f /opt/glm53/patch_ablit.py ]; then
     python3 /opt/glm53/patch_ablit.py
 fi
@@ -1041,6 +1156,8 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
+    [ -f "$SPINWAIT_PATCH_HOST" ] || die "missing $SPINWAIT_PATCH_HOST"
+    scp -q -o BatchMode=yes "$SPINWAIT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_spinwait.py"
 
     worker_ssh "rm -rf /tmp/glm53-ablit"
     scp -q -r -o BatchMode=yes "$SCRIPT_DIR/ablit" "${WORKER_SSH}:/tmp/glm53-ablit"
@@ -1064,6 +1181,8 @@ launch_cluster() {
         -e VLLM_CACHE_ROOT=/root/.cache/vllm
         -e "GLM53_SUPPRESS_STOPS_IN_REASONING=$GLM53_SUPPRESS_STOPS_IN_REASONING"
         -e "GLM53_MIXED_PREFILL_CHUNK=$GLM53_MIXED_PREFILL_CHUNK"
+        -e "GLM53_INDEXER_WORKSPACE=$GLM53_INDEXER_WORKSPACE"
+        -e "GLM53_SPINWAIT_MS=$GLM53_SPINWAIT_MS"
         -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
         -e "TILELANG_CACHE_DIR=$TILELANG_CACHE_DIR"
         -e "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=$VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
@@ -1108,7 +1227,7 @@ launch_cluster() {
              DFLASH_DRAFT_TP \
              LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING \
              LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE EXL3_MOE_ROW_TILE EXL3_TEMP_ROWS_FUSED \
-             DEFAULT_MAX_NEW_TOKENS MODEL_DIR EXTRA_ARGS \
+             DEFAULT_MAX_NEW_TOKENS EXL3_FAT_SORTED EXL3_FAT_BATCHED EXL3_FAT_KERNEL MODEL_DIR EXTRA_ARGS \
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
         serve_env+=" -e $v='${!v:-}'"
     done
@@ -1137,6 +1256,7 @@ launch_cluster() {
         -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
+        -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
         -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
         -v '/tmp/glm53-ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro' \
         -v '/tmp/patch_ablit.py:/opt/glm53/patch_ablit.py:ro' \
@@ -1168,6 +1288,7 @@ launch_cluster() {
         -v "$APC_PATCH_HOST:/opt/glm53/patch_hybrid_prefix_hit.py:ro" \
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
+        -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
         -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
         -v "$SCRIPT_DIR/overlay/ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro" \
         -v "$SCRIPT_DIR/overlay/patch_ablit.py:/opt/glm53/patch_ablit.py:ro" \
@@ -1199,6 +1320,9 @@ launch_cluster() {
         -e EXL3_FUSED_MOE="$EXL3_FUSED_MOE" \
         -e EXL3_MOE_ROW_TILE="$EXL3_MOE_ROW_TILE" \
         -e EXL3_TEMP_ROWS_FUSED="$EXL3_TEMP_ROWS_FUSED" \
+        -e EXL3_FAT_SORTED="$EXL3_FAT_SORTED" \
+        -e EXL3_FAT_BATCHED="$EXL3_FAT_BATCHED" \
+        -e EXL3_FAT_KERNEL="$EXL3_FAT_KERNEL" \
         -e ABLIT="$ABLIT" \
         -e ABLIT_METHOD="$ABLIT_METHOD" \
         -e ABLIT_DIRECTION="$ABLIT_DIRECTION" \
