@@ -674,12 +674,18 @@ cb, n, _ = mN.get_computed_blocks(gN); mN.allocate_slots(gN, 4, n, cb)
 cb, n, _ = mQ.get_computed_blocks(gQ); mQ.allocate_slots(gQ, 4, n, cb)
 check(block_ids(mQ, "gQ") <= idsQ, "C2 [nostore] the next allocation recycles the freed no-store block first (front of the free queue)")
 check(not (block_ids(mN, "gN") & idsN), "C2 [normal] the next allocation does NOT touch the freed cached blocks (they sit at the back)")
-# C2r: sparse retention interval on the same shape -> still no hashes for no-store, sentinel still advances
-from dataclasses import replace
-m = manager(replace(full_cfg(4, 24), prefix_cache_retention_interval=4), 2, 4)
-req = mk("ret", toks, no_store=True)
-_, trace = prefill(m, req, (4, 4, 4, 2))
-check(not any(t[1] for t in trace) and [t[0][0] for t in trace] == [1, 2, 3, 3], "C2 [nostore + retention_interval] no hashes, sentinel unchanged")
+# C2r: sparse retention interval on the same shape -> still no hashes for no-store, sentinel still advances.
+# Upstream KVCacheConfig (22df3a3) carries prefix_cache_retention_interval as a dataclass field; the fork's
+# in-image build drives retention through VLLM_PREFIX_CACHE_RETENTION_INTERVAL instead and has no such field,
+# so this sub-check feature-detects it (found by the in-fork receipt run, 2026-09-01).
+from dataclasses import replace, fields
+if any(f.name == "prefix_cache_retention_interval" for f in fields(type(full_cfg(4, 24)))):
+    m = manager(replace(full_cfg(4, 24), prefix_cache_retention_interval=4), 2, 4)
+    req = mk("ret", toks, no_store=True)
+    _, trace = prefill(m, req, (4, 4, 4, 2))
+    check(not any(t[1] for t in trace) and [t[0][0] for t in trace] == [1, 2, 3, 3], "C2 [nostore + retention_interval] no hashes, sentinel unchanged")
+else:
+    check(True, "C2 [nostore + retention_interval] skipped: this vLLM's KVCacheConfig has no prefix_cache_retention_interval field (the fork build reads VLLM_PREFIX_CACHE_RETENTION_INTERVAL instead; upstream 22df3a3 field-based path is covered by the Mac venv run)")
 
 # C3 -- hybrid Full(hash 2) + Mamba(align, block 4): the upstream partial-tail fixture shape.
 def mamba(m):
