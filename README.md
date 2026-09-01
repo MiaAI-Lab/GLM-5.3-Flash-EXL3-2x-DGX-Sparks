@@ -314,6 +314,25 @@ does **not** let that group shrink the MLA+mamba hit. Mamba stays in the min
 An ~8k follow-up still reuses **7168 / 8004 ≈ 90%** of the prompt, not 46%. MNBT=2048 vs the 1024 ladder (draft TP=1): ~8k 10.36 s / 772 → 8.93 s / 895; ~100k 105.6 s / 947 → 102.5 s / 975; ~256k 273 s / 936 → **263 s / 973**; ~300k 323 s / 928 → **319 s / 941**. C4 keep (`DFLASH_DRAFT_TP=2`): ~8k **8.53 s / 938**; ~16k **16.45 s / 972**; ~100k **100.3 s / 997**. Coarser decode interleave (2k-token chunks vs 1k).
 
 **Default from this checkout:** E2 fat kernel on (`EXL3_FAT_KERNEL=1`) and `MAX_NUM_BATCHED_TOKENS=7168`. The table above is the pre-E2 C4 keep at 2048.
+
+**MNBT is deployment-dependent under E2.** A second 2× GB10 deployment (TP=2, `MAX_NUM_SEQS=16`,
+rightsized indexer workspace, DFlash2 k=7 draft TP=2) re-ran the chunk ladder under the E2 kernel
+with 5 unique-salt cold reps per rung at ≤100k (3 at 300k) and a same-block 2048 anchor boot
+(PR #77, comment of 2026-09-02):
+
+| MNBT | ~8k med | ~50k med | ~100k med | ~300k med | GPU KV cache size |
+|---|---:|---:|---:|---:|---:|
+| 1024 | 1058.5 | 1164.4 | 1163.1 | — | 2,167,539 |
+| 2048 (3 boots) | 1144–1147 | 1226–1233 | 1232–1238 | 1204–1205 | 1,903,381–1,946,859 |
+| 3584 | 1155.1 | 1235.1 | 1239.6 | — | 1,709,956 |
+| 4096 | 1156.9 | 1227.7 | 1229.1 | — | 1,635,983 |
+| 7168 | 1145.6 | 1211.1 | 1215.2 | 1182.9 | 1,351,916 |
+
+On that deployment, 7168 measured −1.2% to −1.9% vs 2048 at 50k–300k with a 29% smaller KV pool (and ~432
+MB/device fat scratch vs 130 MB at 2048), so that deployment kept 2048. The 7168 default above is
+this kit's own one-shot keep — if your `MAX_NUM_SEQS`/workspace geometry differs, re-run
+`tests/_run_cold_prefill.py` under E2 at 2048 vs 7168 (and read the `GPU KV cache size` boot line)
+before adopting it.
 Hits work **below** UserHIJ’s 14,336-token floor (that floor is 896-chunk ×
 2048-align LCM on a different geometry; this kit’s 3584 is 4×896). Isolation
 held (`STILL_READY_S` / `STILL_C0`…`C3`). Idle chats are not reserved; after
@@ -490,7 +509,7 @@ that are now documented/enforced:
 | `GPU_MEM_UTIL` | `0.87` | GB10 UMA budget (DFlash2 + vision; live pool **1,754,237** tokens / **1.75×** at 1M / 690 blocks / 18.67 GiB) |
 | `MAX_MODEL_LEN` | `1000000` | default context. 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool |
 | `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq |
-| `MAX_NUM_BATCHED_TOKENS` | `7168` | prefill chunk (E2 keep 2026-09-01). 2048/3548 were similar or slower; 8192 oversubscribes GB10 indexer topk |
+| `MAX_NUM_BATCHED_TOKENS` | `7168` | prefill chunk (E2 keep 2026-09-01, this kit). 2048/3548 were similar or slower here; 8192 oversubscribes GB10 indexer topk. Deployment-dependent — see the second-deployment ladder note above |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (7168) |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
 | `GLM53_INDEXER_WORKSPACE` | `stock` | sparse-indexer prefill gather workspace. `stock` = `max_model_len * 40` entries (**5036.40 MB** locked at 1M — measured, `VLLM_DEBUG_WORKSPACE=1`). `rightsize` = the legal per-step maximum `min(MAX_NUM_SEQS, MNBT) * cdiv(MAX_MODEL_LEN + k, index_kpool)` = 126 MB at `MAX_NUM_SEQS=4` / 504 MB at 16, so **~+26–28% KV**. Opt-in; see [docs/DESIGN-indexer-workspace.md](docs/DESIGN-indexer-workspace.md) |
