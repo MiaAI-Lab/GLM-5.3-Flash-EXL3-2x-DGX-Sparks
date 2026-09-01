@@ -390,6 +390,20 @@ BUILD=1 SKIP_DOWNLOAD=1 SKIP_SYNC=1 ./start.sh restart  # force rebuild overlay 
 ./start.sh stop                # or ./stop.sh
 ```
 
+### Experimental: 4× Spark (TP=4)
+
+Untested here (no 4-Spark kit). Optional sibling of `./start.sh` — same image
+and weights, does not change the supported 2× path. First run copies
+`.env.tp4.example` → `.env.tp4` (gitignored). Stop with `./start-tp4.sh stop`;
+`./start.sh stop` does not know ranks 2/3.
+
+```bash
+# edit WORKER2_IP / WORKER3_IP / CX7 pins in .env.tp4
+./start-tp4.sh
+./start-tp4.sh stop
+./start-tp4.sh logs            # head; logs 1|2|3 for a worker rank
+```
+
 Do not pull `glm53-flash-sm121:v8` — that is the older NVFP4/Ray kernel.
 
 API: `http://127.0.0.1:8888/v1` (LAN: `http://10.0.0.1:8888/v1`).
@@ -525,6 +539,7 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0` |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
 | `start.sh` / `stop.sh` / `download.sh` | 2-node launch; Hub fetch on the head only |
+| `start-tp4.sh` / `.env.tp4.example` | experimental 4-node TP=4 launch; knobs stay out of `.env` |
 | `files/chat_template.jinja` | GLM-5.3 MM template (`<|image|>` / `<|video|>`); checkpoint jinja is language-only |
 | `overlay/qwen3_dflash2.py` | DFlash2 draft (grouped conv + candidate selector) |
 | `overlay/dflash2_speculator.py` | DFlash2 selector walk (V2 speculator) |
