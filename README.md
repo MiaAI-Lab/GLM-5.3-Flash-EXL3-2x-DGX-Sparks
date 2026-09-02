@@ -626,3 +626,35 @@ DFlash2 stays [CC BY-NC-ND 4.0](https://huggingface.co/incoai/GLM-5.3-Flash-DFla
   [discussion #1](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw/discussions/1#6a9144846b0bdba943bfe86f)
 - **Abliteration recipe / direction artifacts:** [drowzeys](https://huggingface.co/drowzeys) —
   [keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock](https://huggingface.co/drowzeys/keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock)
+
+## Concurrency ladder (2026-08-31, 1M ctx, MNBT 2048, MAX_NUM_SEQS 16, `GLM53_MIXED_PREFILL_CHUNK=512`)
+
+`tests/bench_concurrency.py` runs N simultaneous streams per level (modes `code` / `data` / `chat`; optional cached context per lane),
+counts tokens from the server's `usage`, and writes per-cell JSON (`agg_tps`, `stream_tps_median`, TTFT/ITL p50/p95/p99, cache hit
+ratio, preemptions). `tests/bench_live.html` renders the JSON (or a live `status.json`) while it runs. Canonical run (idle server):
+`python3 tests/bench_concurrency.py --levels 1,2,4,8,12,16 --modes code,data,chat --ctx 0,50000,100000 --reps 3 --out logs/ladder.json`.
+
+| job (temp 0) | ×1 | ×2 | ×4 | ×8 | ×12 | ×16 |
+|---|---:|---:|---:|---:|---:|---:|
+| code — aggregate tok/s | 41.9 | 52.3 | 77.9 | 93.8 | 116.2 | 127.2 |
+| code — per stream | 44.3 | 28.8 | 21.0 | 13.9 | 11.9 | 10.2 |
+| data (JSON/CSV) — aggregate | 31.6 | 53.0 | 72.0 | 83.2 | – | – |
+| chat — aggregate | 18.1 | 26.3 | 36.1 | 55.9 | 66.4 | 76.7 |
+| chat — per stream | 18.5 | 14.1 | 10.0 | 7.7 | 6.1 | 5.2 |
+| TTFT median (s), any mode | 0.4–0.6 | 0.7–1.0 | 0.8–1.0 | 1.1–1.3 | 1.1–1.6 | 1.3–1.6 |
+
+Warm-context ladder (2026-09-01, per-group retention + fine-grained hits + gate v2, `docs/ladder-final-2026-09-01.json`):
+
+| ctx 50K per lane (distinct prefixes, verified warm) | ×1 | ×2 | ×4 | ×8 | ×16 |
+|---|---:|---:|---:|---:|---:|
+| code — aggregate tok/s | 35 | 50 | 67 | 8.5–29 | 6.8 |
+| chat — aggregate tok/s | 18.5 | 26 | 35 | 5–7 | 5.2 |
+| cache hit | 1.0 | 1.0 | 0.999 | 0.25–0.75 | 0.19 |
+| TTFT p95 (s) | 0.4 | 0.8 | 1.2–1.4 | 173–454 | 899–963 |
+
+What it shows: with the cache fixes, **up to 4 concurrent 50K-context lanes run fully warm** (hits 0.999, TTFT ≤1.4 s,
+aggregate equal to the ctx-0 ladder); at 8×50K the total cached working set (~400K tokens + in-flight) exceeds the pool's
+~455K-token budget (642 block ids / ~5 per 3584-token segment) and hit rates collapse — the ladder now documents the capacity
+envelope, not a bug. Speed is set by the DFlash2 drafter's acceptance (code ~35–44 tok/s solo, prose chat ~18), not by
+temperature (0 vs 0.7 within noise) or thinking on/off; the interactive knee is ~4 lanes. Under the original `skip` policy the
+second stream waited 15–17 s (requests served one at a time) — fixed by the mixed-prefill gate v2 knobs.
