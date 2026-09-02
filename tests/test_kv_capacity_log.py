@@ -749,7 +749,7 @@ def part_c() -> None:
     check(last == "    sys.exit(main())" and "[glm53-kv-capacity-log]" in overlay_text, "C3 overlay ends with the EOF sentinel and carries its identity string (artifact guard contract)")
 
     def run(value):
-        script = guard + "\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4; MAX_NUM_BATCHED_TOKENS=1024\n" + "validate_numeric_config || exit $?\n" + 'printf "%s\\n" "${GLM53_KV_CAPACITY_LOG-unset}"\n'
+        script = guard + "\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4; MAX_NUM_BATCHED_TOKENS=1024; GLM53_INDEXER_WORKSPACE=stock; GLM53_SPINWAIT_MS=stock\n" + "validate_numeric_config || exit $?\n" + 'printf "%s\\n" "${GLM53_KV_CAPACITY_LOG-unset}"\n'
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"}
         if value is not None:
             env["GLM53_KV_CAPACITY_LOG"] = value
