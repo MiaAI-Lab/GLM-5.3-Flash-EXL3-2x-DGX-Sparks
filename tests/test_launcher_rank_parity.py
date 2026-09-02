@@ -156,6 +156,7 @@ def run_retention_guard(value: str | None) -> tuple[int, str, str]:
         guard_source()
         + "\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4\n"
         + "MAX_NUM_BATCHED_TOKENS=1024\n"
+        + "GLM53_INDEXER_WORKSPACE=stock; GLM53_SPINWAIT_MS=stock\n"
         + f"{FG}=1\n"
         + "validate_numeric_config || exit $?\n"
         + f'printf "%s\\n" "${{{SWA}-unset}}"\n'
