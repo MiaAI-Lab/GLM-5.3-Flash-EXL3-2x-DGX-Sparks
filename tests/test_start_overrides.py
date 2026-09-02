@@ -172,7 +172,20 @@ def caller_value(key: str) -> str:
 
 def test_no_per_knob_allowlist_remains() -> None:
     src = START.read_text()
-    assert "_cli_" not in src, "the per-knob _cli_* allowlist must be gone (generic rule, #91)"
+    # The generic [ -n ] replay cannot express "an explicitly EMPTY caller
+    # export must reach validate_numeric_config", which upstream's
+    # GLM53_INDEXER_WORKSPACE / GLM53_SPINWAIT_MS knobs require, so exactly
+    # those two keep a documented setness-aware capture. No other _cli_*.
+    import re as _re
+    cli_tokens = set(_re.findall(r"_cli_[A-Za-z0-9_]*", src))
+    allowed = {
+        "_cli_indexer_workspace", "_cli_indexer_workspace_set",
+        "_cli_spinwait_ms", "_cli_spinwait_ms_set",
+    }
+    assert cli_tokens <= allowed, (
+        f"the per-knob _cli_* allowlist must be gone (generic rule, #91); "
+        f"unexpected: {sorted(cli_tokens - allowed)}"
+    )
     code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
     assert "export -p" not in code, "never replay every export (readonly declare -rx fails under set -e)"
     prologue = src.partition(CONFIG_MARKER)[0]
@@ -215,7 +228,9 @@ def test_every_env_example_key_survives_a_caller_export() -> None:
     example = ENV_EXAMPLE.read_text()
     keys = env_keys(example)
     assert len(keys) >= 40, keys
-    for key in ("MAX_NUM_SEQS", "GLM53_MIXED_PREFILL_CHUNK", "CG_ESTIMATE", "MAX_MODEL_LEN", "LIMIT_MM", "SPEC_METHOD"):
+    for key in ("MAX_NUM_SEQS", "GLM53_MIXED_PREFILL_CHUNK", "CG_ESTIMATE", "MAX_MODEL_LEN", "LIMIT_MM", "SPEC_METHOD",
+                # new names since the 45-key receipt: PR77 E2 kernel + #86/#96 knobs
+                "EXL3_FAT_KERNEL", "GLM53_INDEXER_WORKSPACE", "GLM53_SPINWAIT_MS"):
         assert key in keys, key
     caller = {k: caller_value(k) for k in keys}
     with tempfile.TemporaryDirectory() as raw_tmp:
@@ -318,6 +333,67 @@ def test_readonly_exports_and_odd_env_lines() -> None:
             assert parent["MODEL_REVISION"].endswith("-suffix"), "KEY+= line is sourced as an append"
             assert parent["SCRIPT_DIR"] == "/nowhere"
             print(f"  ok   readonly SHELLOPTS export, internal SCRIPT_DIR not replayed, comment/blank/indented/export/+=/CRLF/JSON .env lines under {bash}")
+def _run_preamble(env_file: str, caller: dict[str, str], probe: str) -> str:
+    source = (ROOT / "start.sh").read_text()
+    marker = "# ----------------------------- configuration -------------------------------"
+    preamble, separator, _rest = source.partition(marker)
+    assert separator, "start.sh configuration marker is missing"
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        tmp = Path(raw_tmp)
+        script = tmp / "start.sh"
+        script.write_text(preamble + probe)
+        script.chmod(0o755)
+        (tmp / ".env").write_text(env_file)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("GLM53_INDEXER_WORKSPACE", "GLM53_SPINWAIT_MS")}
+        env.update(caller)
+        result = subprocess.run(
+            ["bash", str(script)], check=True, capture_output=True, text=True, env=env
+        )
+    return result.stdout.strip()
+
+
+def test_indexer_workspace_caller_capture_is_setness_aware() -> None:
+    """An explicitly EMPTY caller value must not be swallowed by ``.env``.
+
+    ``GLM53_INDEXER_WORKSPACE=`` is an operator error; the enum guard has to see
+    it. A ``[ -n "$_cli_..." ]`` restore would silently hand back the ``.env``
+    value instead, so the capture uses the ``${VAR+1}`` setness probe.
+    """
+    probe = '\nprintf "V=[%s]\\n" "${GLM53_INDEXER_WORKSPACE-UNSET}"\n'
+    env_file = "GLM53_INDEXER_WORKSPACE=rightsize\n"
+
+    # Caller silent: .env wins.
+    assert _run_preamble(env_file, {}, probe) == "V=[rightsize]"
+    # Caller sets a real value: caller wins (the pre-existing contract).
+    assert _run_preamble(
+        env_file, {"GLM53_INDEXER_WORKSPACE": "stock"}, probe
+    ) == "V=[stock]"
+    # Caller sets it EMPTY: the empty value survives to the guard.
+    assert _run_preamble(
+        env_file, {"GLM53_INDEXER_WORKSPACE": ""}, probe
+    ) == "V=[]"
+    # ... and with no .env value either.
+    assert _run_preamble("", {"GLM53_INDEXER_WORKSPACE": ""}, probe) == "V=[]"
+    # Unset on both sides stays unset until the configuration default.
+    assert _run_preamble("", {}, probe) == "V=[UNSET]"
+
+
+def test_spinwait_caller_capture_is_setness_aware() -> None:
+    probe = '\nprintf "V=[%s]\\n" "${GLM53_SPINWAIT_MS-UNSET}"\n'
+    env_file = "GLM53_SPINWAIT_MS=16\n"
+
+    assert _run_preamble(env_file, {}, probe) == "V=[16]"
+    assert _run_preamble(
+        env_file, {"GLM53_SPINWAIT_MS": "stock"}, probe
+    ) == "V=[stock]"
+    assert _run_preamble(
+        env_file, {"GLM53_SPINWAIT_MS": ""}, probe
+    ) == "V=[]"
+    assert _run_preamble("", {"GLM53_SPINWAIT_MS": ""}, probe) == "V=[]"
+    assert _run_preamble("", {}, probe) == "V=[UNSET]"
 
 
 if __name__ == "__main__":
@@ -327,4 +403,6 @@ if __name__ == "__main__":
     test_env_still_beats_script_defaults_without_caller_exports()
     test_empty_caller_export_does_not_override()
     test_readonly_exports_and_odd_env_lines()
+    test_indexer_workspace_caller_capture_is_setness_aware()
+    test_spinwait_caller_capture_is_setness_aware()
     print("start.sh caller override regression OK")
