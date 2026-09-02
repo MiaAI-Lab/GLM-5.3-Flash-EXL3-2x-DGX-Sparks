@@ -458,11 +458,20 @@ preflight() {
     # rank ~60 s in with ibv_modify_qp errno 61 "No data available". The index is
     # per-NIC, so validate head and worker separately: some pairs share one good
     # index, others need different ones (HEAD_GID / WORKER_GID).
-    local gid_head gid_worker gid_path
-    gid_path="/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gids/${HEAD_GID}"
-    gid_head=$(cat "$gid_path" 2>/dev/null | tr -d ':0' || true)
-    gid_path="/sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gids/${WORKER_GID}"
-    gid_worker=$(worker_ssh "cat '$gid_path' 2>/dev/null" | tr -d ':0' || true)
+    # CX7_IB may be a comma list (dual rail). NCCL applies one GID index to
+    # every HCA it opens, so each rank's index must be populated on EACH of
+    # its listed devices.
+    local gid_head=set gid_worker=set gid_path dev entry
+    for dev in ${HEAD_CX7_IB//,/ }; do
+        gid_path="/sys/class/infiniband/${dev}/ports/1/gids/${HEAD_GID}"
+        entry=$(cat "$gid_path" 2>/dev/null | tr -d ':0' || true)
+        [ -n "$entry" ] || gid_head=""
+    done
+    for dev in ${WORKER_CX7_IB//,/ }; do
+        gid_path="/sys/class/infiniband/${dev}/ports/1/gids/${WORKER_GID}"
+        entry=$(worker_ssh "cat '$gid_path' 2>/dev/null" | tr -d ':0' || true)
+        [ -n "$entry" ] || gid_worker=""
+    done
     if [ -z "$gid_head" ] || [ -z "$gid_worker" ]; then
         if [ -z "$gid_head" ]; then
             warn "head GID index ${HEAD_GID} is EMPTY on ${HEAD_CX7_IB}"
@@ -472,12 +481,16 @@ preflight() {
         fi
         warn "GID tables — pick each node's ::ffff:<ip> entry whose type is RoCE v2;"
         warn "the two indices need not match, and a v1 entry at the same index will not work:"
-        for i in 0 1 2 3 4 5 6 7; do
-            printf '    head   gid%s: %-40s %s\n' "$i" \
-                "$(cat "/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gids/$i" 2>/dev/null)" \
-                "$(cat "/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gid_attrs/types/$i" 2>/dev/null)" >&2
+        for dev in ${HEAD_CX7_IB//,/ }; do
+            for i in 0 1 2 3 4 5 6 7; do
+                printf '    head   %s gid%s: %-40s %s\n' "$dev" "$i" \
+                    "$(cat "/sys/class/infiniband/${dev}/ports/1/gids/$i" 2>/dev/null)" \
+                    "$(cat "/sys/class/infiniband/${dev}/ports/1/gid_attrs/types/$i" 2>/dev/null)" >&2
+            done
         done
-        worker_ssh "for i in 0 1 2 3 4 5 6 7; do printf '    worker gid%s: %-40s %s\n' \"\$i\" \"\$(cat /sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gids/\$i 2>/dev/null)\" \"\$(cat /sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gid_attrs/types/\$i 2>/dev/null)\"; done" >&2 || true
+        for dev in ${WORKER_CX7_IB//,/ }; do
+            worker_ssh "for i in 0 1 2 3 4 5 6 7; do printf '    worker %s gid%s: %-40s %s\n' '${dev}' \"\$i\" \"\$(cat /sys/class/infiniband/${dev}/ports/1/gids/\$i 2>/dev/null)\" \"\$(cat /sys/class/infiniband/${dev}/ports/1/gid_attrs/types/\$i 2>/dev/null)\"; done" >&2 || true
+        done
         die "set NCCL_IB_GID_INDEX (same index both ranks) or HEAD_GID/WORKER_GID (per rank) in .env to populated indices"
     fi
 
