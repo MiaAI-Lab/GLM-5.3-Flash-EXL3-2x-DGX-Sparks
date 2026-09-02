@@ -424,7 +424,7 @@ validate_overlay_artifacts() {
         "$KVCAP_PATCH_HOST|[glm53-kv-capacity-log]|$main_guard"
         "$XGRAMMAR_PATCH_HOST|vllm/v1/structured_output/|$main_guard"
         "$KPOOL_TAIL_PATCH_HOST|[glm53-kpool-tail-slotmap]|$main_guard"
-        "$SPINWAIT_PATCH_HOST|glm53-spinwait|$main_guard"
+        "$SPINWAIT_PATCH_HOST|device_communicators/shm_broadcast.py|$main_guard"
         "$SCRIPT_DIR/overlay/patch_ablit.py|$ablit_marker|    main()"
         "$SCRIPT_DIR/overlay/ablit_runtime.py|o_proj abliteration (ABLIT)|    return report"
     )
