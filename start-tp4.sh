@@ -1,49 +1,38 @@
 #!/usr/bin/env bash
 # ============================================================================
-# start.sh — Spark runtime for GLM-5.3-Flash EXL3 (SM121 / GB10)
+# start-tp4.sh — EXPERIMENTAL 4× DGX Spark TP=4 launcher for GLM-5.3-Flash EXL3
 # ============================================================================
 #
-# We serve Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw (mirror of
-# brandonmusic/GLM-5.3-Flash-tr3-4bpw @ 5ab363a8) on this 2× DGX Spark (GB10 /
-# SM121) kit: vLLM TP=2 over CX7, OpenAI API on :8888, NoPE-MLA overlay image.
-# DFlash2-7 is the default speculator. Target KV stays packed fp8_ds_mla;
-# the SM120 B12X recipe (EP2/DCP2 + nvfp4_ds_mla) is a different image/arch.
+# Optional sibling of start.sh. Does not change the supported 2× TP=2 path.
+# Untested here (no 4-Spark kit). A user with four GB10s can try:
 #
-#   head   : this machine (HEAD_IP, default 10.0.0.1) — vLLM rank 0 + API
-#   worker : WORKER_USER@WORKER_IP (default: $USER@10.0.0.2) — vLLM rank 1, --headless
-#   layout : --tensor-parallel-size 2, --nnodes 2, mp executor (not Ray)
+#   ./start-tp4.sh
 #
-# EXL3, not NVFP4. Do not pass --moe-backend marlin.
+# Layout (mp executor, not Ray):
+#   rank 0  HEAD_IP     (default 10.0.0.1)  — vLLM API on :8888
+#   rank 1  WORKER_IP   (default 10.0.0.2)  — --headless
+#   rank 2  WORKER2_IP  (default 10.0.0.3)  — --headless
+#   rank 3  WORKER3_IP  (default 10.0.0.4)  — --headless
+#   --tensor-parallel-size 4  --nnodes 4
 #
-# What we do:
-#   1. preflight  — docker/ssh/disk on both nodes
-#   2. image      — docker pull IMAGE from GHCR (public :exl3 tag). If the
-#                   worker is missing that digest, try docker pull there,
-#                   then fall back to docker save --platform | ssh docker
-#                   load (issue #8). SKIP_PULL=1 keeps a local copy.
-#                   BUILD=1 rebuilds from this repo. A git pull that changes
-#                   Dockerfile/overlay also rebuilds once (recipe stamp);
-#                   SKIP_BUILD=1 keeps GHCR. Local-only tags (no slash) skip
-#                   pull. SKIP_SHIP=1 never copies.
-#   3. download   — EXL3/TR3 (+ DFlash2) into the local HF cache if missing
-#   4. sync       — rsync that cache to the worker (each rank loads local disk)
-#   5. launch     — worker --headless, then head + `vllm serve` (both
-#                   --network host --ipc=host)
-#   6. wait       — poll /health up to READY_TIMEOUT, then a nonfatal
-#                   DFlash2/sampler shape warmup (GLM53_BOOT_SHAPE_WARMUP)
+# Fabric: four Sparks need a RoCE path among all ranks (QSFP ring using both
+# CX7 ports, or a switch). Defaults set NCCL_CROSS_NIC=1. Pin per-rank
+# WORKER2_CX7_IF / WORKER2_CX7_IB / WORKER2_GID (same for 3) in .env.
+# Dual-port example: RANK NCCL_IB_HCA="rocep1s0f0,rocep1s0f1".
+#
+# Same image/weights as start.sh. Container names are glm53-exl3-tp4-* so a
+# TP=2 serve is not accidentally reused. Stop with ./start-tp4.sh stop
+# (./start.sh stop does not know about ranks 2/3).
 #
 # Usage:
-#   ./start.sh                    start (download/sync/launch) — default
-#   ./start.sh download           EXL3 (+ DFlash2) into the head HF cache only
-#                                 (no worker). Same as ./download.sh
-#   ./start.sh stop               stop both nodes
-#   ./start.sh restart            stop + start
-#   ./start.sh status             containers + API health
-#   ./start.sh logs               follow head logs
-#   ./start.sh logs worker        follow worker container logs
+#   ./start-tp4.sh                 start TP=4
+#   ./start-tp4.sh download        head HF cache only
+#   ./start-tp4.sh stop|restart|status
+#   ./start-tp4.sh logs            follow head
+#   ./start-tp4.sh logs 1|2|3      follow that worker rank
 #
-# Node IPs live in .env (copied from .env.example on first run).
-# Handy overrides: SKIP_DOWNLOAD=1 SKIP_SYNC=1 SKIP_PULL=1 SKIP_SHIP=1 SKIP_BUILD=1 PULL=1 BUILD=1 TAIL=1 HF_TOKEN=...
+# Extra knobs live in .env.tp4 (copied from .env.tp4.example). start.sh
+# never reads that file. Shared tokens/IPs can stay in .env.
 # ============================================================================
 set -euo pipefail
 
@@ -55,7 +44,15 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
         exit 1
     }
     cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
-    printf '\033[1;36m[glm53-exl3]\033[0m wrote .env from .env.example — edit HEAD_IP / WORKER_IP if needed\n'
+    printf '\033[1;36m[glm53-exl3-tp4]\033[0m wrote .env from .env.example\n'
+fi
+if [ ! -f "$SCRIPT_DIR/.env.tp4" ]; then
+    [ -f "$SCRIPT_DIR/.env.tp4.example" ] || {
+        echo "ERROR: missing .env.tp4.example" >&2
+        exit 1
+    }
+    cp "$SCRIPT_DIR/.env.tp4.example" "$SCRIPT_DIR/.env.tp4"
+    printf '\033[1;36m[glm53-exl3-tp4]\033[0m wrote .env.tp4 from .env.tp4.example — edit WORKER2_IP / WORKER3_IP / CX7 pins\n'
 fi
 # Caller exports (MTP_TOKENS=2 ./start.sh restart) must win over .env.
 _cli_mtp="${MTP_TOKENS-}"
@@ -84,15 +81,12 @@ _cli_indexer_workspace_set="${GLM53_INDEXER_WORKSPACE+1}"
 _cli_indexer_workspace="${GLM53_INDEXER_WORKSPACE-}"
 _cli_spinwait_ms_set="${GLM53_SPINWAIT_MS+1}"
 _cli_spinwait_ms="${GLM53_SPINWAIT_MS-}"
-# Setness-aware: the recipe default is EMPTY, so "non-empty means the
-# caller set it" cannot distinguish `GLM53_DEFAULT_REASONING_EFFORT= ./start.sh`
-# (deliberately back to the template default) from an unset var. An
-# explicitly empty caller value must win over .env, not be swallowed by it.
-_cli_default_effort_set="${GLM53_DEFAULT_REASONING_EFFORT+1}"
-_cli_default_effort="${GLM53_DEFAULT_REASONING_EFFORT-}"
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
+# TP=4 overlay wins over the 2× knobs in .env.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/.env.tp4"
 set +a
 [ -n "${_cli_mtp}" ] && MTP_TOKENS="$_cli_mtp"
 [ -n "${_cli_spec}" ] && SPEC_METHOD="$_cli_spec"
@@ -116,7 +110,6 @@ set +a
 [ -n "${_cli_ablit_mtp}" ] && ABLIT_INCLUDE_MTP="$_cli_ablit_mtp"
 [ -n "${_cli_indexer_workspace_set}" ] && GLM53_INDEXER_WORKSPACE="$_cli_indexer_workspace"
 [ -n "${_cli_spinwait_ms_set}" ] && GLM53_SPINWAIT_MS="$_cli_spinwait_ms"
-[ -n "${_cli_default_effort_set}" ] && GLM53_DEFAULT_REASONING_EFFORT="$_cli_default_effort"
 
 # ----------------------------- configuration -------------------------------
 MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"
@@ -141,10 +134,32 @@ else
 fi
 WORKER_SSH="${WORKER_SSH:-${WORKER_USER}@${WORKER_IP}}"
 
+# Ranks 2 and 3 (experimental TP=4). Same OS user as WORKER_USER unless set.
+WORKER2_IP="${WORKER2_IP:-10.0.0.3}"
+WORKER3_IP="${WORKER3_IP:-10.0.0.4}"
+WORKER2_USER="${WORKER2_USER:-$WORKER_USER}"
+WORKER3_USER="${WORKER3_USER:-$WORKER_USER}"
+if [ "$WORKER2_USER" = "$USER" ]; then
+    WORKER2_HOME="${WORKER2_HOME:-$HOME}"
+else
+    WORKER2_HOME="${WORKER2_HOME:-/home/${WORKER2_USER}}"
+fi
+if [ "$WORKER3_USER" = "$USER" ]; then
+    WORKER3_HOME="${WORKER3_HOME:-$HOME}"
+else
+    WORKER3_HOME="${WORKER3_HOME:-/home/${WORKER3_USER}}"
+fi
+WORKER2_SSH="${WORKER2_SSH:-${WORKER2_USER}@${WORKER2_IP}}"
+WORKER3_SSH="${WORKER3_SSH:-${WORKER3_USER}@${WORKER3_IP}}"
+
 HEAD_CX7_IF="${HEAD_CX7_IF:-enp1s0f1np1}"
 WORKER_CX7_IF="${WORKER_CX7_IF:-enp1s0f0np0}"
 HEAD_CX7_IB="${HEAD_CX7_IB:-rocep1s0f1}"
 WORKER_CX7_IB="${WORKER_CX7_IB:-rocep1s0f0}"
+WORKER2_CX7_IF="${WORKER2_CX7_IF:-$WORKER_CX7_IF}"
+WORKER2_CX7_IB="${WORKER2_CX7_IB:-$WORKER_CX7_IB}"
+WORKER3_CX7_IF="${WORKER3_CX7_IF:-$WORKER_CX7_IF}"
+WORKER3_CX7_IB="${WORKER3_CX7_IB:-$WORKER_CX7_IB}"
 NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-3}"
 # The RoCEv2 GID index is per-NIC: the usable entry is the one whose GID matches
@@ -152,22 +167,26 @@ NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-3}"
 # needs head=4, worker=3). Unset, both inherit NCCL_IB_GID_INDEX -> unchanged.
 HEAD_GID="${HEAD_GID:-$NCCL_IB_GID_INDEX}"
 WORKER_GID="${WORKER_GID:-$NCCL_IB_GID_INDEX}"
+WORKER2_GID="${WORKER2_GID:-$NCCL_IB_GID_INDEX}"
+WORKER3_GID="${WORKER3_GID:-$NCCL_IB_GID_INDEX}"
 # vLLM subtracts a CUDA-graph memory ESTIMATE from the KV pool. On this kit the
 # estimate is 2.43 GiB while the captured graphs actually consume -0.19 GiB, so
 # ~2.6 GiB of KV is reserved and never used. 0 keeps CUDA graphs ON and drops only
 # the deduction. 1 = upstream default.
 CG_ESTIMATE="${CG_ESTIMATE:-1}"
-NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-0}"
+NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-1}"
 NCCL_HOST_DIR="${NCCL_HOST_DIR:-$HOME/nccl-2.30.7}"
 WORKER_NCCL_HOST_DIR="${WORKER_NCCL_HOST_DIR:-$WORKER_HOME/nccl-2.30.7}"
+WORKER2_NCCL_HOST_DIR="${WORKER2_NCCL_HOST_DIR:-$WORKER2_HOME/nccl-2.30.7}"
+WORKER3_NCCL_HOST_DIR="${WORKER3_NCCL_HOST_DIR:-$WORKER3_HOME/nccl-2.30.7}"
 NCCL_SO_NAME="${NCCL_SO_NAME:-libnccl.so.2.30.7}"
 # glm53-flash already ships nvidia-nccl. LD_PRELOAD of the host 2.30.7 SO
 # makes DeepEP assert duplicate NCCL (/nccl/... vs nvidia/nccl/lib/...).
 # Set USE_HOST_NCCL=1 only if image NCCL cannot talk CX7.
 USE_HOST_NCCL="${USE_HOST_NCCL:-0}"
 
-TP="${TP:-2}"
-NNODES="${NNODES:-2}"
+TP="${TP:-4}"
+NNODES="${NNODES:-4}"
 PORT="${PORT:-8888}"
 MASTER_PORT="${MASTER_PORT:-29521}"
 
@@ -182,7 +201,7 @@ DFLASH_TOKENS="${DFLASH_TOKENS:-7}"
 # 1 = rank 0 only (no CX7 on every draft step). Empty = inherit target TP.
 # Do not pin attention_backend: SM121 already prefers FLASH_ATTN for
 # non-causal dense SWA. TRITON_ATTN was an SM120 mask-fix this image lacks.
-DFLASH_DRAFT_TP="${DFLASH_DRAFT_TP-2}"
+DFLASH_DRAFT_TP="${DFLASH_DRAFT_TP-4}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-1000000}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.87}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
@@ -259,19 +278,6 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # Mixed-step prefill policy when a peer is already decoding (issue #6).
 # skip = do not mix; N>0 = cap tokens; 0 = off.
 GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
-# Server-side default reasoning effort, injected as
-# `--default-chat-template-kwargs '{"reasoning_effort":"<v>"}'`.
-# EMPTY (the default) changes nothing -- but note what "nothing" means here:
-# files/chat_template.jinja line 7 maps reasoning_effort to itself only for
-# 'low'/'high' and to 'max' for everything else, INCLUDING undefined. So a
-# client that omits chat_template_kwargs gets Reasoning Effort: Max, the most
-# expensive setting. Measured on one agentic build task, unset(max) vs high
-# scored identically (80/80) at 4.6x the wall time and 4.8x the completion
-# tokens, so `high` is the recommendation for agentic coding
-# (docs/RECEIPTS-default-reasoning-effort.md). Set per-request
-# chat_template_kwargs.reasoning_effort to override this default.
-# low | high | max; empty or unset = send no flag.
-GLM53_DEFAULT_REASONING_EFFORT="${GLM53_DEFAULT_REASONING_EFFORT-}"
 # Sparse-indexer prefill gather workspace (overlay/patch_indexer_workspace.py).
 # stock = max_model_len * 40 entries (5036.40 MB locked at 1M, measured);
 # rightsize = the legal per-step maximum, ~+26% KV. Default applies only
@@ -294,34 +300,44 @@ GLM53_WARMUP_REQ_TIMEOUT="${GLM53_WARMUP_REQ_TIMEOUT:-240}"
 # Same single-key semantics as the DeepSeek V4 Flash DSpark deployment.
 VLLM_API_KEY="${VLLM_API_KEY:-}"
 
-CONTAINER_HEAD="${CONTAINER_HEAD:-glm53-exl3-head}"
-CONTAINER_WORKER="${CONTAINER_WORKER:-glm53-exl3-worker}"
+CONTAINER_HEAD="${CONTAINER_HEAD:-glm53-exl3-tp4-head}"
+CONTAINER_WORKER="${CONTAINER_WORKER:-glm53-exl3-tp4-w1}"
+CONTAINER_WORKER2="${CONTAINER_WORKER2:-glm53-exl3-tp4-w2}"
+CONTAINER_WORKER3="${CONTAINER_WORKER3:-glm53-exl3-tp4-w3}"
 
 HF_CACHE_DIR="${HF_HOME:-$HOME/.cache/huggingface}"
 MODEL_PATH="$HF_CACHE_DIR/hub/$MODEL_CACHE_NAME"
 FALLBACK_MODEL_PATH="$HF_CACHE_DIR/hub/$MODEL_FALLBACK_CACHE_NAME"
 DFLASH_PATH="$HF_CACHE_DIR/hub/$DFLASH_CACHE_NAME"
 WORKER_CACHE_DIR="$WORKER_HOME/.cache/huggingface"
+WORKER2_CACHE_DIR="${WORKER2_CACHE_DIR:-$WORKER2_HOME/.cache/huggingface}"
+WORKER3_CACHE_DIR="${WORKER3_CACHE_DIR:-$WORKER3_HOME/.cache/huggingface}"
 CACHE_ROOT="${CACHE_ROOT:-$HOME/.cache/vllm-glm53-flash}"
 WORKER_VLLM_CACHE="${WORKER_VLLM_CACHE:-$WORKER_HOME/.cache/vllm-glm53-flash}"
+WORKER2_VLLM_CACHE="${WORKER2_VLLM_CACHE:-$WORKER2_HOME/.cache/vllm-glm53-flash}"
+WORKER3_VLLM_CACHE="${WORKER3_VLLM_CACHE:-$WORKER3_HOME/.cache/vllm-glm53-flash}"
 # Overlay FS ~/.triton and ~/.tilelang die on container recreate (TP=2 JIT
 # stall → 600s NCCL watchdog). Persist next to the vLLM cache.
 TRITON_HOST_CACHE="${TRITON_HOST_CACHE:-$CACHE_ROOT/triton}"
 TILELANG_HOST_CACHE="${TILELANG_HOST_CACHE:-$CACHE_ROOT/tilelang}"
 WORKER_TRITON_CACHE="${WORKER_TRITON_CACHE:-$WORKER_VLLM_CACHE/triton}"
 WORKER_TILELANG_CACHE="${WORKER_TILELANG_CACHE:-$WORKER_VLLM_CACHE/tilelang}"
+WORKER2_TRITON_CACHE="${WORKER2_TRITON_CACHE:-$WORKER2_VLLM_CACHE/triton}"
+WORKER2_TILELANG_CACHE="${WORKER2_TILELANG_CACHE:-$WORKER2_VLLM_CACHE/tilelang}"
+WORKER3_TRITON_CACHE="${WORKER3_TRITON_CACHE:-$WORKER3_VLLM_CACHE/triton}"
+WORKER3_TILELANG_CACHE="${WORKER3_TILELANG_CACHE:-$WORKER3_VLLM_CACHE/tilelang}"
 TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-/root/.triton/cache}"
 TILELANG_CACHE_DIR="${TILELANG_CACHE_DIR:-/root/.tilelang/cache}"
 
 LOGDIR="$SCRIPT_DIR/logs"
-HEAD_SCRIPT="$SCRIPT_DIR/.glm53-exl3-head.inner.sh"
-WORKER_SCRIPT="$SCRIPT_DIR/.glm53-exl3-worker.inner.sh"
+HEAD_SCRIPT="$SCRIPT_DIR/.glm53-exl3-tp4-head.inner.sh"
+WORKER_SCRIPT="$SCRIPT_DIR/.glm53-exl3-tp4-worker.inner.sh"
 EXPECTED_SHARDS="${EXPECTED_SHARDS:-120}"
 
 # ------------------------------- helpers -----------------------------------
-log()  { printf '\033[1;36m[glm53-exl3]\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m[glm53-exl3]\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31m[glm53-exl3]\033[0m ERROR: %s\n' "$*" >&2; exit 1; }
+log()  { printf '\033[1;36m[glm53-exl3-tp4]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[glm53-exl3-tp4]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m[glm53-exl3-tp4]\033[0m ERROR: %s\n' "$*" >&2; exit 1; }
 
 # GLM53 numeric config guard (begin)
 _glm53_canonical_positive_int() {
@@ -353,12 +369,6 @@ _glm53_canonical_positive_int() {
 # here turns a container boot failure into a launcher error. The match is
 # literal on both sides -- the "-stock" default applies only to an UNSET var,
 # so "", " rightsize " and "RIGHTSIZE" all fail here and would fail there.
-# For GLM53_DEFAULT_REASONING_EFFORT the same literal match -- no trimming,
-# no case folding -- means "High" and " high " are rejected here
-# rather than being handed to vLLM, which would accept the JSON and then
-# silently render Max at the template. That is also why the reasoning-effort
-# enum is low|high|max and NOT medium: files/chat_template.jinja recognizes
-# only low/high and falls back to max, so a 'medium' default would be a lie.
 _glm53_validate_enum() {
     local name="$1" value="$2" allowed
     shift 2
@@ -390,18 +400,11 @@ validate_numeric_config() {
     _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-stock}" \
         stock rightsize || return
     _glm53_validate_spinwait_ms || return
-    # Empty/unset is legal and means "send no flag" (the template then renders
-    # Max). Anything non-empty must be exactly one of the three the template
-    # can act on, so the enum stays low|high|max and the error text stays clean.
-    if [ -n "${GLM53_DEFAULT_REASONING_EFFORT-}" ]; then
-        _glm53_validate_enum GLM53_DEFAULT_REASONING_EFFORT \
-            "$GLM53_DEFAULT_REASONING_EFFORT" low high max || return
-    fi
 }
 # GLM53 numeric config guard (end)
 
 banner() {
-    local label="${1:-start.sh}"
+    local label="${1:-start-tp4.sh}"
     printf '\n'
     printf '  \033[1;36m┌────────────────────────────────────────────┐\033[0m\n'
     printf '  \033[1;36m│\033[0m  \033[1mGLM-5.3 Flash EXL3\033[0m  \033[2m·  %-11s\033[0m        \033[1;36m│\033[0m\n' "$label"
@@ -409,7 +412,99 @@ banner() {
     printf '\n'
 }
 
+# rank 1..3
+_tp4_ssh_target() {
+    case "$1" in
+        1) printf '%s' "$WORKER_SSH" ;;
+        2) printf '%s' "$WORKER2_SSH" ;;
+        3) printf '%s' "$WORKER3_SSH" ;;
+        *) die "internal: bad worker rank $1" ;;
+    esac
+}
+_tp4_rank_ip() {
+    case "$1" in
+        1) printf '%s' "$WORKER_IP" ;;
+        2) printf '%s' "$WORKER2_IP" ;;
+        3) printf '%s' "$WORKER3_IP" ;;
+    esac
+}
+_tp4_rank_home() {
+    case "$1" in
+        1) printf '%s' "$WORKER_HOME" ;;
+        2) printf '%s' "$WORKER2_HOME" ;;
+        3) printf '%s' "$WORKER3_HOME" ;;
+    esac
+}
+_tp4_rank_hf() {
+    case "$1" in
+        1) printf '%s' "$WORKER_CACHE_DIR" ;;
+        2) printf '%s' "$WORKER2_CACHE_DIR" ;;
+        3) printf '%s' "$WORKER3_CACHE_DIR" ;;
+    esac
+}
+_tp4_rank_vllm() {
+    case "$1" in
+        1) printf '%s' "$WORKER_VLLM_CACHE" ;;
+        2) printf '%s' "$WORKER2_VLLM_CACHE" ;;
+        3) printf '%s' "$WORKER3_VLLM_CACHE" ;;
+    esac
+}
+_tp4_rank_triton() {
+    case "$1" in
+        1) printf '%s' "$WORKER_TRITON_CACHE" ;;
+        2) printf '%s' "$WORKER2_TRITON_CACHE" ;;
+        3) printf '%s' "$WORKER3_TRITON_CACHE" ;;
+    esac
+}
+_tp4_rank_tilelang() {
+    case "$1" in
+        1) printf '%s' "$WORKER_TILELANG_CACHE" ;;
+        2) printf '%s' "$WORKER2_TILELANG_CACHE" ;;
+        3) printf '%s' "$WORKER3_TILELANG_CACHE" ;;
+    esac
+}
+_tp4_rank_cx7_if() {
+    case "$1" in
+        1) printf '%s' "$WORKER_CX7_IF" ;;
+        2) printf '%s' "$WORKER2_CX7_IF" ;;
+        3) printf '%s' "$WORKER3_CX7_IF" ;;
+    esac
+}
+_tp4_rank_cx7_ib() {
+    case "$1" in
+        1) printf '%s' "$WORKER_CX7_IB" ;;
+        2) printf '%s' "$WORKER2_CX7_IB" ;;
+        3) printf '%s' "$WORKER3_CX7_IB" ;;
+    esac
+}
+_tp4_rank_gid() {
+    case "$1" in
+        1) printf '%s' "$WORKER_GID" ;;
+        2) printf '%s' "$WORKER2_GID" ;;
+        3) printf '%s' "$WORKER3_GID" ;;
+    esac
+}
+_tp4_rank_container() {
+    case "$1" in
+        1) printf '%s' "$CONTAINER_WORKER" ;;
+        2) printf '%s' "$CONTAINER_WORKER2" ;;
+        3) printf '%s' "$CONTAINER_WORKER3" ;;
+    esac
+}
+_tp4_rank_nccl_dir() {
+    case "$1" in
+        1) printf '%s' "$WORKER_NCCL_HOST_DIR" ;;
+        2) printf '%s' "$WORKER2_NCCL_HOST_DIR" ;;
+        3) printf '%s' "$WORKER3_NCCL_HOST_DIR" ;;
+    esac
+}
+_tp4_first_ib() { printf '%s' "${1%%,*}"; }
+
 worker_ssh() { ssh -T -o BatchMode=yes -o ConnectTimeout=15 "$WORKER_SSH" "$@"; }
+worker_ssh_n() {
+    local r="$1"; shift
+    ssh -T -o BatchMode=yes -o ConnectTimeout=15 "$(_tp4_ssh_target "$r")" "$@"
+}
 
 usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
@@ -460,13 +555,13 @@ check_port_free() {
     command -v ss >/dev/null 2>&1 || return 0
     if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; then
         if docker inspect -f '{{.State.Running}}' "$CONTAINER_HEAD" 2>/dev/null | grep -q true; then
-            die "port ${port} is held by ${CONTAINER_HEAD} — use './start.sh restart' or './start.sh stop' first"
+            die "port ${port} is held by ${CONTAINER_HEAD} — use './start-tp4.sh restart' or './start-tp4.sh stop' first"
         fi
         die "port ${port} is already in use — stop it or rerun with ${envname}=<free-port>"
     fi
 }
 
-trap 'warn "interrupted — containers keep running ('"'"'./start.sh logs'"'"' to watch, '"'"'./start.sh stop'"'"' to stop)"; exit 130' INT
+trap 'warn "interrupted — containers keep running ('"'"'./start-tp4.sh logs'"'"' to watch, '"'"'./start-tp4.sh stop'"'"' to stop)"; exit 130' INT
 
 # ------------------------------ preflight ----------------------------------
 preflight() {
@@ -478,30 +573,42 @@ preflight() {
     ip -4 addr show 2>/dev/null | grep -q "inet ${HEAD_IP}/" \
         || die "HEAD_IP=${HEAD_IP} is not assigned on this host — set it in .env"
 
-    log "checking worker ${WORKER_SSH} ..."
-    worker_ssh true 2>/dev/null \
-        || die "cannot ssh (key-based) to ${WORKER_SSH} — set up passwordless ssh first"
-    worker_ssh "docker info >/dev/null 2>&1" \
-        || die "worker cannot talk to its docker daemon (docker group?)"
-    worker_ssh "nvidia-smi -L 2>/dev/null | grep -q GB10" \
-        || warn "no GB10 GPU visible on worker"
+    [ "$TP" = "4" ] || warn "TP=${TP} — this script is meant for TP=4"
+    [ "$NNODES" = "4" ] || warn "NNODES=${NNODES} — this script is meant for nnodes=4"
+    local r ssh_t
+    for r in 1 2 3; do
+        ssh_t="$(_tp4_ssh_target "$r")"
+        log "checking worker rank ${r} ${ssh_t} ..."
+        worker_ssh_n "$r" true 2>/dev/null \
+            || die "cannot ssh (key-based) to ${ssh_t} — set up passwordless ssh first"
+        worker_ssh_n "$r" "docker info >/dev/null 2>&1" \
+            || die "rank ${r} (${ssh_t}) cannot talk to its docker daemon"
+        worker_ssh_n "$r" "nvidia-smi -L 2>/dev/null | grep -q GB10" \
+            || warn "no GB10 GPU visible on rank ${r} (${ssh_t})"
+    done
 
     # Each rank's GID index must name a populated entry on ITS OWN CX7 device.
     # An empty (all-zero) entry passes every earlier check and then kills that
     # rank ~60 s in with ibv_modify_qp errno 61 "No data available". The index is
     # per-NIC, so validate head and worker separately: some pairs share one good
     # index, others need different ones (HEAD_GID / WORKER_GID).
-    local gid_head gid_worker gid_path
-    gid_path="/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gids/${HEAD_GID}"
+    local gid_head gid_worker gid_path ib r ssh_t gid_ok=1
+    ib="$(_tp4_first_ib "$HEAD_CX7_IB")"
+    gid_path="/sys/class/infiniband/${ib}/ports/1/gids/${HEAD_GID}"
     gid_head=$(cat "$gid_path" 2>/dev/null | tr -d ':0' || true)
-    gid_path="/sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gids/${WORKER_GID}"
-    gid_worker=$(worker_ssh "cat '$gid_path' 2>/dev/null" | tr -d ':0' || true)
-    if [ -z "$gid_head" ] || [ -z "$gid_worker" ]; then
-        if [ -z "$gid_head" ]; then
-            warn "head GID index ${HEAD_GID} is EMPTY on ${HEAD_CX7_IB}"
-        fi
+    [ -n "$gid_head" ] || { warn "head GID index ${HEAD_GID} is EMPTY on ${ib}"; gid_ok=0; }
+    for r in 1 2 3; do
+        ib="$(_tp4_first_ib "$(_tp4_rank_cx7_ib "$r")")"
+        gid_path="/sys/class/infiniband/${ib}/ports/1/gids/$(_tp4_rank_gid "$r")"
+        gid_worker=$(worker_ssh_n "$r" "cat '$gid_path' 2>/dev/null" | tr -d ':0' || true)
         if [ -z "$gid_worker" ]; then
-            warn "worker GID index ${WORKER_GID} is EMPTY on ${WORKER_CX7_IB}"
+            warn "rank ${r} GID index $(_tp4_rank_gid "$r") is EMPTY on ${ib}"
+            gid_ok=0
+        fi
+    done
+    if [ "$gid_ok" != "1" ]; then
+        if [ -z "$gid_head" ]; then
+            warn "head GID index ${HEAD_GID} is EMPTY on $(_tp4_first_ib "$HEAD_CX7_IB")"
         fi
         warn "GID tables — pick each node's ::ffff:<ip> entry whose type is RoCE v2;"
         warn "the two indices need not match, and a v1 entry at the same index will not work:"
@@ -514,16 +621,19 @@ preflight() {
         die "set NCCL_IB_GID_INDEX (same index both ranks) or HEAD_GID/WORKER_GID (per rank) in .env to populated indices"
     fi
 
-    [ "$TP" = "2" ] || warn "TP=${TP} on a 2×1-GPU cluster — expected TP=2"
-    [ "$NNODES" = "2" ] || warn "NNODES=${NNODES} — expected 2"
+    [ "$TP" = "4" ] || warn "TP=${TP} — expected TP=4 for start-tp4.sh"
+    [ "$NNODES" = "4" ] || warn "NNODES=${NNODES} — expected 4"
 
-    local others
-    others=$(worker_ssh "docker ps --format '  {{.Names}}  ({{.Image}})'" 2>/dev/null | grep -v "^  ${CONTAINER_WORKER}" || true)
-    if [ -n "$others" ]; then
-        warn "other containers are running on the worker:"
-        echo "$others" >&2
-        warn "this model needs most of each GB10 — stop GPU containers on the worker first"
-    fi
+    local others cname
+    for r in 1 2 3; do
+        cname="$(_tp4_rank_container "$r")"
+        others=$(worker_ssh_n "$r" "docker ps --format '  {{.Names}}  ({{.Image}})'" 2>/dev/null | grep -v "^  ${cname}" || true)
+        if [ -n "$others" ]; then
+            warn "other containers are running on rank ${r} ($(_tp4_ssh_target "$r")):"
+            echo "$others" >&2
+            warn "this model needs most of each GB10 — stop GPU containers on that Spark first"
+        fi
+    done
 
     check_port_free "$PORT" PORT
     check_port_free "$MASTER_PORT" MASTER_PORT
@@ -546,18 +656,22 @@ preflight() {
     mkdir -p "$HF_CACHE_DIR"
     avail=$(df -Pk "$HF_CACHE_DIR" 2>/dev/null | awk 'NR==2{print $4}' || true)
     [ "${avail:-0}" -ge "$need_kb" ] || warn "only $((avail/1024/1024)) GiB free on head for a ~164 GiB model"
-    avail=$(worker_ssh "df -Pk '$WORKER_HOME' 2>/dev/null" | awk 'NR==2{print $4}' || true)
-    [ "${avail:-0}" -ge "$need_kb" ] || warn "only $((avail/1024/1024)) GiB free on worker for a ~164 GiB model"
+    for r in 1 2 3; do
+        avail=$(worker_ssh_n "$r" "df -Pk '$(_tp4_rank_home "$r")' 2>/dev/null" | awk 'NR==2{print $4}' || true)
+        [ "${avail:-0}" -ge "$need_kb" ] || warn "only $((avail/1024/1024)) GiB free on rank ${r} for a ~164 GiB model"
+    done
 
     # The worker HF cache must be writable by the SSH user before the ~164 GiB
     # sync starts. A root-owned ~/.cache/huggingface (prior sudo/docker
     # prepare on the worker) otherwise fails mid-sync with a bare mkdir
     # permission error. mkdir -p is idempotent and is what sync does anyway.
-    if ! worker_ssh "mkdir -p '$WORKER_CACHE_DIR/hub' && test -w '$WORKER_CACHE_DIR/hub'"; then
-        die "worker cannot write $WORKER_CACHE_DIR/hub as $( [ -n "${WORKER_USER:-}" ] && echo "$WORKER_USER" || echo "$USER" ) — fix ownership on the worker, e.g.: ssh $WORKER_SSH \"sudo chown -R ${WORKER_USER:-\$USER}: '$WORKER_CACHE_DIR'\""
-    fi
+    for r in 1 2 3; do
+        if ! worker_ssh_n "$r" "mkdir -p '$(_tp4_rank_hf "$r")/hub' && test -w '$(_tp4_rank_hf "$r")/hub'"; then
+            die "rank ${r} cannot write $(_tp4_rank_hf "$r")/hub — fix ownership, e.g. ssh $(_tp4_ssh_target "$r") \"sudo chown -R \$USER: '$(_tp4_rank_hf "$r")'\""
+        fi
+    done
 
-    log "preflight OK (head=$(hostname) ${HEAD_IP}, worker=${WORKER_SSH})"
+    log "preflight OK (head=$(hostname) ${HEAD_IP}, workers=${WORKER_SSH} ${WORKER2_SSH} ${WORKER3_SSH})"
 }
 
 # ------------------------------ image --------------------------------------
@@ -576,8 +690,11 @@ login_ghcr_if_token() {
 
 login_ghcr_if_token_worker() {
     [ -n "${GHCR_TOKEN:-}" ] || return 0
-    log "docker login ghcr.io on worker as ${GHCR_USER} (GHCR_TOKEN)"
-    echo "$GHCR_TOKEN" | worker_ssh "docker login ghcr.io -u '$GHCR_USER' --password-stdin" >/dev/null
+    local r
+    for r in 1 2 3; do
+        log "docker login ghcr.io on rank ${r} as ${GHCR_USER} (GHCR_TOKEN)"
+        echo "$GHCR_TOKEN" | worker_ssh_n "$r" "docker login ghcr.io -u '$GHCR_USER' --password-stdin" >/dev/null
+    done
 }
 
 # RepoDigest is stable across overlay2 vs containerd. Those snapshotters
@@ -595,7 +712,7 @@ local_image_key() {
 }
 
 worker_image_key() {
-    worker_ssh "docker image inspect -f 'GLM53KEY ${_IMAGE_KEY_FMT}' '$IMAGE' 2>/dev/null" | parse_image_key
+    worker_ssh_n "${1:-1}" "docker image inspect -f 'GLM53KEY ${_IMAGE_KEY_FMT}' '$IMAGE' 2>/dev/null" | parse_image_key
 }
 
 images_match() {
@@ -656,24 +773,21 @@ pull_image() {
 }
 
 pull_image_on_worker() {
+    local r="${1:-1}"
     login_ghcr_if_token_worker
-    log "pulling ${IMAGE} on worker ..."
-    worker_ssh "docker pull '$IMAGE'"
+    log "pulling ${IMAGE} on rank ${r} ..."
+    worker_ssh_n "$r" "docker pull '$IMAGE'"
 }
 
 ship_image_to_worker() {
-    local platform
+    local r="${1:-1}" platform
     platform="$(image_platform)"
-    log "shipping ${IMAGE} (${platform}) to worker via docker save | ssh docker load ..."
-    # A multi-arch OCI index references blobs docker save does not pack
-    # (only the native platform is local). docker load then dies with:
-    #   open /var/lib/docker/tmp/docker-import-*/blobs/sha256/<id>: no such file
-    # (issue #8). --platform emits a complete single-manifest tar.
-    if docker save --platform "$platform" "$IMAGE" | worker_ssh docker load; then
+    log "shipping ${IMAGE} (${platform}) to rank ${r} via docker save | ssh docker load ..."
+    if docker save --platform "$platform" "$IMAGE" | worker_ssh_n "$r" docker load; then
         return 0
     fi
     warn "docker save --platform ${platform} failed — retrying without --platform"
-    docker save "$IMAGE" | worker_ssh docker load
+    docker save "$IMAGE" | worker_ssh_n "$r" docker load
 }
 
 ensure_image() {
@@ -683,15 +797,20 @@ ensure_image() {
         head_ok=1
         head_key="$(local_image_key)"
     fi
-    if worker_ssh "docker image inspect '$IMAGE' >/dev/null 2>&1"; then
-        worker_key="$(worker_image_key)"
-        if images_match "$head_key" "$worker_key"; then
-            worker_ok=1
+    worker_ok=1
+    for r in 1 2 3; do
+        if worker_ssh_n "$r" "docker image inspect '$IMAGE' >/dev/null 2>&1"; then
+            worker_key="$(worker_image_key "$r")"
+            if images_match "$head_key" "$worker_key"; then
+                :
+            else
+                worker_ok=0
+                log "rank ${r} image differs (head=${head_key:-none} worker=${worker_key:-none}) — will refresh"
+            fi
         else
             worker_ok=0
-            log "worker image differs (head=${head_key:-none} worker=${worker_key:-none}) — will refresh worker"
         fi
-    fi
+    done
     local skip_pull="${SKIP_PULL:-0}"
     [ "${PULL:-0}" = "1" ] && skip_pull=0
     local wanted_stamp have_stamp
@@ -736,33 +855,39 @@ ensure_image() {
         worker_ok=0
     fi
     if [ "${SKIP_SHIP:-0}" = "1" ]; then
-        [ "$worker_ok" = "1" ] || warn "SKIP_SHIP=1 — not copying ${IMAGE} to the worker"
+        [ "$worker_ok" = "1" ] || warn "SKIP_SHIP=1 — not copying ${IMAGE} to workers"
     elif [ "$worker_ok" = "0" ]; then
-        if image_from_registry && [ "$skip_pull" != "1" ] && [ "${BUILD:-0}" != "1" ]; then
-            if pull_image_on_worker; then
-                worker_key="$(worker_image_key)"
-                if images_match "$head_key" "$worker_key"; then
-                    worker_ok=1
-                    log "worker pulled ${IMAGE} — matches head"
-                else
-                    warn "worker pull left a different image (head=${head_key:-none} worker=${worker_key:-none}) — shipping"
-                fi
-            else
-                warn "worker docker pull failed — shipping over SSH (worker does not need GHCR)"
-            fi
-        fi
-        if [ "$worker_ok" = "0" ]; then
-            ship_image_to_worker
-            worker_key="$(worker_image_key)"
+        for r in 1 2 3; do
+            local wok=0
+            worker_key="$(worker_image_key "$r")"
             if images_match "$head_key" "$worker_key"; then
-                worker_ok=1
-            elif worker_ssh "docker image inspect '$IMAGE' >/dev/null 2>&1"; then
-                warn "worker has ${IMAGE} after ship but keys still differ (head=${head_key:-none} worker=${worker_key:-none}) — continuing"
-                worker_ok=1
-            else
-                die "worker still missing ${IMAGE} after ship"
+                continue
             fi
-        fi
+            if image_from_registry && [ "$skip_pull" != "1" ] && [ "${BUILD:-0}" != "1" ]; then
+                if pull_image_on_worker "$r"; then
+                    worker_key="$(worker_image_key "$r")"
+                    if images_match "$head_key" "$worker_key"; then
+                        wok=1
+                        log "rank ${r} pulled ${IMAGE} — matches head"
+                    else
+                        warn "rank ${r} pull left a different image — shipping"
+                    fi
+                else
+                    warn "rank ${r} docker pull failed — shipping over SSH"
+                fi
+            fi
+            if [ "$wok" = "0" ]; then
+                ship_image_to_worker "$r"
+                worker_key="$(worker_image_key "$r")"
+                if images_match "$head_key" "$worker_key"; then
+                    :
+                elif worker_ssh_n "$r" "docker image inspect '$IMAGE' >/dev/null 2>&1"; then
+                    warn "rank ${r} has ${IMAGE} after ship but keys still differ — continuing"
+                else
+                    die "rank ${r} still missing ${IMAGE} after ship"
+                fi
+            fi
+        done
     fi
     if [ "${SKIP_OVERLAY_VERIFY:-0}" != "1" ]; then
         log "GPU EXL3 self-check on ${IMAGE} (log: $LOGDIR/overlay-verify.log) ..."
@@ -773,7 +898,7 @@ ensure_image() {
             || { tail -n 80 "$LOGDIR/overlay-verify.log" >&2; die "EXL3 overlay GPU self-check failed"; }
         log "overlay verify OK"
     fi
-    log "image ready on both nodes"
+    log "image ready on all four nodes"
 }
 
 # ---------------------------- weight download ------------------------------
@@ -908,7 +1033,7 @@ download_only() {
     else
         log "  DFlash2     : skipped (SPEC_METHOD=${SPEC_METHOD})"
     fi
-    log "worker was not touched. ./start.sh will rsync on launch unless SKIP_SYNC=1."
+    log "workers were not touched. ./start-tp4.sh will rsync on launch unless SKIP_SYNC=1."
     log "======================================================================"
 }
 
@@ -929,32 +1054,37 @@ sync_repo_marker_rev() {
     printf '%s' "$rev"
 }
 
-sync_repo_to_worker() {
-    local src="$1" cache_name="$2" label="$3"
-    local marker rev
-    marker="${WORKER_CACHE_DIR}/hub/${cache_name}/.glm53-exl3-synced"
+sync_repo_to_one_worker() {
+    local r="$1" src="$2" cache_name="$3" label="$4"
+    local marker rev hf ssh_t
+    hf="$(_tp4_rank_hf "$r")"
+    ssh_t="$(_tp4_ssh_target "$r")"
+    marker="${hf}/hub/${cache_name}/.glm53-exl3-synced"
     rev="$(sync_repo_marker_rev "$src")"
     if [ "${FORCE_SYNC:-0}" != "1" ] \
-       && [ "$(worker_ssh "cat '$marker' 2>/dev/null" || true)" = "$rev" ]; then
-        log "worker ${cache_name} already at ${rev} — rsync skipped (FORCE_SYNC=1 to force)"
+       && [ "$(worker_ssh_n "$r" "cat '$marker' 2>/dev/null" || true)" = "$rev" ]; then
+        log "rank ${r} ${cache_name} already at ${rev} — rsync skipped"
         return 0
     fi
-    log "syncing ${label} to worker (first run moves ~164 GiB over the p2p link) ..."
-    worker_ssh "mkdir -p '${WORKER_CACHE_DIR}/hub/${cache_name}'"
+    log "syncing ${label} to rank ${r} (${ssh_t}) ..."
+    worker_ssh_n "$r" "mkdir -p '${hf}/hub/${cache_name}'"
     rsync -a --partial --info=progress2 \
-        "$src/" "${WORKER_SSH}:${WORKER_CACHE_DIR}/hub/${cache_name}/"
-    worker_ssh "printf '%s' '$rev' > '$marker'"
+        "$src/" "${ssh_t}:${hf}/hub/${cache_name}/"
+    worker_ssh_n "$r" "printf '%s' '$rev' > '$marker'"
 }
 
 sync_weights() {
-    [ "${SKIP_SYNC:-0}" = "1" ] && { log "SKIP_SYNC=1 — not syncing to worker"; return; }
+    [ "${SKIP_SYNC:-0}" = "1" ] && { log "SKIP_SYNC=1 — not syncing to workers"; return; }
     [ -d "$MODEL_PATH" ] || die "weights missing at $MODEL_PATH — run without SKIP_DOWNLOAD first"
-    sync_repo_to_worker "$MODEL_PATH" "$MODEL_CACHE_NAME" "weights"
-    if [ "$SPEC_METHOD" = "dflash" ]; then
-        [ -d "$DFLASH_PATH" ] || die "DFlash2 weights missing at $DFLASH_PATH"
-        sync_repo_to_worker "$DFLASH_PATH" "$DFLASH_CACHE_NAME" "DFlash2 draft"
-    fi
-    log "worker weights in sync"
+    local r
+    for r in 1 2 3; do
+        sync_repo_to_one_worker "$r" "$MODEL_PATH" "$MODEL_CACHE_NAME" "weights"
+        if [ "$SPEC_METHOD" = "dflash" ]; then
+            [ -d "$DFLASH_PATH" ] || die "DFlash2 weights missing at $DFLASH_PATH"
+            sync_repo_to_one_worker "$r" "$DFLASH_PATH" "$DFLASH_CACHE_NAME" "DFlash2 draft"
+        fi
+    done
+    log "all worker weights in sync"
 }
 
 # ------------------------ inner container scripts --------------------------
@@ -987,14 +1117,6 @@ ARGS=(
 [ -n "${MAX_NUM_SEQS:-}" ] && ARGS+=(--max-num-seqs "${MAX_NUM_SEQS}")
 [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ] && ARGS+=(--max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}")
 [ -n "${KV_CACHE_DTYPE:-}" ] && ARGS+=(--kv-cache-dtype "${KV_CACHE_DTYPE}")
-# Server-side default reasoning effort. Empty = no flag, and the template then
-# renders Max for any client that omits chat_template_kwargs. The JSON is a
-# single argv element and contains no spaces, so it survives both the array
-# expansion here and the word-split `${worker_nccl}` env path on the worker.
-# Request-level chat_template_kwargs override this default.
-if [ -n "${GLM53_DEFAULT_REASONING_EFFORT:-}" ]; then
-    ARGS+=(--default-chat-template-kwargs "{\"reasoning_effort\":\"${GLM53_DEFAULT_REASONING_EFFORT}\"}")
-fi
 if [ "${SPEC_METHOD:-mtp}" = "dflash" ]; then
     ARGS+=(--speculative-config "$(python3 -S -c 'import json,os
 spec={"method":"dflash","model":os.environ["DFLASH_MODEL_DIR"],"num_speculative_tokens":int(os.environ.get("DFLASH_TOKENS","7")),"kv_cache_dtype":"auto","draft_sample_method":"probabilistic","rejection_sample_method":"standard"}
@@ -1075,7 +1197,7 @@ ARGS=(
     --port "${PORT}"
     --tensor-parallel-size "${TP}"
     --nnodes "${NNODES}"
-    --node-rank 1
+    --node-rank "${NODE_RANK}"
     --master-addr "${HEAD_IP}"
     --master-port "${MASTER_PORT}"
     --distributed-executor-backend mp
@@ -1093,14 +1215,6 @@ ARGS=(
 [ -n "${MAX_NUM_SEQS:-}" ] && ARGS+=(--max-num-seqs "${MAX_NUM_SEQS}")
 [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ] && ARGS+=(--max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}")
 [ -n "${KV_CACHE_DTYPE:-}" ] && ARGS+=(--kv-cache-dtype "${KV_CACHE_DTYPE}")
-# Server-side default reasoning effort. Empty = no flag, and the template then
-# renders Max for any client that omits chat_template_kwargs. The JSON is a
-# single argv element and contains no spaces, so it survives both the array
-# expansion here and the word-split `${worker_nccl}` env path on the worker.
-# Request-level chat_template_kwargs override this default.
-if [ -n "${GLM53_DEFAULT_REASONING_EFFORT:-}" ]; then
-    ARGS+=(--default-chat-template-kwargs "{\"reasoning_effort\":\"${GLM53_DEFAULT_REASONING_EFFORT}\"}")
-fi
 if [ "${SPEC_METHOD:-mtp}" = "dflash" ]; then
     ARGS+=(--speculative-config "$(python3 -S -c 'import json,os
 spec={"method":"dflash","model":os.environ["DFLASH_MODEL_DIR"],"num_speculative_tokens":int(os.environ.get("DFLASH_TOKENS","7")),"kv_cache_dtype":"auto","draft_sample_method":"probabilistic","rejection_sample_method":"standard"}
@@ -1164,20 +1278,49 @@ if [ "${ABLIT:-0}" = "1" ]; then
 else
     say "ablit: off — stock o_proj weights"
 fi
-say "joining TP2 at ${HEAD_IP}:${MASTER_PORT} as rank 1"
+say "joining TP${TP} at ${HEAD_IP}:${MASTER_PORT} as rank ${NODE_RANK}"
 exec vllm serve "${MODEL_DIR}" "${ARGS[@]}"
 EOF
     chmod +x "$HEAD_SCRIPT" "$WORKER_SCRIPT"
 }
 
 # ------------------------------- launch ------------------------------------
+_tp4_scp_runtime() {
+    local r="$1" ssh_t cname
+    ssh_t="$(_tp4_ssh_target "$r")"
+    cname="$(_tp4_rank_container "$r")"
+    scp -q -o BatchMode=yes "$WORKER_SCRIPT" "${ssh_t}:/tmp/${cname}.sh"
+    scp -q -o BatchMode=yes "$CHAT_TEMPLATE_HOST" "${ssh_t}:/tmp/glm53-chat_template.jinja"
+    scp -q -o BatchMode=yes "$VIDEO_PATCH_HOST" "${ssh_t}:/tmp/patch_glm_video_placeholders.py"
+    scp -q -o BatchMode=yes "$STOP_PATCH_HOST" "${ssh_t}:/tmp/patch_suppress_stops_in_reasoning.py"
+    scp -q -o BatchMode=yes "$SCHED_PATCH_HOST" "${ssh_t}:/tmp/patch_scheduler_decode_floor.py"
+    scp -q -o BatchMode=yes "$DRAFTER_PATCH_HOST" "${ssh_t}:/tmp/patch_glm5_drafter_group.py"
+    scp -q -o BatchMode=yes "$APC_PATCH_HOST" "${ssh_t}:/tmp/patch_hybrid_prefix_hit.py"
+    scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${ssh_t}:/tmp/patch_xgrammar_termination.py"
+    scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${ssh_t}:/tmp/patch_kpool_tail_slotmap.py"
+    scp -q -o BatchMode=yes "$SPINWAIT_PATCH_HOST" "${ssh_t}:/tmp/patch_spinwait.py"
+    worker_ssh_n "$r" "rm -rf /tmp/glm53-ablit"
+    scp -q -r -o BatchMode=yes "$SCRIPT_DIR/ablit" "${ssh_t}:/tmp/glm53-ablit"
+    scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/ablit_runtime.py" "${ssh_t}:/tmp/glm53-ablit_runtime.py"
+    scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/patch_ablit.py" "${ssh_t}:/tmp/patch_ablit.py"
+}
+
 launch_cluster() {
+    local r
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || true
-    worker_ssh "docker rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 || true
+    for r in 1 2 3; do
+        worker_ssh_n "$r" "docker rm -f '$(_tp4_rank_container "$r")'" >/dev/null 2>&1 || true
+    done
 
     mkdir -p "$CACHE_ROOT" "$TRITON_HOST_CACHE" "$TILELANG_HOST_CACHE"
-    worker_ssh "mkdir -p '$WORKER_VLLM_CACHE' '$WORKER_TRITON_CACHE' '$WORKER_TILELANG_CACHE'"
-    scp -q -o BatchMode=yes "$WORKER_SCRIPT" "${WORKER_SSH}:/tmp/${CONTAINER_WORKER}.sh"
+    [ -f "$CHAT_TEMPLATE_HOST" ] || die "missing chat template: $CHAT_TEMPLATE_HOST"
+    for r in 1 2 3; do
+        worker_ssh_n "$r" "mkdir -p '$(_tp4_rank_vllm "$r")' '$(_tp4_rank_triton "$r")' '$(_tp4_rank_tilelang "$r")'"
+        _tp4_scp_runtime "$r"
+    done
+    # skip the old single-worker scp block
+    true
+    : <<'TP4_SKIP_OLD_SCP'
     [ -f "$CHAT_TEMPLATE_HOST" ] || die "missing chat template: $CHAT_TEMPLATE_HOST"
     scp -q -o BatchMode=yes "$CHAT_TEMPLATE_HOST" "${WORKER_SSH}:/tmp/glm53-chat_template.jinja"
     [ -f "$VIDEO_PATCH_HOST" ] || die "missing $VIDEO_PATCH_HOST"
@@ -1201,6 +1344,7 @@ launch_cluster() {
     scp -q -r -o BatchMode=yes "$SCRIPT_DIR/ablit" "${WORKER_SSH}:/tmp/glm53-ablit"
     scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/ablit_runtime.py" "${WORKER_SSH}:/tmp/glm53-ablit_runtime.py"
     scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/patch_ablit.py" "${WORKER_SSH}:/tmp/patch_ablit.py"
+TP4_SKIP_OLD_SCP
 
     local -a nccl_common=(
         -e NCCL_IB_DISABLE=0
@@ -1219,7 +1363,6 @@ launch_cluster() {
         -e VLLM_CACHE_ROOT=/root/.cache/vllm
         -e "GLM53_SUPPRESS_STOPS_IN_REASONING=$GLM53_SUPPRESS_STOPS_IN_REASONING"
         -e "GLM53_MIXED_PREFILL_CHUNK=$GLM53_MIXED_PREFILL_CHUNK"
-        -e "GLM53_DEFAULT_REASONING_EFFORT=${GLM53_DEFAULT_REASONING_EFFORT-}"
         -e "GLM53_INDEXER_WORKSPACE=$GLM53_INDEXER_WORKSPACE"
         -e "GLM53_SPINWAIT_MS=$GLM53_SPINWAIT_MS"
         -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
@@ -1242,19 +1385,13 @@ launch_cluster() {
         worker_nccl+=" -e $e"
     done
 
-    local -a head_preload=() worker_preload=""
+    local -a head_preload=()
     if [ "$USE_HOST_NCCL" = "1" ]; then
         if [ -f "$NCCL_HOST_DIR/$NCCL_SO_NAME" ]; then
             head_preload=(-v "$NCCL_HOST_DIR:/nccl:ro" -e "LD_PRELOAD=/nccl/$NCCL_SO_NAME")
             log "head: LD_PRELOAD $NCCL_SO_NAME"
         else
             warn "head: $NCCL_HOST_DIR/$NCCL_SO_NAME missing — using image NCCL"
-        fi
-        if worker_ssh "test -f '$WORKER_NCCL_HOST_DIR/$NCCL_SO_NAME'"; then
-            worker_preload="-v '$WORKER_NCCL_HOST_DIR:/nccl:ro' -e LD_PRELOAD='/nccl/$NCCL_SO_NAME'"
-            log "worker: LD_PRELOAD $NCCL_SO_NAME"
-        else
-            warn "worker: $WORKER_NCCL_HOST_DIR/$NCCL_SO_NAME missing — using image NCCL"
         fi
     fi
 
@@ -1276,37 +1413,52 @@ launch_cluster() {
     # beyond the container env (same as the DeepSeek deployment).
     serve_env+=" -e VLLM_API_KEY='${VLLM_API_KEY:-}'"
 
-    log "starting worker on ${WORKER_SSH} (NCCL if=${WORKER_CX7_IF} hca=${WORKER_CX7_IB}) ..."
-    worker_ssh "docker run -d --name '$CONTAINER_WORKER' \
-        --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
-        --device /dev/infiniband --cap-add IPC_LOCK \
-        --ulimit memlock=-1 --ulimit stack=67108864 \
-        -v '$WORKER_CACHE_DIR:/root/.cache/huggingface' \
-        -v '$WORKER_VLLM_CACHE:/root/.cache/vllm' \
-        -v '$WORKER_TRITON_CACHE:/root/.triton/cache' \
-        -v '$WORKER_TILELANG_CACHE:/root/.tilelang/cache' \
-        -v '/tmp/${CONTAINER_WORKER}.sh:/start.sh:ro' \
-        -v '/tmp/glm53-chat_template.jinja:${CHAT_TEMPLATE}:ro' \
-        -v '/tmp/patch_glm_video_placeholders.py:/opt/glm53/patch_glm_video_placeholders.py:ro' \
-        -v '/tmp/patch_suppress_stops_in_reasoning.py:/opt/glm53/patch_suppress_stops_in_reasoning.py:ro' \
-        -v '/tmp/patch_scheduler_decode_floor.py:/opt/glm53/patch_scheduler_decode_floor.py:ro' \
-        -v '/tmp/patch_glm5_drafter_group.py:/opt/glm53/patch_glm5_drafter_group.py:ro' \
-        -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
-        -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
-        -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
-        -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
-        -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
-        -v '/tmp/glm53-ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro' \
-        -v '/tmp/patch_ablit.py:/opt/glm53/patch_ablit.py:ro' \
-        ${worker_preload} \
-        ${worker_nccl} \
-        -e NCCL_SOCKET_IFNAME='$WORKER_CX7_IF' \
-        -e GLOO_SOCKET_IFNAME='$WORKER_CX7_IF' \
-        -e NCCL_IB_HCA='$WORKER_CX7_IB' \
-        -e NCCL_IB_GID_INDEX='$WORKER_GID' \
-        -e VLLM_HOST_IP='$WORKER_IP' \
-        ${serve_env} \
-        --entrypoint bash '$IMAGE' /start.sh" >/dev/null
+    local worker_preload="" nccl_dir cname
+    for r in 1 2 3; do
+        worker_preload=""
+        if [ "$USE_HOST_NCCL" = "1" ]; then
+            nccl_dir="$(_tp4_rank_nccl_dir "$r")"
+            if worker_ssh_n "$r" "test -f '$nccl_dir/$NCCL_SO_NAME'"; then
+                worker_preload="-v '$nccl_dir:/nccl:ro' -e LD_PRELOAD='/nccl/$NCCL_SO_NAME'"
+                log "rank ${r}: LD_PRELOAD $NCCL_SO_NAME"
+            else
+                warn "rank ${r}: $nccl_dir/$NCCL_SO_NAME missing — using image NCCL"
+            fi
+        fi
+        cname="$(_tp4_rank_container "$r")"
+        log "starting rank ${r} on $(_tp4_ssh_target "$r") (NCCL if=$(_tp4_rank_cx7_if "$r") hca=$(_tp4_rank_cx7_ib "$r")) ..."
+        worker_ssh_n "$r" "docker run -d --name '$cname' \
+            --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
+            --device /dev/infiniband --cap-add IPC_LOCK \
+            --ulimit memlock=-1 --ulimit stack=67108864 \
+            -v '$(_tp4_rank_hf "$r"):/root/.cache/huggingface' \
+            -v '$(_tp4_rank_vllm "$r"):/root/.cache/vllm' \
+            -v '$(_tp4_rank_triton "$r"):/root/.triton/cache' \
+            -v '$(_tp4_rank_tilelang "$r"):/root/.tilelang/cache' \
+            -v '/tmp/${cname}.sh:/start.sh:ro' \
+            -v '/tmp/glm53-chat_template.jinja:${CHAT_TEMPLATE}:ro' \
+            -v '/tmp/patch_glm_video_placeholders.py:/opt/glm53/patch_glm_video_placeholders.py:ro' \
+            -v '/tmp/patch_suppress_stops_in_reasoning.py:/opt/glm53/patch_suppress_stops_in_reasoning.py:ro' \
+            -v '/tmp/patch_scheduler_decode_floor.py:/opt/glm53/patch_scheduler_decode_floor.py:ro' \
+            -v '/tmp/patch_glm5_drafter_group.py:/opt/glm53/patch_glm5_drafter_group.py:ro' \
+            -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
+            -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
+            -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
+            -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
+            -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
+            -v '/tmp/glm53-ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro' \
+            -v '/tmp/patch_ablit.py:/opt/glm53/patch_ablit.py:ro' \
+            ${worker_preload} \
+            ${worker_nccl} \
+            -e NCCL_SOCKET_IFNAME='$(_tp4_rank_cx7_if "$r")' \
+            -e GLOO_SOCKET_IFNAME='$(_tp4_rank_cx7_if "$r")' \
+            -e NCCL_IB_HCA='$(_tp4_rank_cx7_ib "$r")' \
+            -e NCCL_IB_GID_INDEX='$(_tp4_rank_gid "$r")' \
+            -e VLLM_HOST_IP='$(_tp4_rank_ip "$r")' \
+            -e NODE_RANK='$r' \
+            ${serve_env} \
+            --entrypoint bash '$IMAGE' /start.sh" >/dev/null
+    done
 
     log "starting head (vLLM API :${PORT}; NCCL if=${HEAD_CX7_IF} hca=${HEAD_CX7_IB}) ..."
     docker run -d --name "$CONTAINER_HEAD" \
@@ -1371,7 +1523,7 @@ launch_cluster() {
         -e EXTRA_ARGS="${EXTRA_ARGS:-}" \
         --entrypoint bash "$IMAGE" /start.sh >/dev/null
 
-    log "containers up — head=${CONTAINER_HEAD}, worker=${CONTAINER_WORKER}"
+    log "containers up — head=${CONTAINER_HEAD}, workers=${CONTAINER_WORKER} ${CONTAINER_WORKER2} ${CONTAINER_WORKER3}"
 }
 
 # ---------------------------- health wait ----------------------------------
@@ -1386,7 +1538,7 @@ wait_for_health() {
         wait "$logpid" 2>/dev/null || true
         logpid=""
     }
-    trap '_stop_logtail; warn "interrupted — containers keep running ('"'"'./start.sh logs'"'"' / '"'"'./start.sh stop'"'"')"; exit 130' INT
+    trap '_stop_logtail; warn "interrupted — containers keep running ('"'"'./start-tp4.sh logs'"'"' / '"'"'./start-tp4.sh stop'"'"')"; exit 130' INT
     docker logs -f --tail 0 "$CONTAINER_HEAD" 2>&1 &
     logpid=$!
 
@@ -1402,20 +1554,29 @@ wait_for_health() {
         # #22, item 4). Transient ssh/docker hiccups are tolerated; only
         # three consecutive non-running answers (~30 s) count as a dead
         # worker.
-        if worker_ssh "docker inspect -f '{{.State.Running}}' '$CONTAINER_WORKER' 2>/dev/null" | grep -q true; then
+        local all_up=1 wr
+        for wr in 1 2 3; do
+            if worker_ssh_n "$wr" "docker inspect -f '{{.State.Running}}' '$(_tp4_rank_container "$wr")' 2>/dev/null" | grep -q true; then
+                :
+            else
+                all_up=0
+                dead_side="rank${wr}"
+            fi
+        done
+        if [ "$all_up" = "1" ]; then
             worker_fail=0
         else
             worker_fail=$((worker_fail + 1))
             if [ "$worker_fail" -ge 3 ]; then
-                log "worker container '$CONTAINER_WORKER' not running on ${WORKER_SSH} (3 consecutive checks)"
-                exited=1; dead_side="worker"; break
+                log "a worker container is not running (${dead_side}, 3 consecutive checks)"
+                exited=1; break
             fi
         fi
         sleep 10; elapsed=$((elapsed + 10))
     done
 
     _stop_logtail
-    trap 'warn "interrupted — containers keep running ('"'"'./start.sh logs'"'"' / '"'"'./start.sh stop'"'"')"; exit 130' INT
+    trap 'warn "interrupted — containers keep running ('"'"'./start-tp4.sh logs'"'"' / '"'"'./start-tp4.sh stop'"'"')"; exit 130' INT
 
     if [ "$healthy" = "1" ]; then
         log "health check passed after ${elapsed}s — server is up"
@@ -1442,13 +1603,16 @@ post_ready_warmup() {
     GLM53_WARMUP_BEARER="${VLLM_API_KEY:-}" \
         bash "$SCRIPT_DIR/scripts/boot-shape-warmup.sh" \
             "http://127.0.0.1:${PORT}" "$SERVED_MODEL_NAME" \
-        || warn "boot shape warmup incomplete — uncovered shapes may JIT mid-serve on TP=2"
+        || warn "boot shape warmup incomplete — uncovered shapes may JIT mid-serve on TP=4"
 }
 
 collect_failure_logs() {
     mkdir -p "$LOGDIR"
     docker logs "$CONTAINER_HEAD" >"$LOGDIR/head.log" 2>&1 || true
-    worker_ssh "docker logs '$CONTAINER_WORKER' 2>&1" >"$LOGDIR/worker.log" 2>&1 || true
+    local r
+    for r in 1 2 3; do
+        worker_ssh_n "$r" "docker logs '$(_tp4_rank_container "$r")' 2>&1" >"$LOGDIR/worker${r}.log" 2>&1 || true
+    done
 }
 
 on_ready() {
@@ -1477,7 +1641,7 @@ on_ready() {
     fi
     log "      -H 'Content-Type: application/json' \\"
     log "      -d '{\"model\": \"${SERVED_MODEL_NAME}\", \"messages\": [{\"role\": \"user\", \"content\": \"hello!\"}]}'"
-    log "  manage     : ./start.sh status | ./start.sh logs | ./start.sh logs worker | ./start.sh stop"
+    log "  manage     : ./start-tp4.sh status | ./start-tp4.sh logs | ./start-tp4.sh logs 1 | ./start-tp4.sh stop"
     log "======================================================================"
     if [ "${TAIL:-0}" = "1" ]; then
         log "tailing head logs — Ctrl-C just detaches, the server keeps running"
@@ -1514,18 +1678,25 @@ start() {
     collect_failure_logs
     echo "---- last 60 lines of head log ($LOGDIR/head.log) ----"
     tail -n 60 "$LOGDIR/head.log" || true
-    echo "---- last 40 lines of worker log ($LOGDIR/worker.log) ----"
-    tail -n 40 "$LOGDIR/worker.log" || true
+    echo "---- last 40 lines of worker1 log ($LOGDIR/worker1.log) ----"
+    tail -n 40 "$LOGDIR/worker1.log" || true
+    echo "---- last 40 lines of worker2 log ($LOGDIR/worker2.log) ----"
+    tail -n 40 "$LOGDIR/worker2.log" || true
+    echo "---- last 40 lines of worker3 log ($LOGDIR/worker3.log) ----"
+    tail -n 40 "$LOGDIR/worker3.log" || true
     die "server did not become healthy — full logs in $LOGDIR/"
 }
 
 # ------------------------------- stop --------------------------------------
 stop() {
+    local r
     log "stopping head container ..."
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || log "  (no head container was running)"
-    log "stopping worker container on ${WORKER_SSH} ..."
-    worker_ssh "docker rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 \
-        || log "  (no worker container was running)"
+    for r in 1 2 3; do
+        log "stopping rank ${r} on $(_tp4_ssh_target "$r") ..."
+        worker_ssh_n "$r" "docker rm -f '$(_tp4_rank_container "$r")'" >/dev/null 2>&1 \
+            || log "  (no rank ${r} container was running)"
+    done
     log "stopped."
 }
 
@@ -1538,18 +1709,23 @@ status() {
     else
         log "  API: not responding"
     fi
-    log "worker (${CONTAINER_WORKER} on ${WORKER_SSH}):"
-    worker_ssh "docker ps -a --filter name=${CONTAINER_WORKER} --format '  {{.Names}}  {{.Status}}'" 2>/dev/null \
-        || log "  (worker unreachable)"
+    local r
+    for r in 1 2 3; do
+        log "rank ${r} ($(_tp4_rank_container "$r") on $(_tp4_ssh_target "$r")):"
+        worker_ssh_n "$r" "docker ps -a --filter name=$(_tp4_rank_container "$r") --format '  {{.Names}}  {{.Status}}'" 2>/dev/null \
+            || log "  (rank ${r} unreachable)"
+    done
 }
 
 # ------------------------------- logs --------------------------------------
 logs() {
     case "${1:-head}" in
-        worker)
-            log "following worker container logs on ${WORKER_SSH} ..."
+        1|2|3|worker|worker1)
+            local r="${1}"
+            if [ "$r" = "worker" ] || [ "$r" = "worker1" ]; then r=1; fi
+            log "following rank ${r} logs on $(_tp4_ssh_target "$r") ..."
             trap '' INT
-            worker_ssh "docker logs -f --tail 100 '$CONTAINER_WORKER'" || true
+            worker_ssh_n "$r" "docker logs -f --tail 100 '$(_tp4_rank_container "$r")'" || true
             trap 'warn "interrupted"; exit 130' INT
             ;;
         head|*)
@@ -1570,7 +1746,7 @@ main() {
     case "$cmd" in
         stop)     banner stop.sh ;;
         download) banner download.sh ;;
-        *)        banner start.sh ;;
+        *)        banner start-tp4.sh ;;
     esac
     case "$cmd" in
         start)    shift || true; start ;;
