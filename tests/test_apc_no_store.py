@@ -888,7 +888,7 @@ def part_d() -> None:
     check('GLM53_APC_NO_STORE="${GLM53_APC_NO_STORE-1}"' in src, "D1 default 1 applies only when UNSET")
 
     def run(value: str | None) -> tuple[int, str, str]:
-        script = guard + "\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4; MAX_NUM_BATCHED_TOKENS=1024\n" + "validate_numeric_config || exit $?\n" + 'printf "%s\\n" "${GLM53_APC_NO_STORE-unset}"\n'
+        script = guard + "\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4; MAX_NUM_BATCHED_TOKENS=1024; GLM53_INDEXER_WORKSPACE=stock; GLM53_SPINWAIT_MS=stock\n" + "validate_numeric_config || exit $?\n" + 'printf "%s\\n" "${GLM53_APC_NO_STORE-unset}"\n'
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"}
         if value is not None:
             env["GLM53_APC_NO_STORE"] = value
