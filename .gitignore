@@ -1,4 +1,5 @@
 .env
+.env.tp4
 .glm53-exl3-*.inner.sh
 logs/
 tool-eval-bench/
