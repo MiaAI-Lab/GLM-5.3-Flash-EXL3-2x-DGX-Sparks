@@ -24,7 +24,7 @@ def validate(util: str, model: str, seqs: str, batch: str) -> subprocess.Complet
     script = (
         guard_source()
         + '\nGPU_MEM_UTIL="$1"; MAX_MODEL_LEN="$2"; MAX_NUM_SEQS="$3"; '
-        + 'MAX_NUM_BATCHED_TOKENS="$4"\n'
+        + 'MAX_NUM_BATCHED_TOKENS="$4"; GLM53_SPINWAIT_MS=stock\n'
         + 'validate_numeric_config || exit $?\n'
         + 'printf "%s|%s|%s|%s\\n" "$GPU_MEM_UTIL" "$MAX_MODEL_LEN" '
         + '"$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS"\n'
@@ -64,6 +64,71 @@ def test_decimal_normalization() -> None:
     assert result.stdout.strip() == ".87|1000000|4|1024"
 
 
+def validate_enum(value: str | None) -> subprocess.CompletedProcess[str]:
+    """Run validate_numeric_config with only GLM53_INDEXER_WORKSPACE varying."""
+    script = (
+        guard_source()
+        + '\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4; '
+        + 'MAX_NUM_BATCHED_TOKENS=1024; GLM53_SPINWAIT_MS=stock\n'
+        + 'validate_numeric_config || exit $?\n'
+        + 'printf "%s\\n" "${GLM53_INDEXER_WORKSPACE-unset}"\n'
+    )
+    env = {k: v for k, v in os.environ.items() if k != "GLM53_INDEXER_WORKSPACE"}
+    env["LC_ALL"] = "C"
+    if value is not None:
+        env["GLM53_INDEXER_WORKSPACE"] = value
+    return subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, env=env
+    )
+
+
+def test_indexer_workspace_enum() -> None:
+    """Strict enum: default on UNSET only, then a literal match.
+
+    ``overlay/patch_indexer_workspace.py``'s ``_glm53_workspace_mode`` applies
+    the same rule inside the container, so an empty or case-variant value must
+    fail here rather than change meaning across the boundary.
+    """
+    for good in (None, "stock", "rightsize"):
+        result = validate_enum(good)
+        assert result.returncode == 0, (good, result.stderr)
+    for bad in ("", " ", "Stock", "RIGHTSIZE", " rightsize ", "1", "on", "true",
+                "rightsize\n"):
+        result = validate_enum(bad)
+        assert result.returncode == 2, (bad, result.returncode, result.stdout)
+        assert "GLM53_INDEXER_WORKSPACE must be one of" in result.stderr, bad
+
+
+def validate_spinwait(value: str | None) -> subprocess.CompletedProcess[str]:
+    script = (
+        guard_source()
+        + '\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4; '
+        + 'MAX_NUM_BATCHED_TOKENS=1024; GLM53_INDEXER_WORKSPACE=stock\n'
+        + 'validate_numeric_config || exit $?\n'
+        + 'printf "%s\\n" "${GLM53_SPINWAIT_MS-unset}"\n'
+    )
+    env = {k: v for k, v in os.environ.items() if k != "GLM53_SPINWAIT_MS"}
+    env["LC_ALL"] = "C"
+    if value is not None:
+        env["GLM53_SPINWAIT_MS"] = value
+    else:
+        env["GLM53_SPINWAIT_MS"] = "stock"
+    return subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, env=env
+    )
+
+
+def test_spinwait_numeric_contract() -> None:
+    for raw, canonical in (("stock", "stock"), ("1", "1"), ("016", "16"), ("1000", "1000")):
+        result = validate_spinwait(raw)
+        assert result.returncode == 0, (raw, result.stderr)
+        assert result.stdout.strip() == canonical, (raw, result.stdout)
+    for bad in ("", "0", "1001", "-1", "1.5", "nan", " 16", "16 ", "STOCK"):
+        result = validate_spinwait(bad)
+        assert result.returncode == 2, (bad, result.returncode, result.stdout)
+        assert "GLM53_SPINWAIT_MS must" in result.stderr, bad
+
+
 def test_restart_validates_before_stop() -> None:
     source = START.read_text()
     main = source.index("main() {")
@@ -75,5 +140,7 @@ def test_restart_validates_before_stop() -> None:
 if __name__ == "__main__":
     test_matrix()
     test_decimal_normalization()
+    test_indexer_workspace_enum()
+    test_spinwait_numeric_contract()
     test_restart_validates_before_stop()
     print("numeric config tests: PASS")
