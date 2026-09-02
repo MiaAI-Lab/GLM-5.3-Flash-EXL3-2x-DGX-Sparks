@@ -102,6 +102,7 @@ def run_guard(extra_env: dict[str, str]) -> tuple[int, str]:
         guard_source()
         + "\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4\n"
         + "MAX_NUM_BATCHED_TOKENS=1024\n"
+        + "GLM53_INDEXER_WORKSPACE=stock; GLM53_SPINWAIT_MS=stock\n"
         + 'GLM53_KV_OFFLOAD_DIR="${GLM53_KV_OFFLOAD_DIR:-/tmp/kvo}"\n'
         + 'GLM53_KV_OFFLOAD_CPU_GB="${GLM53_KV_OFFLOAD_CPU_GB:-4}"\n'
         + 'GLM53_KV_OFFLOAD_KEEP_BOUNDARIES="${GLM53_KV_OFFLOAD_KEEP_BOUNDARIES:-2}"\n'
