@@ -29,6 +29,7 @@ check "NCCL_DEBUG=INFO" "ERR"
 check "VLLM_API_KEY=leak" "ERR"
 check "GLM53_MIXED_PREFILL_CHUNK=0" "ERR"
 check "VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0" "ERR"
+check "EXL3_FAT_KERNEL=0" "ERR"
 # secret redaction: the value must not appear in the log line
 out="$(run "VLLM_DEBUG_WORKSPACE=s3cr3t" | head -1)"; case "$out" in *s3cr3t*) echo "FAIL log leaks value"; fail=1;; *) echo "ok   [log redacts values]";; esac
 rm -f /tmp/_extra_env_blk.$$
