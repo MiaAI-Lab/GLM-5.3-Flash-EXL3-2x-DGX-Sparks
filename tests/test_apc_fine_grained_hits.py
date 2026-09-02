@@ -1270,9 +1270,39 @@ def part_c() -> None:
     caller = source.index('_cli_finegrained="${GLM53_FINEGRAINED_APC-}"')
     check(
         caller < source.index('source "$SCRIPT_DIR/.env"')
-        < source.index('[ -n "${_cli_finegrained}" ]'),
+        < source.index('[ -n "${_cli_finegrained_set}" ]'),
         "C3 a caller-supplied value is captured before .env and restored after",
     )
+    check(
+        '_cli_finegrained_set="${GLM53_FINEGRAINED_APC+1}"' in source,
+        "C3 the capture is setness-aware (${VAR+1}), like the indexer/spinwait knobs",
+    )
+
+    # C4 setness regression: an explicitly EMPTY caller export must survive the
+    # .env source and reach the guard (which rejects ""), not silently lose to
+    # a .env value of 1. Runs the real preamble with a synthetic .env.
+    import subprocess as _sp
+    import tempfile as _tf
+    marker = "# ----------------------------- configuration -------------------------------"
+    preamble, sep, _rest = source.partition(marker)
+    check(bool(sep), "C4 start.sh configuration marker present")
+    with _tf.TemporaryDirectory() as _raw:
+        _tmp = Path(_raw)
+        _script = _tmp / "start.sh"
+        _script.write_text(
+            preamble
+            + '\nprintf "FG=[%s]\\n" "${GLM53_FINEGRAINED_APC-UNSET}"\n'
+        )
+        _script.chmod(0o755)
+        (_tmp / ".env").write_text("GLM53_FINEGRAINED_APC=1\n")
+        _env = {k: v for k, v in os.environ.items() if k != "GLM53_FINEGRAINED_APC"}
+        # caller silent -> .env wins
+        r = _sp.run(["bash", str(_script)], text=True, capture_output=True, env=_env)
+        check(r.returncode == 0 and r.stdout.strip() == "FG=[1]", f"C4 caller silent: .env wins ({r.stdout.strip()!r})")
+        # caller sets it EMPTY -> the empty value survives to the guard
+        r = _sp.run(["bash", str(_script)], text=True, capture_output=True, env={**_env, "GLM53_FINEGRAINED_APC": ""})
+        check(r.returncode == 0 and r.stdout.strip() == "FG=[]", f"C4 explicit empty survives .env ({r.stdout.strip()!r})")
+        check(run_guard("") == 2, "C4 ...and the guard rejects the empty value (rc=2)")
 
 
 def main() -> int:
