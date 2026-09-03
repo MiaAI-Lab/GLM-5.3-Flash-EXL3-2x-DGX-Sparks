@@ -439,7 +439,12 @@ at 100G, CRS812 switch), this image and overlay at 493cb88, DFlash2 draft TP=4,
 TP=4 vs the 2-node baseline on the same production-mix bench (temperature 0,
 30-min soak): decode 1.45x, mixed phases 20-35 % shorter, **cold prefill only
 +29 %** at 282k tokens (1162 vs 901 tok/s: a 4-node TP job is fabric-bound on
-prefill). The defaults above are tuned for 2 nodes; on 4 nodes an autoresearch
+prefill). One caveat found by a 150-minute soak on 2026-09-03: with the DFlash2
+draft on, a 96k chunked prefill sharing steps with 6-7 speculative decode
+streams hangs all four ranks (3/3 runs, 31-78 min; independent of the E2
+fat-expert kernel), while the same soak with the draft off passed clean, so the
+4-node production config runs without speculation until that is fixed (details
+and receipts in the linked repo). The defaults above are tuned for 2 nodes; on 4 nodes an autoresearch
 loop (one knob per relaunch, hard reliability gates) settled on the values now
 in `.env.tp4.example`: `GPU_MEM_UTIL=0.75` (0.85 left <2 GiB host memory per
 rank and preceded two engine deaths), `MAX_NUM_SEQS=8` (135 vs 84 tok/s
