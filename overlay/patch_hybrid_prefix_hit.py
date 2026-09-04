@@ -11,17 +11,23 @@ Two coordinator bugs then throw the extra block away:
 2. The DFlash2 SlidingWindow group still participates in the hybrid min.
    After an EAGLE one-block pop it re-aligns down by a full 3584-token
    scheduler page (block=64, align=3584), which can wipe a longer MLA hit.
+3. Fine-grained 64-token Mamba/MLA hits are disabled when *any* manager with
+   a wider block lacks fine-grained lookup support. That check includes
+   KpoolTailManager even though KpoolTailSpec explicitly opts out of prefix
+   caching, so one transient scratch group forces every reusable group back
+   to 3584-token hit alignment.
 
 KpoolTail already opts out of prefix caching (1-block circular scratch).
 Mamba align-mode state *does* materialize at 896-token chunk ends, and
 3584 is a multiple of 896, so mamba must stay in the min — skipping a
 mamba miss is a correctness hole (vLLM #47491 / #43090).
 
-This patch: flag only exact SlidingWindowSpec groups as EAGLE, and do not
-let that drafter group shrink ``curr_hit_length``. If the drafter window
-does not cover the MLA/mamba hit, leave its blocks empty so a fresh
-window is allocated (zeros / new pages). Wrong indexer tail state is
-fatal — we do not touch KpoolTailManager.
+This patch: flag only exact SlidingWindowSpec groups as EAGLE, do not let that
+drafter group shrink ``curr_hit_length``, and ignore non-participating cache
+groups when checking whether fine-grained lookup is safe. If the drafter
+window does not cover the MLA/mamba hit, leave its blocks empty so a fresh
+window is allocated (zeros / new pages). Wrong indexer tail state is fatal —
+we do not change KpoolTailManager or make its transient state shareable.
 
 Fail closed if the vLLM coordinator anchors drift.
 """
@@ -38,6 +44,7 @@ P = Path(
     )
 )
 MARK = "# [glm53-hybrid-apc]"
+FINE_MARK = "# [glm53-hybrid-apc-fine]"
 
 HELPER = '''
 def _glm53_inner_kv_spec(spec):
@@ -139,6 +146,27 @@ LOG_NEW = """        # Propagate the eagle bit to each manager (default to ``use
         )
 """
 
+FINE_OLD = """            unsupported_partial_hit_managers = {
+                type(manager).__name__
+                for manager in self.single_type_managers
+                if not manager.supports_fine_grained_hash_lookup
+                and manager.block_size != hash_block_size
+            }
+"""
+
+FINE_NEW = """            unsupported_partial_hit_managers = {  # [glm53-hybrid-apc-fine]
+                type(manager).__name__
+                for manager, group in zip(
+                    self.single_type_managers, kv_cache_config.kv_cache_groups
+                )
+                # A transient/non-shareable manager cannot constrain prefix-hit
+                # granularity because it never participates in the lookup.
+                if group.kv_cache_spec.participates_in_prefix_caching
+                and not manager.supports_fine_grained_hash_lookup
+                and manager.block_size != hash_block_size
+            }
+"""
+
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
     n = text.count(old)
@@ -151,19 +179,36 @@ def main() -> int:
     if not P.is_file():
         raise SystemExit(f"missing {P}")
     text = P.read_text()
-    if MARK in text:
-        print(f"{P.name}: {MARK} already present — skipping")
+    changes: list[str] = []
+
+    # The GHCR image can already contain an older revision of this overlay.
+    # Preserve the original idempotence while still allowing additive upgrades.
+    if MARK not in text:
+        needle = "def _validate_prefix_cache_retention_interval(\n"
+        if text.count(needle) != 1:
+            raise SystemExit(f"{P}: helper insert point not unique")
+        if "def _glm53_inner_kv_spec(" not in text:
+            text = text.replace(needle, HELPER + needle, 1)
+        text = replace_once(text, EAGLE_OLD, EAGLE_NEW, "eagle-fallback")
+        text = replace_once(text, MIN_OLD, MIN_NEW, "hybrid-min")
+        text = replace_once(text, LOG_OLD, LOG_NEW, "group-log")
+        changes.append("hybrid APC")
+
+    if FINE_MARK not in text:
+        text = replace_once(
+            text,
+            FINE_OLD,
+            FINE_NEW,
+            "fine-grained manager eligibility",
+        )
+        changes.append("64-token fine-grained hits")
+
+    if not changes:
+        print(f"{P.name}: {MARK} and {FINE_MARK} already present — skipping")
         return 0
-    needle = "def _validate_prefix_cache_retention_interval(\n"
-    if text.count(needle) != 1:
-        raise SystemExit(f"{P}: helper insert point not unique")
-    if "def _glm53_inner_kv_spec(" not in text:
-        text = text.replace(needle, HELPER + needle, 1)
-    text = replace_once(text, EAGLE_OLD, EAGLE_NEW, "eagle-fallback")
-    text = replace_once(text, MIN_OLD, MIN_NEW, "hybrid-min")
-    text = replace_once(text, LOG_OLD, LOG_NEW, "group-log")
+
     P.write_text(text)
-    print(f"patched {P.name} (hybrid APC: drafter SWA skipped in min, eagle on SWA only)")
+    print(f"patched {P.name} ({', '.join(changes)})")
     return 0
 
 

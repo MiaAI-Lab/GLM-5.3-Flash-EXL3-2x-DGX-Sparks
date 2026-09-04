@@ -36,14 +36,19 @@ def main() -> int:
         env["GLM53_KV_COORDINATOR_PY"] = str(dst)
         subprocess.check_call([sys.executable, str(PATCH)], env=env)
         text = dst.read_text()
+        compile(text, str(dst), "exec")
         assert "[glm53-hybrid-apc]" in text
         assert text.count("[glm53-hybrid-apc]") >= 3
+        assert text.count("[glm53-hybrid-apc-fine]") == 1
         assert "def _glm53_is_draft_swa_spec(" in text
         assert "swa_ids or set(" in text
+        assert "for manager, group in zip(" in text
+        assert "group.kv_cache_spec.participates_in_prefix_caching" in text
         subprocess.check_call([sys.executable, str(PATCH)], env=env)
         assert dst.read_text().count("[glm53-hybrid-apc]") == text.count(
             "[glm53-hybrid-apc]"
         )
+        assert dst.read_text().count("[glm53-hybrid-apc-fine]") == 1
     print("hybrid prefix-hit patch OK")
     return 0
 

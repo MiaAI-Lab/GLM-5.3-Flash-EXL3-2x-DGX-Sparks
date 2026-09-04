@@ -111,7 +111,7 @@ same path as the compact-64 fp8 serve (not NVFP4 KV).
 | Worker | `WORKER_USER@WORKER_IP` (this kit: `zurih@10.0.0.2`), `--headless`, `glm53-exl3-worker` |
 | Fabric | CX7 QSFP: `enp1s0f1np1`/`rocep1s0f1` ↔ `enp1s0f0np0`/`rocep1s0f0`. Image NCCL (`USE_HOST_NCCL=0`) |
 | Attention | `FLASHINFER_MLA_SPARSE_SM120` (NoPE MLA padded into GLM_NSA 576-wide) |
-| KV | `--kv-cache-dtype fp8` → packed **`fp8_ds_mla`** (target). Draft DFlash2 KV is `auto`/bf16. Latest validated 7168/rightsize pool: **1,243,902** tokens / **1.24×** at 1M. `--enable-prefix-caching` (block-aligned hits; see Prefix caching) |
+| KV | `--kv-cache-dtype fp8` → packed **`fp8_ds_mla`** (target). Draft DFlash2 KV is `auto`/bf16. Latest validated 7168/rightsize pool: **1,243,902** tokens / **1.24×** at 1M. `--enable-prefix-caching` (64-token hash lookup; 3584-token physical attention pages; see Prefix caching) |
 | Experts | packed trellis + suh + svh + mcg, codebook MCG, **one fused `exllamav3_ext.exl3_moe` launch per layer** |
 | Dense / shared / attn / embed / lm_head | native (unquantized) |
 | Spec | **DFlash2 k=7** (`incoai/GLM-5.3-Flash-DFlash2`); draft KV `auto`/bf16, draft TP=2, FLASH_ATTN. Rollback `SPEC_METHOD=mtp` |
@@ -305,14 +305,15 @@ Keep **`SKIP_MM_PROFILING=1`** — a max-size image+video dummy profile OOMs thi
 **NVFP4 KV is not available here.** FlashInfer’s SM12x NVFP4 kernels are dense MHA,
 not sparse MLA. Do not confuse that with NVFP4 **weights** (`--moe-backend marlin`).
 
-## Prefix caching (this kit, 2026-08-30)
+## Prefix caching (this kit, 2026-09-04)
 
 `--enable-prefix-caching` is on. The OpenAI API is **stateless**: the client
 resends the full history each turn; vLLM hashes that prefix. Concurrent chats
 do **not** mix activations. `--max-num-seqs 4` is four **in-flight** generations,
-not four parked sessions. MLA `KpoolTailManager` disables **fine-grained**
-hits — only **block-aligned** tokens count (3584-token hybrid align).
-`KpoolTail` already opts out of the hybrid min (1-block circular scratch).
+not four parked sessions. Physical sparse-MLA attention pages remain 3584
+tokens, but reusable prefix hashes now match at the underlying **64-token**
+cache-block granularity. `KpoolTail` is 1-block circular scratch and already
+opts out of prefix caching.
 
 `dflash` is `use_eagle()`. GLM never sets `is_eagle_group` (that annotator is
 DeepseekV4-only), so stock HybridKVCacheCoordinator flagged **every** group.
@@ -323,7 +324,14 @@ does **not** let that group shrink the MLA+mamba hit. Mamba stays in the min
 (skipping a mamba miss is a correctness hole). Do not raise
 `--max-num-batched-tokens` to “fix” APC.
 
-**Historical pre-E2 receipts** (thinking off, temp 0, unique pads), 1M serve, **`MAX_NUM_BATCHED_TOKENS=2048`** (P1 keep; 3584/4096 reverted), **`DFLASH_DRAFT_TP=2`**. Idle 8k/16k/100k are the 2026-08-30 C4 keep A/B. 12k/256k/300k and the concurrent follow-ups are the prior TP=1 production ladder (chunk size does not change those hit counts). The MNBT=1024 baseline is `docs/cold-prefill.md`. Details: `docs/improve-prefill.md`.
+The same overlay also fixes the fine-grained eligibility check. Upstream
+included every manager in that check, so non-shareable `KpoolTailManager`
+vetoed 64-token lookup even though it never participates in prefix caching.
+The overlay ignores only managers whose KV spec explicitly opts out; MLA and
+Mamba still constrain the match. This changes lookup granularity, not the
+3584-token physical allocation geometry.
+
+**Historical pre-E2, pre-fine-grained receipts** (thinking off, temp 0, unique pads), 1M serve, **`MAX_NUM_BATCHED_TOKENS=2048`** (P1 keep; 3584/4096 reverted), **`DFLASH_DRAFT_TP=2`**. Idle 8k/16k/100k are the 2026-08-30 C4 keep A/B. 12k/256k/300k and the concurrent follow-ups are the prior TP=1 production ladder. The 3584-quantized hit counts below document the old behavior. The MNBT=1024 baseline is `docs/cold-prefill.md`. Details: `docs/improve-prefill.md`.
 
 | Turn | Hits | Compute | Prompt tok | TTFT | Prefill tok/s |
 |---|---:|---:|---:|---:|---:|
@@ -355,15 +363,19 @@ Re-measure (see also `tests/bench_prefix_cache.py`):
 
 ```bash
 # unique-content cold/warm pairs; hit ratio from the vllm:prefix_cache_*
-# counter deltas; hit_efficiency scores against the 3584-token page model
+# counter deltas; hit_efficiency scores against 64-token hash blocks
 python3 tests/bench_prefix_cache.py --runs 3
 ```
 
-Note the page math: hits are **block-aligned to the 3584-token hybrid MLA
-page**, so a warm prompt only ever reuses `floor(tokens / 3584) × 3584`
-tokens — the 7168 / 10752 / 14336 hit rows above are exactly 2 / 3 / 4 full
-pages. And since this build exposes **no cache-reset endpoint**, the bench
-salts its filler content per invocation so every cold is genuinely cold.
+The physical page is still 3584 tokens, while prefix hits are now rounded to
+64-token hash blocks. A 2026-09-04 direct append-only canary (44 unchanged
+tools, thinking off, private cache salt) measured a 24,208-token rendered LCP
+with **24,192 cached tokens** and 0.531 s TTFT; the old path reused 17,920 and
+needed 5.95 s on the equivalent short append. A separate 8.7k semantic pair
+returned the correct unique checksum cold and warm, with 99.44% cache hits and
+8.31 s → 1.15 s wall time. Since this build exposes **no cache-reset
+endpoint**, the bench salts its filler content per invocation so every cold is
+genuinely cold.
 
 ## Quick start (2× Spark)
 
