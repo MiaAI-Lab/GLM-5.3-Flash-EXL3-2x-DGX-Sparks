@@ -218,15 +218,21 @@ def test_min_exemption(ns):
     fn = ns["_glm53_min_exempt_group_ids"]
     groups = live_layout()
 
-    check(fn(groups, LIVE_EAGLE) == frozenset({6}), "live layout: gid 6 is min-exempt")
+    check(fn(groups, LIVE_EAGLE, True) == frozenset({6}), "live layout: gid 6 is min-exempt")
+    check(fn(groups, LIVE_EAGLE, False) == frozenset(), "base coordinator -> empty")
     # Upstream all-groups EAGLE fallback distinguishes nothing -> nothing exempt.
-    check(fn(groups, set(range(7))) == frozenset(), "all-groups fallback -> empty")
+    check(fn(groups, set(range(7)), True) == frozenset(), "all-groups fallback -> empty")
     # EAGLE flagged somewhere else -> the drafter is not the exempted group.
-    check(fn(groups, {0}) == frozenset(), "eagle on MLA -> empty")
-    check(fn(groups, {0, 6}) == frozenset(), "eagle superset -> empty")
-    check(fn(groups, set()) == frozenset(), "no eagle group -> empty")
+    check(fn(groups, {0}, True) == frozenset(), "eagle on MLA -> empty")
+    check(fn(groups, {0, 6}, True) == frozenset(), "eagle superset -> empty")
+    check(fn(groups, set(), True) == frozenset(), "no eagle group -> empty")
     # No exact SlidingWindowSpec at all (kpool tail subclass does not count).
-    check(fn(groups[:6], {1}) == frozenset(), "kpool tail is not a drafter group")
+    check(fn(groups[:6], {1}, True) == frozenset(), "kpool tail is not a drafter group")
+    unitary = [Group(uniform(SlidingWindowSpec()))]
+    check(
+        fn(unitary, {0}, False) == frozenset(),
+        "unitary SWA/EAGLE base coordinator -> empty",
+    )
     print("  min-exemption derivation OK")
 
 
@@ -290,21 +296,21 @@ def test_resolve(ns):
     groups = live_layout()
 
     # The deployment acceptance criterion: [None,...,None,0] on the head.
-    vec = fn(groups, LIVE_EAGLE, None, 0, ALIGN)
+    vec = fn(groups, LIVE_EAGLE, True, None, 0, ALIGN)
     check(vec == (None,) * 6 + (0,), f"proposed config vector wrong: {vec}")
     check(
         fmt(vec) == "[None,None,None,None,None,None,0]",
         f"log rendering must be greppable, got {fmt(vec)}",
     )
     # Auto mode reaches the same vector without the env var.
-    check(fn(groups, LIVE_EAGLE, None, None, ALIGN) == vec, "auto == explicit 0 here")
+    check(fn(groups, LIVE_EAGLE, True, None, None, ALIGN) == vec, "auto == explicit 0 here")
     # Codex #6: the global knob still being set must not silently win/lose.
     check(
-        fn(groups, LIVE_EAGLE, 14336, 0, ALIGN) == (14336,) * 6 + (0,),
+        fn(groups, LIVE_EAGLE, True, 14336, 0, ALIGN) == (14336,) * 6 + (0,),
         "a leftover global 14336 must show up in the vector, not be hidden",
     )
     check(
-        fmt(fn(groups, LIVE_EAGLE, 14336, None, ALIGN))
+        fmt(fn(groups, LIVE_EAGLE, True, 14336, None, ALIGN))
         == "[14336,14336,14336,14336,14336,14336,0]",
         "auto rule under a global 14336",
     )
@@ -312,17 +318,26 @@ def test_resolve(ns):
     # Fail closed: an explicit override with no EAGLE-exempt drafter group.
     for eagle in (set(range(7)), {0}, {0, 6}, set()):
         check(
-            raises(fn, groups, eagle, None, 0, ALIGN),
+            raises(fn, groups, eagle, True, None, 0, ALIGN),
             f"explicit SWA override must fail closed for eagle_group_ids={eagle}",
         )
         # ... but the automatic rule stays safe/inert there.
-        auto = fn(groups, eagle, None, None, ALIGN)
+        auto = fn(groups, eagle, True, None, None, ALIGN)
         check(auto == (None,) * 7, f"auto must be inert for eagle={eagle}, got {auto}")
 
     # A model with no sliding-window group at all: override refused, auto inert.
     plain = [Group(uniform(MLAAttentionSpec())), Group(MambaSpec())]
-    check(raises(fn, plain, {0, 1}, None, 3584, ALIGN), "no SWA group -> refuse")
-    check(fn(plain, {0, 1}, 3584, None, ALIGN) == (3584, 3584), "no SWA group -> auto")
+    check(raises(fn, plain, {0, 1}, True, None, 3584, ALIGN), "no SWA group -> refuse")
+    check(fn(plain, {0, 1}, True, 3584, None, ALIGN) == (3584, 3584), "no SWA group -> auto")
+    unitary = [Group(uniform(SlidingWindowSpec()))]
+    check(
+        raises(fn, unitary, {0}, False, None, 0, ALIGN),
+        "unitary SWA/EAGLE base coordinator -> refuse explicit override",
+    )
+    check(
+        fn(unitary, {0}, False, None, None, ALIGN) == (None,),
+        "unitary SWA/EAGLE base coordinator -> auto is inert",
+    )
     print("  resolved vector + fail-closed override OK")
 
 
@@ -476,7 +491,7 @@ def test_composition(pristine_src: Path, tmp: Path):
         ns = load_helpers(text)
         check(
             ns["_glm53_resolve_retention_by_group"](
-                live_layout(), LIVE_EAGLE, None, 0, ALIGN
+                live_layout(), LIVE_EAGLE, True, None, 0, ALIGN
             )
             == (None,) * 6 + (0,),
             f"{label}: resolved vector wrong after composition",

@@ -133,24 +133,28 @@ def _glm53_swa_retention_env(  # [glm53-apc-per-group]
 def _glm53_min_exempt_group_ids(  # [glm53-apc-per-group]
     kv_cache_groups,
     eagle_group_ids,
+    is_hybrid_coordinator,
 ):
-    """Group ids the coordinator itself treats as EAGLE-exempt drafter groups.
+    """Group ids a hybrid coordinator treats as EAGLE-exempt drafter groups.
 
-    Derived from coordinator state, never from a class name alone. A group
-    qualifies only when
+    Derived from coordinator type and state, never from a spec class name alone.
+    A group qualifies only when
 
-      (a) its inner spec is an *exact* ``SlidingWindowSpec`` (the DFlash2
+      (a) the active coordinator is ``HybridKVCacheCoordinator``,
+      (b) its inner spec is an *exact* ``SlidingWindowSpec`` (the DFlash2
           drafter; ``KpoolTailSpec`` subclasses it and never prefix-caches), and
-      (b) ``eagle_group_ids`` is *exactly* that set of drafter groups.
+      (c) ``eagle_group_ids`` is *exactly* that set of drafter groups.
 
-    (b) is the state overlay/patch_hybrid_prefix_hit.py establishes: it narrows
+    (c) is the state overlay/patch_hybrid_prefix_hit.py establishes: it narrows
     ``eagle_group_ids`` from the upstream all-groups fallback down to the drafter
     SWA groups and, driven by the same discriminator, makes those groups skip the
-    hybrid hit ``min()``. When ``eagle_group_ids`` is the undiscriminating
-    all-groups fallback (or is annotated over some other group), the equality
-    fails and this returns the empty set — so an explicit SWA override fails
-    closed instead of starving a group that still shortens the hybrid hit.
+    hybrid hit ``min()``. A base coordinator has no hybrid ``min()`` even when a
+    unitary SWA model happens to have matching EAGLE ids, so it is never exempt.
+    An undiscriminating all-groups fallback or an annotation over another group
+    also returns the empty set.
     """
+    if not is_hybrid_coordinator:
+        return frozenset()
     eagle = set(eagle_group_ids)
     swa = {
         i
@@ -207,6 +211,7 @@ def _glm53_retention_for_group(  # [glm53-apc-per-group]
 def _glm53_resolve_retention_by_group(  # [glm53-apc-per-group]
     kv_cache_groups,
     eagle_group_ids,
+    is_hybrid_coordinator,
     global_interval,
     swa_interval,
     alignment_tokens,
@@ -220,17 +225,17 @@ def _glm53_resolve_retention_by_group(  # [glm53-apc-per-group]
     like the knob worked) or apply it by class name (which would sparsify a group
     that is still inside the hit ``min()``).
     """
-    min_exempt = _glm53_min_exempt_group_ids(kv_cache_groups, eagle_group_ids)
+    min_exempt = _glm53_min_exempt_group_ids(
+        kv_cache_groups, eagle_group_ids, is_hybrid_coordinator
+    )
     if swa_interval is not None and not min_exempt:
         raise ValueError(
             "VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA is set "
-            f"({swa_interval}) but this coordinator has no EAGLE-exempt drafter "
-            "sliding-window group: eagle_group_ids="
-            f"{sorted(set(eagle_group_ids))} does not match the set of exact "
-            "SlidingWindowSpec groups. Applying it would sparsify a group that "
-            "still shortens the hybrid prefix-cache hit. Unset the variable (the "
-            "automatic rule is safe on any model) or apply "
-            "overlay/patch_hybrid_prefix_hit.py first."
+            f"({swa_interval}) but this coordinator has no hybrid-min-exempt drafter "
+            "sliding-window group: is_hybrid_coordinator="
+            f"{is_hybrid_coordinator}, eagle_group_ids={sorted(set(eagle_group_ids))}. "
+            "Applying it would sparsify a group that still determines prefix hits. "
+            "Unset the variable to use the safe automatic rule."
         )
     return tuple(
         _glm53_retention_for_group(
@@ -289,15 +294,19 @@ INIT_NEW = """        self.retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION
         # 33 of the 38 ids a cached 3584-token segment costs -- for a group that is
         # exempted from the hybrid hit min(). Give it its own sparse interval so
         # MLA and mamba can stay dense and keep the fine hit grid. The raw env
-        # value is validated unconditionally; it is applied only to the groups the
-        # coordinator itself flagged EAGLE-exempt, else boot fails.
+        # value is validated unconditionally; it is applied only when the hybrid
+        # coordinator itself flagged the drafter group EAGLE-exempt, else boot fails.
         _glm53_swa_interval = _glm53_swa_retention_env(self.scheduler_block_size)
+        _glm53_is_hybrid = isinstance(self, HybridKVCacheCoordinator)
         _glm53_min_exempt = _glm53_min_exempt_group_ids(
-            kv_cache_config.kv_cache_groups, self.eagle_group_ids
+            kv_cache_config.kv_cache_groups,
+            self.eagle_group_ids,
+            _glm53_is_hybrid,
         )
         self.retention_interval_by_group = _glm53_resolve_retention_by_group(
             kv_cache_config.kv_cache_groups,
             self.eagle_group_ids,
+            _glm53_is_hybrid,
             self.retention_interval,
             _glm53_swa_interval,
             self.scheduler_block_size,

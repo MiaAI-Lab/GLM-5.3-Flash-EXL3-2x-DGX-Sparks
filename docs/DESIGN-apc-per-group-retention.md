@@ -308,16 +308,17 @@ Two guards, both fail-closed at boot:
    integer, non-negative, a multiple of `scheduler_block_size` (so a retained tail lands on a real hit
    boundary), and `≤ 1,000,000`. A typo is a boot failure even on a model with no sliding-window group —
    it is never silently ignored.
-2. **It is applied only to a group the coordinator itself has singled out as the EAGLE-exempt drafter**,
+2. **It is applied only to a group a hybrid coordinator has singled out as the EAGLE-exempt drafter**,
    never to "anything whose class is called `SlidingWindowSpec`". `_glm53_min_exempt_group_ids` derives
-   that set from coordinator state: group `i` qualifies iff its inner spec is an *exact*
-   `SlidingWindowSpec` (never `KpoolTailSpec`, which subclasses it) **and** `eagle_group_ids` is
-   *exactly* the set of such groups. The second clause is the state `patch_hybrid_prefix_hit.py`
-   establishes (`C:121-133`): it narrows `eagle_group_ids` from the upstream all-groups fallback to the
-   drafter SWA groups, and — off the same discriminator — makes those groups skip the hybrid hit `min()`
-   (`C:856-868`). Under the undiscriminating all-groups fallback the equality fails, the exempt set is
-   empty, and setting the variable **raises at boot** rather than sparsifying a group that still shortens
-   every hit. The automatic rule (Tier 2) stays safe and inert in that case.
+   that set from coordinator type and state: the active coordinator must be a
+   `HybridKVCacheCoordinator`, group `i`'s inner spec must be an *exact* `SlidingWindowSpec` (never
+   `KpoolTailSpec`, which subclasses it), and `eagle_group_ids` must be *exactly* the set of such groups.
+   The last clause is the state `patch_hybrid_prefix_hit.py` establishes (`C:121-133`): it narrows
+   `eagle_group_ids` from the upstream all-groups fallback to the drafter SWA groups and, from the same
+   discriminator, makes those groups skip the hybrid hit `min()` (`C:856-868`). A base coordinator has
+   no hybrid `min()`, so even a unitary SWA/EAGLE layout is never exempt. Under either that layout or the
+   undiscriminating all-groups fallback, the exempt set is empty and setting the variable **raises at
+   boot** rather than sparsifying a hit-determining group. The automatic rule (Tier 2) stays inert.
 
    *Limit of the inference:* the equality is a proxy for "this group is out of the hit `min()`", not a
    reading of `find_longest_cache_hit`. If some future upstream annotates `is_eagle_group` on a genuine
@@ -381,7 +382,7 @@ capacity by coarsening only the group whose hit is thrown away — so capacity *
 | Draft acceptance dip on a diverging warm hit | Bounded, self-limiting (§5.3.4). Already happens today for any hit off the 14336 grid. Measured by the decode-rate control in §8. |
 | `SlidingWindowManager.find_longest_cache_hit` scan cost rises | It scans right→left over `max_length // 64` blocks and early-stops on a run of 33 (`S:944-970`; the `TODO` at `S:938-943` acknowledges the O(n) scan). With few cached drafter blocks a miss walks the full range: ~1250 dict lookups at an 80K candidate, ~3100 at 200K, once per admission. Sub-millisecond; note it, do not block on it. |
 | Mamba dense again ⇒ 4 ids/segment instead of 1 | Included in the §5.4 arithmetic (the 5). Still 7.6× cheaper than dense-with-drafter. |
-| A group getting `0` when it *is* in the `min()` | Guarded on **both** paths (Codex #4): explicit and automatic alike require min-exemption derived from `eagle_group_ids` (§5.2), and the automatic path additionally requires `window < alignment`. Mamba and MLA must never receive `0` — a missing mamba state is a correctness hole (vLLM #47491/#43090, quoted in `overlay/patch_hybrid_prefix_hit.py`). |
+| A group getting `0` when it *is* in the `min()` | Guarded on **both** paths (Codex #4): explicit and automatic alike require a hybrid coordinator plus min-exemption derived from `eagle_group_ids` (§5.2), and the automatic path additionally requires `window < alignment`. Mamba and MLA must never receive `0` — a missing mamba state is a correctness hole (vLLM #47491/#43090, quoted in `overlay/patch_hybrid_prefix_hit.py`). |
 | Env/validation drift | `_validate_prefix_cache_retention_interval` (`C:46-73`) must run per group; the patch adds a per-group validator over the *resolved* vector **and** validates the raw SWA value unconditionally (non-negative, scheduler-block multiple, ≤ 1,000,000). Both fail closed at boot. |
 | Stale global knob (Codex #6) | The launcher may still be exporting `GLM53_APC_RETENTION_INTERVAL=14336`, in which case the fine hit grid is *not* restored and the win is only capacity. This is why the acceptance criterion is the **resolved vector**, logged at init (§7), not the env var: the head must show `retention_by_group=[None,None,None,None,None,None,0]`. |
 | Drafter reads zeroed KV after a sparse miss (Codex #2) | Freshly allocated drafter blocks are zeroed worker-side (`S:90-93`), so they never carry another request's data — but "zeroed" is not *valid* KV for the preceding prompt tokens either. Target verification hides this in the output; it does not make it safe. Gated by the divergence-suffix + acceptance-rate probes in §8.2 (L5a/L5b), not by the equivalence gate. |
@@ -446,9 +447,10 @@ MARK/anchor, matching `overlay/patch_hybrid_prefix_hit.py`.
 * Launcher wiring (`start.sh:1080-1085`, already on this branch):
   `GLM53_APC_RETENTION_INTERVAL_SWA` → `VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA`, accepted
   values `""` (auto/Tier-2 rule), `0`, or a positive multiple of 3584 ≤ 1,000,000 (largest legal value
-  `999936 = 279 × 3584`); exported to **both** ranks. The launcher need not re-validate — the coordinator
-  validates the raw value unconditionally at boot and refuses to start on anything else — and the
-  resolved per-group vector is logged by the overlay itself.
+  `999936 = 279 × 3584`); exported to **both** ranks. Before a restart stops anything, the launcher
+  validates the numeric shape and rejects a non-empty value outside `SPEC_METHOD=dflash`. At boot the
+  coordinator validates the value against the live scheduler geometry and group layout, then logs the
+  resolved per-group vector.
 
 Recommended production setting after validation:
 ```
@@ -468,8 +470,9 @@ Runs anywhere with a copy of `kv_cache_coordinator.py`; no GPU, no vLLM import.
    `retention_interval_by_group[i]`, only the two `cache_blocks` loops enumerated, and an init
    `logger.info` carrying `retention_by_group=%s` fed from `_glm53_format_retention_vector`.
 3. **Min-exemption derivation** (Codex #4). `_glm53_min_exempt_group_ids` over the live seven-group
-   layout: `{6}` under `eagle_group_ids={6}`; **empty** under the upstream all-groups fallback, under
-   `{0}`, under the superset `{0,6}`, under `∅`, and when the only SWA-derived spec is `KpoolTailSpec`.
+   hybrid layout: `{6}` under `eagle_group_ids={6}`; **empty** for a base coordinator, under the upstream
+   all-groups fallback, under `{0}`, under the superset `{0,6}`, under `∅`, and when the only SWA-derived
+   spec is `KpoolTailSpec`. A unitary SWA/EAGLE base coordinator is explicitly not exempt.
 4. **Routing matrix.** `exec` the injected helpers in an isolated namespace with stub spec objects:
    exact-`SlidingWindowSpec` **and min-exempt** → SWA value; the same spec **not** min-exempt → global
    (the explicit path honours min-exemption, not just the class name); `KpoolTailSpec` (subclass) →
@@ -480,8 +483,8 @@ Runs anywhere with a copy of `kv_cache_coordinator.py`; no GPU, no vLLM import.
    returns `(None,)*6 + (0,)` and renders as `[None,None,None,None,None,None,0]` — the exact string the
    deployment acceptance criterion greps for. A leftover global `14336` shows up in the vector rather
    than being hidden (Codex #6). Setting the SWA value raises `ValueError` for every non-exempt
-   `eagle_group_ids` and for a model with no SWA group at all, while the automatic rule stays inert
-   there.
+   `eagle_group_ids`, for a model with no SWA group, and for a unitary SWA/EAGLE base coordinator, while
+   the automatic rule stays inert there.
 6. **Unconditional env validation** (Codex #5). `_glm53_swa_retention_env` accepts unset/empty/blank →
    auto, `0`, `14336`, and `999936` (= 279·3584, the largest legal value); rejects junk (`"nope"`,
    `"3584.0"`), negatives (`-1`, `-3584`), non-multiples (`1`, `3000`) and over-cap (`1003520`), and its
