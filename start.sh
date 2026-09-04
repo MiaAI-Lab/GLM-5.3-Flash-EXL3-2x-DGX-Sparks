@@ -404,6 +404,10 @@ validate_numeric_config() {
     # GLM53_APC_RETENTION_INTERVAL (global knob, PR #79) takes the same
     # validator wherever that launcher wiring is present.
     _glm53_validate_retention_interval GLM53_APC_RETENTION_INTERVAL_SWA "${GLM53_APC_RETENTION_INTERVAL_SWA-}" || return
+    if [ -n "${GLM53_APC_RETENTION_INTERVAL_SWA:-}" ] && [ "$SPEC_METHOD" != "dflash" ]; then
+        echo "GLM53_APC_RETENTION_INTERVAL_SWA requires SPEC_METHOD=dflash (got: $SPEC_METHOD)" >&2
+        return 2
+    fi
 }
 # GLM53 numeric config guard (end)
 

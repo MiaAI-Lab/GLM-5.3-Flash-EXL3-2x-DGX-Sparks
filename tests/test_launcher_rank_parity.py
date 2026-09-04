@@ -3,11 +3,13 @@
 
 Hardening asked for by the production-like tester run on PRs #83/#84:
 
-  A  GLM53_APC_RETENTION_INTERVAL_SWA guard -- "" (auto) or 0 pass, anything
-     else must be a positive multiple of 3584 no larger than 1,000,000; the
-     canonical value is what the ranks receive. Runs on the checkout whose
-     launcher actually forwards that knob to the containers (detected from
-     the `-e VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA=` line, not guessed).
+  A  GLM53_APC_RETENTION_INTERVAL_SWA guard -- "" (auto) passes in every
+     serving mode. Non-empty values require SPEC_METHOD=dflash; 0 passes and
+     anything else must be a positive multiple of 3584 no larger than
+     1,000,000. The canonical value is what the ranks receive. Runs on the
+     checkout whose launcher actually forwards that knob to the containers
+     (detected from the `-e VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA=` line,
+     not guessed).
   B  Pre-stop gate -- `./start.sh restart` with a bad knob, or with ANY
      mounted overlay missing / empty / unparseable / pointed at a different
      overlay, exits 2 BEFORE the first docker or ssh call, so healthy
@@ -151,7 +153,9 @@ def wires_fg() -> bool:
 # ------------------------------------------------------------------ part A --
 
 
-def run_retention_guard(value: str | None) -> tuple[int, str, str]:
+def run_retention_guard(
+    value: str | None, spec_method: str = "dflash"
+) -> tuple[int, str, str]:
     script = (
         guard_source()
         + "\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4\n"
@@ -161,7 +165,7 @@ def run_retention_guard(value: str | None) -> tuple[int, str, str]:
         + "validate_numeric_config || exit $?\n"
         + f'printf "%s\\n" "${{{SWA}-unset}}"\n'
     )
-    env = base_env()
+    env = base_env(SPEC_METHOD=spec_method)
     if value is not None:
         env[SWA] = value
     r = subprocess.run(["bash", "-c", script], text=True, capture_output=True, env=env)
@@ -212,6 +216,21 @@ def part_a() -> None:
             rc == 2 and SWA in err,
             f"A3 {SWA}={value!r} rejected with rc=2 and a named error (rc={rc} err={err[:60]!r})",
         )
+    for spec_method in ("mtp", "none"):
+        for value, expected in ((None, "unset"), ("", "")):
+            rc, out, err = run_retention_guard(value, spec_method)
+            check(
+                rc == 0 and out == expected,
+                f"A4 {SWA}={value!r} accepted with SPEC_METHOD={spec_method} "
+                f"(rc={rc} out={out!r} {err})",
+            )
+        for value in ("0", str(BLOCK)):
+            rc, out, err = run_retention_guard(value, spec_method)
+            check(
+                rc == 2 and SWA in err and "SPEC_METHOD=dflash" in err,
+                f"A4 {SWA}={value!r} rejected with SPEC_METHOD={spec_method} "
+                f"before launch (rc={rc} err={err[:80]!r})",
+            )
 
 
 # --------------------------------------------------------------- harness --
@@ -303,8 +322,8 @@ def longest_parseable_prefix(text: str) -> str | None:
 
 
 
-def control(h: Harness, label: str) -> None:
-    r = h.run("restart")
+def control(h: Harness, label: str, **env: str) -> None:
+    r = h.run("restart", **env)
     calls = h.host_touching_calls()
     head_rm = any(c[:3] == ["docker", "rm", "-f"] for c in calls)
     worker_rm = any(c[0] == "ssh" and "docker rm -f" in c[-1] for c in calls)
@@ -361,6 +380,13 @@ def part_b(h: Harness) -> None:
     # fine). Without this, every negative case below could pass for the
     # wrong reason (a guard that refuses everything).
     control(h, "B3 control: valid restart passes the gate and reaches stop on both ranks")
+    if wires_swa():
+        control(
+            h,
+            "B3 empty SWA override with MTP reaches stop on both ranks",
+            SPEC_METHOD="mtp",
+            **{SWA: ""},
+        )
 
     def fails_closed(label: str, **env: str) -> None:
         r = h.run("restart", **env)
@@ -374,6 +400,16 @@ def part_b(h: Harness) -> None:
     if wires_swa():
         fails_closed(f"B3 restart with {SWA}=3000 exits 2 with nothing stopped", **{SWA: "3000"})
         fails_closed(f"B3 restart with {SWA}=1003520 exits 2 with nothing stopped", **{SWA: "1003520"})
+        fails_closed(
+            f"B3 restart with MTP and {SWA}=0 exits 2 with nothing stopped",
+            SPEC_METHOD="mtp",
+            **{SWA: "0"},
+        )
+        fails_closed(
+            f"B3 restart without speculation and {SWA}={BLOCK} exits 2 with nothing stopped",
+            SPEC_METHOD="none",
+            **{SWA: str(BLOCK)},
+        )
     if wires_fg():
         fails_closed(f"B3 restart with {FG}=yes exits 2 with nothing stopped", **{FG: "yes"})
 

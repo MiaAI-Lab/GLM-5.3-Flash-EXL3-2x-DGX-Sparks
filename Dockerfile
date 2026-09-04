@@ -470,8 +470,9 @@ RUN python3 /opt/glm53/patch_glm_eagle3.py
 RUN python3 /opt/glm53/patch_glm5_drafter_group.py
 RUN python3 /opt/glm53/patch_suppress_stops_in_reasoning.py
 RUN python3 /opt/glm53/patch_scheduler_decode_floor.py
+RUN GLM53_KV_COORDINATOR_PY_SRC=/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_coordinator.py \
+    python3 /opt/glm53/test_apc_per_group_retention.py
 RUN python3 /opt/glm53/patch_hybrid_prefix_hit.py
-RUN GLM53_KV_COORDINATOR_PY_SRC=/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_coordinator.py GLM53_KV_COORDINATOR_PY_PRISTINE=/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_coordinator.py python3 /opt/glm53/test_apc_per_group_retention.py
 RUN python3 /opt/glm53/patch_apc_per_group_retention.py
 RUN python3 /opt/glm53/patch_xgrammar_termination.py
 RUN python3 /opt/glm53/patch_kpool_tail_slotmap.py
