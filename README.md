@@ -203,6 +203,7 @@ same path as the compact-64 fp8 serve (not NVFP4 KV).
 | Attention | `FLASHINFER_MLA_SPARSE_SM120` (NoPE MLA padded into GLM_NSA 576-wide) |
 | KV | `--kv-cache-dtype fp8` → packed **`fp8_ds_mla`** (target). Draft DFlash2 KV is `auto`/bf16. Latest validated 7168/rightsize pool: **1,243,902** tokens / **1.24×** at 1M. `--enable-prefix-caching` (block-aligned hits; see Prefix caching) |
 | Context | **850k** default since 2026-09-07 (E3; `EXL3_FAT_GROUPED=0` fits 1M again). KV pool is **~1M tokens** (measured 989,010 at 900k / util 0.85, and 1,023,626-1,084,615 at 900k / util 0.86; pool size varies ±0.4 GiB between identical boots, and the 850k default is not yet measured). Pre-E3 1M receipts: live pool **1,754,237** tokens (1.75×) / 690 GPU blocks / 18.67 GiB at MNBT 2048; latest validated 7168/rightsize E2 pool at 1M **1,243,902** tokens / **1.24×**. Pool size varies with MNBT, activation/graph reservations and hybrid block geometry. Padded slot-share is why 1M allocates; the old 900k cap was 1.95× on this same pool. Do not drop to 256k to “free” slots (hybrid mamba + DFlash window block-id demand is mostly length-independent) |
+
 | Experts | packed trellis + suh + svh + mcg, codebook MCG, **one fused `exllamav3_ext.exl3_moe` launch per layer** |
 | Dense / shared / attn / embed / lm_head | native (unquantized) |
 | Tools / reasoning | `--tool-call-parser glm47 --enable-auto-tool-choice --reasoning-parser glm45` |
@@ -461,14 +462,15 @@ toward 7168 if you need document-grade detail from single images, and watch
 **NVFP4 KV is not available here.** FlashInfer’s SM12x NVFP4 kernels are dense MHA,
 not sparse MLA. Do not confuse that with NVFP4 **weights** (`--moe-backend marlin`).
 
-## Prefix caching (this kit, 2026-08-30)
+## Prefix caching (this kit, 2026-09-04)
 
 `--enable-prefix-caching` is on. The OpenAI API is **stateless**: the client
 resends the full history each turn; vLLM hashes that prefix. Concurrent chats
 do **not** mix activations. `--max-num-seqs 4` is four **in-flight** generations,
-not four parked sessions. MLA `KpoolTailManager` disables **fine-grained**
-hits — only **block-aligned** tokens count (3584-token hybrid align).
-`KpoolTail` already opts out of the hybrid min (1-block circular scratch).
+not four parked sessions. Physical sparse-MLA attention pages remain 3584
+tokens, but reusable prefix hashes now match at the underlying **64-token**
+cache-block granularity. `KpoolTail` is 1-block circular scratch and already
+opts out of prefix caching.
 
 `dflash` is `use_eagle()`. GLM never sets `is_eagle_group` (that annotator is
 DeepseekV4-only), so stock HybridKVCacheCoordinator flagged **every** group.
@@ -479,7 +481,14 @@ does **not** let that group shrink the MLA+mamba hit. Mamba stays in the min
 (skipping a mamba miss is a correctness hole). Do not raise
 `--max-num-batched-tokens` to “fix” APC.
 
-**Historical pre-E2 receipts** (thinking off, temp 0, unique pads), 1M serve, **`MAX_NUM_BATCHED_TOKENS=2048`** (P1 keep; 3584/4096 reverted), **`DFLASH_DRAFT_TP=2`**. Idle 8k/16k/100k are the 2026-08-30 C4 keep A/B. 12k/256k/300k and the concurrent follow-ups are the prior TP=1 production ladder (chunk size does not change those hit counts). The MNBT=1024 baseline is `docs/cold-prefill.md`. Details: `docs/improve-prefill.md`.
+The same overlay also fixes the fine-grained eligibility check. Upstream
+included every manager in that check, so non-shareable `KpoolTailManager`
+vetoed 64-token lookup even though it never participates in prefix caching.
+The overlay ignores only managers whose KV spec explicitly opts out; MLA and
+Mamba still constrain the match. This changes lookup granularity, not the
+3584-token physical allocation geometry.
+
+**Historical pre-E2, pre-fine-grained receipts** (thinking off, temp 0, unique pads), 1M serve, **`MAX_NUM_BATCHED_TOKENS=2048`** (P1 keep; 3584/4096 reverted), **`DFLASH_DRAFT_TP=2`**. Idle 8k/16k/100k are the 2026-08-30 C4 keep A/B. 12k/256k/300k and the concurrent follow-ups are the prior TP=1 production ladder. The 3584-quantized hit counts below document the old behavior. The MNBT=1024 baseline is `docs/cold-prefill.md`. Details: `docs/improve-prefill.md`.
 
 | Turn | Hits | Compute | Prompt tok | TTFT | Prefill tok/s |
 |---|---:|---:|---:|---:|---:|
@@ -510,80 +519,19 @@ Re-measure (see also `tests/bench_prefix_cache.py`):
 
 ```bash
 # unique-content cold/warm pairs; hit ratio from the vllm:prefix_cache_*
-# counter deltas; hit_efficiency scores against the 3584-token page model
+# counter deltas; hit_efficiency scores against 64-token hash blocks
 python3 tests/bench_prefix_cache.py --runs 3
 ```
 
-Note the page math: hits are **block-aligned to the 3584-token hybrid MLA
-page**, so a warm prompt only ever reuses `floor(tokens / 3584) × 3584`
-tokens — the 7168 / 10752 / 14336 hit rows above are exactly 2 / 3 / 4 full
-pages. The bench POSTs `/reset_prefix_cache` between colds when that route is
-enabled (`GLM53_EXPOSE_CACHE_RESET=1`; opt-in, see the API surface notes
-below) and salts its filler content per invocation on top — repeated runs
-stay genuinely cold even with the reset route off.
+Note the page math: the physical hybrid page is still 3584 tokens, but with
+fine-grained manager eligibility prefix hits are rounded to 64-token hash
+blocks - the transient KpoolTail group no longer forces 3584-token alignment
+(see `overlay/patch_hybrid_prefix_hit.py`). The bench POSTs
+`/reset_prefix_cache` between colds when that route is enabled
+(`GLM53_EXPOSE_CACHE_RESET=1`; opt-in, see the API surface notes below) and
+salts its filler content per invocation on top - repeated runs stay genuinely
+cold even with the reset route off.
 
-## API surface notes (this build, 2026-08-29)
-
-Two things that cost us time (#31), documented so the next person does not
-chase ghosts:
-
-**Cache reset.** `overlay/patch_cache_reset.py` mounts the upstream dev
-cache router on the head API server, so a genuinely cold prefix cache no
-longer needs a container restart. It is **opt-in**: the patch is always
-applied, but the router is only attached when `GLM53_EXPOSE_CACHE_RESET=1`
-is exported for the launcher (default `0`):
-
-```bash
-GLM53_EXPOSE_CACHE_RESET=1 ./start.sh restart   # then:
-curl -s -X POST http://127.0.0.1:8888/reset_prefix_cache    # -> {"success": true}
-```
-
-It returns `{"success": bool}` and reports `false` while blocks are still
-held (running requests, in-flight async KV offload) — retry after they
-drain. Unset (the default) leaves the stock surface, where a restart is the
-only reset; `VLLM_SERVER_DEV_MODE=1` still mounts the whole dev set
-(`/sleep`, `/rlhf`, `/rpc`, `/server_info`) if ever needed.
-Auth caveat: the bearer middleware only guards `/v1`, `/v2`, `/inference`,
-`/cohere` (upstream `GUARDED_PREFIX`), so root-mounted routes — the stock
-`/tokenize` / `/detokenize` and the cache-reset routes — answer without the
-key even with `VLLM_API_KEY` set. That is why the exposure is opt-in: leave
-`GLM53_EXPOSE_CACHE_RESET` unset (0) on kits that serve untrusted clients.
-
-**Tokenize.** It is mounted at the **root** (`/v1/tokenize` is 404) and the
-request validates `prompt` (or `messages` for the chat shape), not `text`:
-
-```bash
-curl -s http://127.0.0.1:8888/tokenize -H 'Content-Type: application/json' \
-     -d '{"model": "GLM-5.3-Flash-EXL3", "prompt": "hello world"}'
-# -> {"count":2,"max_model_len":1000000,"tokens":[14978,1879],"token_strs":null}
-```
-
-### Optional sparse retention and DFlash replay
-
-`GLM53_APC_RETENTION_INTERVAL_SWA` controls the DFlash2 drafter separately
-from target retention. Empty inherits the global retention policy and keeps
-ordinary eviction priority. Explicit `0` retains reachable drafter boundaries
-and makes cached draft-only blocks lower priority than target cache blocks.
-Sparse target Mamba state also retains the prior replay boundary; a cached
-DFlash window is reused only after successful EAGLE verification, otherwise
-the request backs up to rebuild its window.
-
-**Sparse retention is not a general performance upgrade.** On one 2× Spark
-deployment, explicit global/SWA `0/0` retained four independent 210K histories
-for ~2.5 s revisits. In a matched 128K comparison, however, an edit at 90%
-took 112.49 s instead of 14.70 s, and a branch at 90% took 99.89 s instead of
-3.35 s: the sparse policy reused zero tokens where the old runtime reused
-111,104. All tested answers were correct. These are sequential histories,
-not four simultaneously active 210K streams.
-
-The global launcher spelling is `GLM53_APC_RETENTION_INTERVAL` (TP=2 only).
-Leave it unset for normal use; TP=4 rejects either retention override.
-
-Both retention knobs remain unset by default. Keep that default unless the
-tradeoff fits the workload. SWA-only sparse retention with a dense target is
-a separate configuration; the all-zero results do not qualify it. See the
-[protocol, raw measurements, and limitations](docs/apc-retention-qualification.md)
-before selecting a policy or a cache budget for another kit.
 
 ## Quick start (2× Spark)
 

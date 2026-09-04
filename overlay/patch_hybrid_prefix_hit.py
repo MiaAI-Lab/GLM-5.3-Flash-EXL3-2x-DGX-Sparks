@@ -11,16 +11,23 @@ Two coordinator bugs then throw the extra block away:
 2. The DFlash2 SlidingWindow group still participates in the hybrid min.
    After an EAGLE one-block pop it re-aligns down by a full 3584-token
    scheduler page (block=64, align=3584), which can wipe a longer MLA hit.
+3. Fine-grained 64-token Mamba/MLA hits are disabled when *any* manager with
+   a wider block lacks fine-grained lookup support. That check includes
+   KpoolTailManager even though KpoolTailSpec explicitly opts out of prefix
+   caching, so one transient scratch group forces every reusable group back
+   to 3584-token hit alignment.
 
 KpoolTail already opts out of prefix caching (1-block circular scratch).
 Mamba align-mode state *does* materialize at 896-token chunk ends, and
 3584 is a multiple of 896, so mamba must stay in the min — skipping a
 mamba miss is a correctness hole (vLLM #47491 / #43090).
 
-This patch: flag only exact SlidingWindowSpec groups as EAGLE, and do not
-let that drafter group shrink ``curr_hit_length``. If the drafter window
-does not cover the MLA/mamba hit, leave its blocks empty so a fresh
-window is allocated (zeros / new pages).
+This patch: flag only exact SlidingWindowSpec groups as EAGLE, do not let that
+drafter group shrink ``curr_hit_length``, and ignore non-participating cache
+groups when checking whether fine-grained lookup is safe. If the drafter
+window does not cover the MLA/mamba hit, leave its blocks empty so a fresh
+window is allocated (zeros / new pages). Wrong indexer tail state is fatal —
+we do not change KpoolTailManager or make its transient state shareable.
 
 KpoolTail is deliberately per-request scratch and cannot prefix-cache. A
 resumed request therefore starts with an empty indexer-tail ring. Replaying
@@ -45,6 +52,7 @@ P = Path(
     )
 )
 MARK = "# [glm53-hybrid-apc]"
+FINE_MARK = "# [glm53-hybrid-apc-fine]"
 DFLASH_REPLAY_MARK = "# [glm53-dflash-swa-replay-v1]"
 
 BASE_HELPER = '''
@@ -188,6 +196,27 @@ LOG_NEW = """        # Propagate the eagle bit to each manager (default to ``use
             ],
             sorted(self.eagle_group_ids),
         )
+"""
+
+FINE_OLD = """            unsupported_partial_hit_managers = {
+                type(manager).__name__
+                for manager in self.single_type_managers
+                if not manager.supports_fine_grained_hash_lookup
+                and manager.block_size != hash_block_size
+            }
+"""
+
+FINE_NEW = """            unsupported_partial_hit_managers = {  # [glm53-hybrid-apc-fine]
+                type(manager).__name__
+                for manager, group in zip(
+                    self.single_type_managers, kv_cache_config.kv_cache_groups
+                )
+                # A transient/non-shareable manager cannot constrain prefix-hit
+                # granularity because it never participates in the lookup.
+                if group.kv_cache_spec.participates_in_prefix_caching
+                and not manager.supports_fine_grained_hash_lookup
+                and manager.block_size != hash_block_size
+            }
 """
 
 INIT_OLD = """        self.verify_and_split_kv_cache_groups()
@@ -338,9 +367,17 @@ def main() -> int:
         text = replace_once(
             text, CONVERGE_OLD, CONVERGE_FINAL, "dflash-replay-clamp"
         )
+    if FINE_MARK not in text:
+        text = replace_once(
+            text,
+            FINE_OLD,
+            FINE_NEW,
+            "fine-grained manager eligibility",
+        )
     P.write_text(text)
     print(
-        f"patched {P.name} (hybrid APC + versioned DFlash SWA replay clamp)"
+        f"patched {P.name} (hybrid APC + DFlash SWA replay clamp + "
+        f"fine-grained manager eligibility)"
     )
     return 0
 
