@@ -330,7 +330,7 @@ _glm53_canonical_positive_int() {
 }
 
 # Prefix-cache retention intervals are token counts on the scheduler-block
-# grid. "" (unset = the overlay's automatic rule) and 0 pass as-is; anything
+# grid. "" (unset = inherit the global policy) and 0 pass as-is; anything
 # else must be a positive multiple of GLM53_APC_BLOCK_TOKENS no larger than
 # GLM53_APC_RETENTION_MAX -- the same rule overlay/patch_apc_per_group_retention.py
 # re-checks at coordinator init against the live scheduler_block_size. main()

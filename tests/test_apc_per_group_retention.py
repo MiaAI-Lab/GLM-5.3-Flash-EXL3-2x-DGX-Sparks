@@ -248,44 +248,30 @@ def test_routing(ns):
     for global_v in (None, 0, 3584, 14336):
         for swa_v in (0, 14336, 118272):
             check(
-                fn(drafter, global_v, swa_v, ALIGN, True) == swa_v,
+                fn(drafter, global_v, swa_v, True) == swa_v,
                 f"min-exempt drafter should take swa={swa_v} (global={global_v})",
             )
             # Codex #4: the explicit path must honour min-exemption too.
             check(
-                fn(drafter, global_v, swa_v, ALIGN, False) == global_v,
+                fn(drafter, global_v, swa_v, False) == global_v,
                 "a SWA group that is NOT min-exempt must keep the global value "
                 "even under an explicit override",
             )
             for other, name in ((tail, "kpool"), (mamba, "mamba"), (mla, "mla")):
                 check(
-                    fn(other, global_v, swa_v, ALIGN, False) == global_v,
+                    fn(other, global_v, swa_v, False) == global_v,
                     f"{name} must keep global={global_v}",
                 )
             # even if a non-drafter group were eagle-flagged
-            check(fn(mamba, global_v, swa_v, ALIGN, True) == global_v, "mamba/eagle")
-            check(fn(mla, global_v, swa_v, ALIGN, True) == global_v, "mla/eagle")
+            check(fn(mamba, global_v, swa_v, True) == global_v, "mamba/eagle")
+            check(fn(mla, global_v, swa_v, True) == global_v, "mla/eagle")
 
-    # Auto rule (swa=None): hit-inert min-exempt drafter -> 0; everything else global.
+    # Unset is deliberately inert, including for a min-exempt drafter.
     for global_v in (None, 14336):
-        check(fn(drafter, global_v, None, ALIGN, True) == 0, "auto: drafter -> 0")
-        check(
-            fn(drafter, global_v, None, ALIGN, False) == global_v,
-            "auto: non-exempt SWA keeps global (it is inside the hit min)",
-        )
-        # window >= alignment: a real SWA model, rule is inert
-        wide = uniform(SlidingWindowSpec(sliding_window=8192, block_size=64))
-        check(fn(wide, global_v, None, ALIGN, True) == global_v, "auto: wide window")
-        # window exactly at the alignment: not hit-inert, rule is inert
-        edge = uniform(SlidingWindowSpec(sliding_window=ALIGN, block_size=64))
-        check(fn(edge, global_v, None, ALIGN, True) == global_v, "auto: window == align")
-        # bare (non-uniform-wrapped) drafter spec is recognised too
-        bare = SlidingWindowSpec()
-        check(fn(bare, global_v, None, ALIGN, True) == 0, "auto: bare drafter spec")
-        # missing alignment -> conservative fall-through
-        check(fn(drafter, global_v, None, None, True) == global_v, "auto: no alignment")
-        check(fn(mamba, global_v, None, ALIGN, False) == global_v, "auto: mamba")
-        check(fn(tail, global_v, None, ALIGN, False) == global_v, "auto: kpool tail")
+        check(fn(drafter, global_v, None, True) == global_v, "unset: drafter")
+        check(fn(drafter, global_v, None, False) == global_v, "unset: non-exempt SWA")
+        check(fn(mamba, global_v, None, False) == global_v, "unset: mamba")
+        check(fn(tail, global_v, None, False) == global_v, "unset: kpool tail")
     print("  routing matrix OK")
 
 
@@ -296,47 +282,52 @@ def test_resolve(ns):
     groups = live_layout()
 
     # The deployment acceptance criterion: [None,...,None,0] on the head.
-    vec = fn(groups, LIVE_EAGLE, True, None, 0, ALIGN)
+    vec = fn(groups, LIVE_EAGLE, True, None, 0)
     check(vec == (None,) * 6 + (0,), f"proposed config vector wrong: {vec}")
     check(
         fmt(vec) == "[None,None,None,None,None,None,0]",
         f"log rendering must be greppable, got {fmt(vec)}",
     )
-    # Auto mode reaches the same vector without the env var.
-    check(fn(groups, LIVE_EAGLE, True, None, None, ALIGN) == vec, "auto == explicit 0 here")
+    # Unset keeps the global policy; sparse retention requires explicit opt-in.
+    check(
+        fn(groups, LIVE_EAGLE, True, None, None) == (None,) * 7,
+        "unset SWA interval must remain dense",
+    )
     # Codex #6: the global knob still being set must not silently win/lose.
     check(
-        fn(groups, LIVE_EAGLE, True, 14336, 0, ALIGN) == (14336,) * 6 + (0,),
+        fn(groups, LIVE_EAGLE, True, 14336, 0) == (14336,) * 6 + (0,),
         "a leftover global 14336 must show up in the vector, not be hidden",
     )
     check(
-        fmt(fn(groups, LIVE_EAGLE, True, 14336, None, ALIGN))
-        == "[14336,14336,14336,14336,14336,14336,0]",
-        "auto rule under a global 14336",
+        fmt(fn(groups, LIVE_EAGLE, True, 14336, None))
+        == "[14336,14336,14336,14336,14336,14336,14336]",
+        "unset SWA interval must inherit global 14336",
     )
 
     # Fail closed: an explicit override with no EAGLE-exempt drafter group.
     for eagle in (set(range(7)), {0}, {0, 6}, set()):
         check(
-            raises(fn, groups, eagle, True, None, 0, ALIGN),
+            raises(fn, groups, eagle, True, None, 0),
             f"explicit SWA override must fail closed for eagle_group_ids={eagle}",
         )
-        # ... but the automatic rule stays safe/inert there.
-        auto = fn(groups, eagle, True, None, None, ALIGN)
-        check(auto == (None,) * 7, f"auto must be inert for eagle={eagle}, got {auto}")
+        inherited = fn(groups, eagle, True, None, None)
+        check(
+            inherited == (None,) * 7,
+            f"unset must inherit global for eagle={eagle}, got {inherited}",
+        )
 
-    # A model with no sliding-window group at all: override refused, auto inert.
+    # A model with no sliding-window group at all: override refused, unset inert.
     plain = [Group(uniform(MLAAttentionSpec())), Group(MambaSpec())]
-    check(raises(fn, plain, {0, 1}, True, None, 3584, ALIGN), "no SWA group -> refuse")
-    check(fn(plain, {0, 1}, True, 3584, None, ALIGN) == (3584, 3584), "no SWA group -> auto")
+    check(raises(fn, plain, {0, 1}, True, None, 3584), "no SWA group -> refuse")
+    check(fn(plain, {0, 1}, True, 3584, None) == (3584, 3584), "no SWA group -> inherit")
     unitary = [Group(uniform(SlidingWindowSpec()))]
     check(
-        raises(fn, unitary, {0}, False, None, 0, ALIGN),
+        raises(fn, unitary, {0}, False, None, 0),
         "unitary SWA/EAGLE base coordinator -> refuse explicit override",
     )
     check(
-        fn(unitary, {0}, False, None, None, ALIGN) == (None,),
-        "unitary SWA/EAGLE base coordinator -> auto is inert",
+        fn(unitary, {0}, False, None, None) == (None,),
+        "unitary SWA/EAGLE base coordinator -> unset is inert",
     )
     print("  resolved vector + fail-closed override OK")
 
@@ -346,10 +337,10 @@ def test_env(ns):
     fn = ns["_glm53_swa_retention_env"]
     saved = os.environ.pop(SWA_ENV, None)
     try:
-        check(fn(ALIGN) is None, "unset -> None (auto)")
+        check(fn(ALIGN) is None, "unset -> None (inherit global)")
         for blank in ("", "  "):
             os.environ[SWA_ENV] = blank
-            check(fn(ALIGN) is None, f"{blank!r} -> None (auto)")
+            check(fn(ALIGN) is None, f"{blank!r} -> None (inherit global)")
         os.environ[SWA_ENV] = "0"
         check(fn(ALIGN) == 0, "'0' -> 0 (boundary-only)")
         os.environ[SWA_ENV] = " 14336 "
@@ -491,7 +482,7 @@ def test_composition(pristine_src: Path, tmp: Path):
         ns = load_helpers(text)
         check(
             ns["_glm53_resolve_retention_by_group"](
-                live_layout(), LIVE_EAGLE, True, None, 0, ALIGN
+                live_layout(), LIVE_EAGLE, True, None, 0
             )
             == (None,) * 6 + (0,),
             f"{label}: resolved vector wrong after composition",

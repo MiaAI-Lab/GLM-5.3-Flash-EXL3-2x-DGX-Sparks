@@ -3,7 +3,7 @@
 
 Hardening asked for by the production-like tester run on PRs #83/#84:
 
-  A  GLM53_APC_RETENTION_INTERVAL_SWA guard -- "" (auto) passes in every
+  A  GLM53_APC_RETENTION_INTERVAL_SWA guard -- "" (inherit global) passes in every
      serving mode. Non-empty values require SPEC_METHOD=dflash; 0 passes and
      anything else must be a positive multiple of 3584 no larger than
      1,000,000. The canonical value is what the ranks receive. Runs on the
@@ -598,7 +598,7 @@ def part_d(h: Harness) -> None:
 
     scenarios: list[tuple[str, dict[str, str]]] = [("defaults", {})]
     if wires_swa():
-        scenarios += [("SWA=14336", {SWA: "14336"}), ("SWA=0", {SWA: "0"}), ("SWA unset (auto)", {})]
+        scenarios += [("SWA=14336", {SWA: "14336"}), ("SWA=0", {SWA: "0"}), ("SWA unset", {})]
     if wires_fg():
         scenarios += [("FINEGRAINED=0", {FG: "0"}), ("FINEGRAINED=1", {FG: "1"})]
     if wires_swa() and wires_fg():
@@ -625,7 +625,7 @@ def part_d(h: Harness) -> None:
         if wires_swa() and not env.get(SWA, ""):
             check(
                 "VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA" not in head.env and "VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA" not in worker.env,
-                f"D2 [{label}] empty SWA (auto) is forwarded to neither rank",
+                f"D2 [{label}] empty SWA override is forwarded to neither rank",
             )
         mounted = {Path(p).name for p in head.mounts}
         check(len(head.mounts) >= 9, f"D3 [{label}] {len(head.mounts)} /opt/glm53 patch mounts, identical chain head-mount = scp source = worker-mount")

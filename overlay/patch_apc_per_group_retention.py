@@ -22,15 +22,15 @@ Problem (all line refs = the live fork, read-only):
   coarsens the mamba/MLA hit grid to that interval (subagent hits fell to 45%).
 
 This patch: make ``retention_interval`` per group. The EAGLE-exempt drafter group
-gets its own value (env VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA; default = auto =
-reachable boundaries only), every other group keeps the global one. No manager-side
-change is needed: SingleTypeKVCacheManager.cache_blocks already takes
+gets its own explicit value from ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA``;
+when the variable is unset, every group keeps the global value. No manager-side
+change is needed: ``SingleTypeKVCacheManager.cache_blocks`` already takes
 retention_interval per call (single_type_kv_cache_manager.py:429-434) and each
 reachable_block_mask already honours None / 0 / >0.
 
 Env contract:
   VLLM_PREFIX_CACHE_RETENTION_INTERVAL      unchanged (global; None = dense)
-  VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA  ""/unset = auto (see _glm53_retention_for_group)
+  VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA  ""/unset = inherit the global value
                                             "0"     = reachable boundaries only (recommended)
                                             N       = multiple of scheduler_block_size,
                                                       0 <= N <= 1,000,000
@@ -97,7 +97,7 @@ def _glm53_swa_retention_env(  # [glm53-apc-per-group]
 ):
     """Parse + validate VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA.
 
-    Unset/empty -> None (automatic rule). Otherwise the raw value is validated
+    Unset/empty -> None (inherit the global value). Otherwise the raw value is validated
     *unconditionally* — before any group is inspected — so a typo is a boot
     failure rather than a silent no-op on a model without a drafter group:
     integer, non-negative, a multiple of ``scheduler_block_size`` (the base
@@ -113,7 +113,7 @@ def _glm53_swa_retention_env(  # [glm53-apc-per-group]
     except ValueError:
         raise ValueError(
             f"{key} must be an integer (got {raw!r}); "
-            "leave it unset for the automatic rule."
+            "leave it unset to inherit the global value."
         ) from None
     if value < 0:
         raise ValueError(f"{key} ({value}) must be non-negative.")
@@ -170,42 +170,23 @@ def _glm53_retention_for_group(  # [glm53-apc-per-group]
     spec,
     global_interval,
     swa_interval,
-    alignment_tokens,
     is_min_exempt,
 ):
     """Prefix-cache retention interval for one KV cache group.
 
     Only a group that is both an exact ``SlidingWindowSpec`` **and** EAGLE/
     min-exempt per ``_glm53_min_exempt_group_ids`` diverges from the global
-    value. Both the explicit and the automatic path require min-exemption: a
-    sliding-window group that still participates in the hybrid hit ``min()``
-    must keep the global interval, because sparsifying it would shorten every
-    hit.
-
-    ``swa_interval is not None``  -> use it verbatim for min-exempt drafter
-        groups (operator override; the caller has already validated it and has
-        already refused the setting outright if no group is min-exempt).
-    ``swa_interval is None``      -> automatic rule: a *hit-inert* sliding-window
-        group -- window smaller than the cache-hit alignment (so its cached tail
-        can only ever be consulted at an alignment boundary) AND EAGLE/min-exempt
-        (so its hit length is discarded) -- costs
-        ``need = cdiv(window - 1, block) + 1`` ids per boundary (>= 2 for any
-        EAGLE group) while contributing nothing to hit length, so keep only the
-        reachable boundaries (0). Any other group falls through to the global
-        value, including a genuine SWA model whose window spans the alignment.
+    value. An unset SWA interval preserves the global policy. An explicit value
+    applies only to a min-exempt drafter group; the caller validates it and
+    refuses the setting outright if no such group exists.
     """
-    if not _glm53_is_draft_swa_spec(spec) or not is_min_exempt:
+    if (
+        swa_interval is None
+        or not _glm53_is_draft_swa_spec(spec)
+        or not is_min_exempt
+    ):
         return global_interval
-    if swa_interval is not None:
-        return swa_interval
-    inner = _glm53_inner_kv_spec(spec)
-    window = getattr(inner, "sliding_window", None)
-    block = getattr(inner, "block_size", None)
-    if not window or not block or not alignment_tokens:
-        return global_interval
-    if window >= alignment_tokens:
-        return global_interval
-    return 0
+    return swa_interval
 
 
 def _glm53_resolve_retention_by_group(  # [glm53-apc-per-group]
@@ -214,7 +195,6 @@ def _glm53_resolve_retention_by_group(  # [glm53-apc-per-group]
     is_hybrid_coordinator,
     global_interval,
     swa_interval,
-    alignment_tokens,
 ):
     """Resolve the per-group retention vector, failing closed on a misdirected
     SWA override.
@@ -235,14 +215,13 @@ def _glm53_resolve_retention_by_group(  # [glm53-apc-per-group]
             "sliding-window group: is_hybrid_coordinator="
             f"{is_hybrid_coordinator}, eagle_group_ids={sorted(set(eagle_group_ids))}. "
             "Applying it would sparsify a group that still determines prefix hits. "
-            "Unset the variable to use the safe automatic rule."
+            "Unset the variable to inherit the global retention policy."
         )
     return tuple(
         _glm53_retention_for_group(
             g.kv_cache_spec,
             global_interval,
             swa_interval,
-            alignment_tokens,
             i in min_exempt,
         )
         for i, g in enumerate(kv_cache_groups)
@@ -309,7 +288,6 @@ INIT_NEW = """        self.retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION
             _glm53_is_hybrid,
             self.retention_interval,
             _glm53_swa_interval,
-            self.scheduler_block_size,
         )
         _glm53_validate_retention_intervals(
             self.retention_interval_by_group, self.scheduler_block_size
