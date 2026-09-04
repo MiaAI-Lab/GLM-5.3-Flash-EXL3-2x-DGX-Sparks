@@ -17,14 +17,13 @@ Protocol (mirrors the kit README's prefix-caching table):
   repeated runs measure true colds instead of silently hitting the previous
   session's pages.
 
-Page granularity (IMPORTANT on this stack): the sparse-MLA KpoolTailManager
-only counts BLOCK-ALIGNED hits at the 3584-token hybrid MLA page. Hits are
-therefore `floor(tokens / 3584) * 3584` at best — a 6.8k-token conversation
-reuses ONE page (3584 tokens, ~53%), a 7.7k conversation TWO pages (~93%,
-the upstream headline). The summary reports `hit_efficiency` = measured hit
-tokens / full-page expectation so 1.0 means "the page model is respected".
-Size --prompt-tokens so the warm prompt crosses the next 3584 boundary
-(default 8400 -> ~8.1k measured tokens -> 2 pages).
+Lookup granularity (IMPORTANT on this stack): physical sparse-MLA attention
+pages remain 3584 tokens, but patch_hybrid_prefix_hit.py permits the reusable
+MLA/Mamba managers to match hashes at the underlying 64-token cache-block
+granularity. KpoolTailManager is transient and opts out of prefix caching, so
+it must not force reusable groups back to 3584-token matches. The summary
+reports `hit_efficiency` = measured hit tokens / the full-block expectation;
+1.0 means the fine-grained lookup is working.
 
 Usage:
   python3 tests/bench_prefix_cache.py --runs 3
@@ -57,8 +56,9 @@ RESULTS_DIR = Path(__file__).resolve().parents[1] / "results"
 # ~4.5 chars per token for the English filler (measured on this checkpoint's
 # tokenizer); the reported prompt_tokens comes from the server usage block.
 _CHARS_PER_TOKEN = 4.5
-# Hybrid MLA page: sparse-MLA prefix hits are block-aligned to this size.
-DEFAULT_PAGE_TOKENS = 3584
+# Hash/cache block used for fine-grained prefix lookup. The physical hybrid
+# attention page remains 3584 tokens; this is lookup, not allocation geometry.
+DEFAULT_PAGE_TOKENS = 64
 # Unique per invocation: this vLLM build offers no cache-reset endpoint, so
 # colds must not reuse pages cached by a previous bench session (observed
 # 2026-08-29: reruns reused chat content and "cold" TTFT dropped 10.3s -> 1.9s).
@@ -255,8 +255,8 @@ def run_pair(base_url: str, model: str, api_key: str, chat_index: int,
         if d_queries > 0:
             hit_ratio = round(d_hits / d_queries, 4)
 
-    # Page-model expectation: hits can only cover full 3584-token pages of the
-    # warm prompt. efficiency ~1.0 => the reuse mechanism works as designed.
+    # Lookup-block expectation: the final incomplete 64-token hash block is
+    # recomputed. efficiency ~1.0 => fine-grained reuse works as designed.
     warm_tokens = warm.get("prompt_tokens")
     hit_efficiency = None
     if hit_ratio is not None and warm_tokens:
@@ -291,10 +291,9 @@ def main() -> int:
     ap.add_argument("--runs", type=int, default=3, help="cold+warm pairs per chat")
     ap.add_argument("--concurrent", type=int, default=1, help="independent chats in flight")
     ap.add_argument("--prompt-tokens", type=int, default=8400,
-                    help="approx cold prompt size; keep the warm prompt above the "
-                         "next 3584-token page boundary (e.g. >7168) to see ~90%% hits")
+                    help="approximate cold prompt size")
     ap.add_argument("--page-tokens", type=int, default=DEFAULT_PAGE_TOKENS,
-                    help="hybrid MLA page size for the hit-efficiency model")
+                    help="prefix lookup block size for the hit-efficiency model")
     ap.add_argument("--reset-prefix-cache", action=argparse.BooleanOptionalAction, default=True,
                     help="POST /reset_prefix_cache before each cold turn (true colds)")
     ap.add_argument("--timeout", type=float, default=600.0)
