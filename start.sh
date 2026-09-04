@@ -435,7 +435,7 @@ validate_overlay_artifacts() {
         "$SCHED_PATCH_HOST|[glm53-decode-floor]|$main_guard"
         "$DRAFTER_PATCH_HOST|vllm/v1/core/kv_cache_utils.py|$main_guard"
         "$APC_PATCH_HOST|[glm53-hybrid-apc]|$main_guard"
-        "$PERGROUP_PATCH_HOST|[glm53-apc-per-group]|$main_guard"
+        "$PERGROUP_PATCH_HOST|glm53-apc-per-group-contract:explicit-v1|$main_guard"
         "$XGRAMMAR_PATCH_HOST|vllm/v1/structured_output/|$main_guard"
         "$KPOOL_TAIL_PATCH_HOST|[glm53-kpool-tail-slotmap]|$main_guard"
         "$SPINWAIT_PATCH_HOST|device_communicators/shm_broadcast.py|$main_guard"
@@ -482,6 +482,10 @@ validate_overlay_artifacts() {
     # layer map (the .pt payloads are ABLIT's own concern at hook time).
     if [ ! -f "$CHAT_TEMPLATE_HOST" ] || [ ! -r "$CHAT_TEMPLATE_HOST" ] || [ ! -s "$CHAT_TEMPLATE_HOST" ]; then
         echo "chat template missing, unreadable, empty or not a regular file: $CHAT_TEMPLATE_HOST" >&2
+        return 2
+    fi
+    if ! python3 -c 'from jinja2 import Environment; import sys; Environment(extensions=["jinja2.ext.loopcontrols"]).parse(open(sys.argv[1], encoding="utf-8").read())' "$CHAT_TEMPLATE_HOST" 2>/dev/null; then
+        echo "chat template is invalid or python3 cannot import jinja2: $CHAT_TEMPLATE_HOST" >&2
         return 2
     fi
     if ! python3 -c 'import json, sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$SCRIPT_DIR/ablit/LAYER_MAP.json" 2>/dev/null; then
@@ -1292,7 +1296,7 @@ launch_cluster() {
         -e "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=$CG_ESTIMATE"
     )
     # Per-group APC retention for the DFlash2 drafter SWA group (overlay patch_apc_per_group_retention.py).
-    # "" = auto (reachable boundaries only), 0 = boundaries only, N = multiple of the scheduler block.
+    # "" = inherit global, 0 = boundaries only, N = multiple of the scheduler block.
     if [ -n "${GLM53_APC_RETENTION_INTERVAL_SWA:-}" ]; then
         nccl_common+=(-e "VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA=$GLM53_APC_RETENTION_INTERVAL_SWA")
         log "drafter (SWA) prefix-cache retention interval: ${GLM53_APC_RETENTION_INTERVAL_SWA} (both ranks)"

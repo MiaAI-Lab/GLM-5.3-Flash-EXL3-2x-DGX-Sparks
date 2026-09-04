@@ -429,6 +429,19 @@ def part_b(h: Harness) -> None:
         fails_closed(f"B4 {var} empty file ({base})", **{var: str(empty)})
         fails_closed(f"B4 {var} whitespace-only file ({base}; pipefail-safe rc=2 diagnostic)", **{var: str(blank)})
         fails_closed(f"B4 {var} unparseable file ({base})", **{var: str(broken)})
+    if wires_swa():
+        current = h.repo / "overlay" / "patch_apc_per_group_retention.py"
+        stale = h.tmp / "stale_pergroup_patch.py"
+        stale.write_text(
+            current.read_text().replace(
+                "glm53-apc-per-group-contract:explicit-v1",
+                "glm53-apc-per-group-contract:auto-v0",
+            )
+        )
+        fails_closed(
+            "B4 stale per-group retention contract",
+            PERGROUP_PATCH_HOST=str(stale),
+        )
     # Truncation: for EVERY guarded Python artifact, the longest strict prefix
     # (by lines) that still parses. It carries the identity string and is
     # valid Python, so only the EOF-sentinel check can refuse it -- and must.
@@ -455,6 +468,12 @@ def part_b(h: Harness) -> None:
     (h.tmp / "template-dir").mkdir(exist_ok=True)
     (h.tmp / "template-dir" / "x").write_text("x")
     fails_closed("B4 CHAT_TEMPLATE_HOST is a (non-empty) directory", CHAT_TEMPLATE_HOST=str(h.tmp / "template-dir"))
+    invalid_template = h.tmp / "invalid-template.jinja"
+    invalid_template.write_text("{% if broken %}\n")
+    fails_closed(
+        "B4 CHAT_TEMPLATE_HOST has invalid Jinja syntax",
+        CHAT_TEMPLATE_HOST=str(invalid_template),
+    )
     layer_map = h.repo / "ablit" / "LAYER_MAP.json"
     saved = layer_map.read_text()
     layer_map.write_text("{ not json")

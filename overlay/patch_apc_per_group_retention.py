@@ -61,6 +61,7 @@ P = Path(
     )
 )
 MARK = "# [glm53-apc-per-group]"
+CONTRACT = "glm53-apc-per-group-contract:explicit-v1"
 
 # ---------------------------------------------------------------- anchors ----
 
