@@ -78,6 +78,32 @@ measured balance of prefill throughput and KV capacity. MNBT 7168 remains the
 current maintainer default for `MAX_NUM_SEQS=4`, pending a repeated same-kit
 comparison.
 
+## Additional prefill kernel and memory changes
+
+This branch adds M64 launch-bounded fat GEMMs, paired gate/up projections,
+fused clamped SwiGLU, double-buffered `cp.async` staging, and early release of
+consumed indexer logits. It keeps both K-loop barriers and does not add an
+allocator default or change weights, KV precision, or context limits.
+
+Fresh interleaved tests against upstream `3021f24` reduced the direct/scatter
+kernel-panel median from **9.453 to 7.158 ms** on the first GB10 and **9.205 to
+7.019 ms** on the second, about **24% lower kernel time**. Both GPUs reproduced
+**507.01 MiB lower peak temporary indexer allocation**, from 1045.26 to 538.25
+MiB. These are isolated measurements, not an overall inference speedup.
+
+Full GPU self-checks and sanitizer runs with explicit barrier-tracking capacity
+passed on both nodes, including nondefault-stream graph replay. One uncapped
+full-model panel passed with the existing kit opt-ins. The fixed-KV upstream
+control hit the memory guard before any measured samples completed, so this
+branch makes no end-to-end speedup claim and remains a draft.
+
+Stock workspace/spinwait startup failed the same KV-capacity check in both images.
+`rightsize` workspace and a numeric spinwait remain opt-ins, not shipped defaults.
+
+See [the validation protocol and results](docs/exl3-prefill-validation.md) for
+commands, all samples, sanitizer caveats and the current live-validation status.
+The PR77 production table above is unchanged.
+
 ## Quality (KLD)
 
 Independent teacher-logit panel from

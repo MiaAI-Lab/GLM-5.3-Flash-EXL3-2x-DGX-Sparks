@@ -12,7 +12,7 @@
 namespace {
 
 constexpr int FAT_THREADS = 256;
-constexpr int FAT_TILE_M = 128;
+constexpr int FAT_TILE_M = 64;
 constexpr int FAT_TILE_K = 16;
 constexpr int FAT_TILE_N = 128;
 constexpr int FAT_M_BLOCKS = FAT_TILE_M / 16;
@@ -52,8 +52,37 @@ __device__ inline void fat_had_ff_128(
     reinterpret_cast<float4*>(output_ptr)[lane] = v;
 }
 
-template <bool scatter>
-__global__ __launch_bounds__(FAT_THREADS)
+__device__ __forceinline__ void fat_stage_async(
+    const half* a, const uint16_t* packed, half* sh_a, uint16_t* sh_b,
+    int size_m, int size_k, int m_base, int k_block, int tiles_n, int n_base)
+{
+    int t = threadIdx.x;
+    if (t < FAT_TILE_M * 2)
+    {
+        int row = t / 2;
+        int col = t & 1;
+        int dst_col = col ^ ((row >> 2) & 1);
+        int4* dst = reinterpret_cast<int4*>(sh_a) + row * 2 + dst_col;
+        if (m_base + row < size_m)
+        {
+            const int4* src = reinterpret_cast<const int4*>(
+                a + (m_base + row) * size_k + k_block * FAT_TILE_K);
+            // Do not use cp_async_pred: upstream reports Blackwell miscompilation.
+            cp_async(dst, src + col);
+        }
+        else
+            *dst = make_int4(0, 0, 0, 0);
+    }
+    if (t < 64)
+    {
+        const int4* src = reinterpret_cast<const int4*>(
+            packed + (k_block * tiles_n + n_base / 16) * FAT_PACKED_WORDS);
+        cp_async(reinterpret_cast<int4*>(sh_b) + t, src + t);
+    }
+}
+
+template <bool scatter, bool pair = false>
+__global__ __launch_bounds__(FAT_THREADS, 4)
 void exl3_fat_gemm_kernel(
     const half* __restrict__ a,
     const uint16_t* __restrict__ packed,
@@ -63,12 +92,16 @@ void exl3_fat_gemm_kernel(
     const half* __restrict__ route_weight,
     int size_m,
     int size_k,
-    int size_n)
+    int size_n,
+    const uint16_t* __restrict__ packed_right,
+    const half* __restrict__ svh_right,
+    int left_n)
 {
     extern __shared__ unsigned char shared_raw[];
-    half* sh_a = reinterpret_cast<half*>(shared_raw);
-    uint16_t* sh_b = reinterpret_cast<uint16_t*>(sh_a + FAT_TILE_M * FAT_TILE_K);
-    float* sh_c = reinterpret_cast<float*>(sh_b + FAT_N_BLOCKS * FAT_PACKED_WORDS);
+    half* sh_a_buffers = reinterpret_cast<half*>(shared_raw);
+    uint16_t* sh_b_buffers = reinterpret_cast<uint16_t*>(
+        sh_a_buffers + 2 * FAT_TILE_M * FAT_TILE_K);
+    float* sh_c = reinterpret_cast<float*>(sh_b_buffers + 2 * FAT_N_BLOCKS * FAT_PACKED_WORDS);
 
     int t = threadIdx.x;
     int warp = t / 32;
@@ -76,6 +109,17 @@ void exl3_fat_gemm_kernel(
     int m_base = blockIdx.y * FAT_TILE_M;
     int n_base = blockIdx.x * FAT_TILE_N;
     int tiles_n = size_n / 16;
+    if constexpr (pair)
+    {
+        // Selection is uniform across the CTA; projections are 128-column aligned.
+        bool right = n_base >= left_n;
+        packed = right ? packed_right : packed;
+        svh = right ? svh_right : svh;
+        tiles_n = (right ? size_n - left_n : left_n) / 16;
+        int projection_offset = right ? left_n : 0;
+        n_base -= projection_offset;
+        out += projection_offset;
+    }
 
     FragC frag_c[FAT_M_BLOCKS][2];
     #pragma unroll
@@ -85,27 +129,25 @@ void exl3_fat_gemm_kernel(
         frag_c[mb][1] = {};
     }
 
+    if (size_k > 0)
+        fat_stage_async(a, packed, sh_a_buffers, sh_b_buffers,
+                        size_m, size_k, m_base, 0, tiles_n, n_base);
+    cp_async_fence();
     for (int k_block = 0; k_block < size_k / FAT_TILE_K; ++k_block)
     {
-        int a_row = t / 2;
-        int a_col8 = t & 1;
-        int a_dst_col8 = a_col8 ^ ((a_row >> 2) & 1);
-        int4 a_value = {};
-        if (m_base + a_row < size_m)
-        {
-            const int4* a_src = reinterpret_cast<const int4*>(
-                a + (m_base + a_row) * size_k + k_block * FAT_TILE_K);
-            a_value = a_src[a_col8];
-        }
-        reinterpret_cast<int4*>(sh_a)[a_row * 2 + a_dst_col8] = a_value;
-
-        if (t < 64)
-        {
-            const int4* b_src = reinterpret_cast<const int4*>(
-                packed + (k_block * tiles_n + n_base / 16) * FAT_PACKED_WORDS);
-            reinterpret_cast<int4*>(sh_b)[t] = b_src[t];
-        }
+        int buffer = k_block & 1;
+        half* sh_a = sh_a_buffers + buffer * FAT_TILE_M * FAT_TILE_K;
+        uint16_t* sh_b = sh_b_buffers + buffer * FAT_N_BLOCKS * FAT_PACKED_WORDS;
+        cp_async_wait<0>();
         __syncthreads();
+        if (k_block + 1 < size_k / FAT_TILE_K)
+        {
+            fat_stage_async(a, packed,
+                sh_a_buffers + (buffer ^ 1) * FAT_TILE_M * FAT_TILE_K,
+                sh_b_buffers + (buffer ^ 1) * FAT_N_BLOCKS * FAT_PACKED_WORDS,
+                size_m, size_k, m_base, k_block + 1, tiles_n, n_base);
+            cp_async_fence();
+        }
 
         FragB frag_b0;
         FragB frag_b1;
@@ -186,6 +228,41 @@ void exl3_fat_gemm_kernel(
     }
 }
 
+__device__ inline half fat_swiglu_value(float gate, float up, float limit)
+{
+    // Comparisons preserve NaNs, unlike fminf/fmaxf. Keep both float32
+    // multiplications separate, as in sigmoid(gate).mul_(gate).mul_(up).
+    gate = gate > limit ? limit : gate;
+    up = up > limit ? limit : up;
+    up = up < -limit ? -limit : up;
+    float sigmoid = __fdividef(1.0f, 1.0f + expf(-gate));
+    float value = __fmul_rn(__fmul_rn(sigmoid, gate), up);
+    return __float2half_rn(value);
+}
+
+__global__ void exl3_fat_swiglu_kernel(
+    const float4* __restrict__ input,
+    half2* __restrict__ output,
+    int64_t vectors,
+    int vectors_n,
+    float limit)
+{
+    for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < vectors; i += static_cast<int64_t>(blockDim.x) * gridDim.x)
+    {
+        int64_t row = i / vectors_n;
+        int col = i % vectors_n;
+        float4 gate = input[row * 2 * vectors_n + col];
+        float4 up = input[row * 2 * vectors_n + vectors_n + col];
+        output[i * 2] = __halves2half2(
+            fat_swiglu_value(gate.x, up.x, limit),
+            fat_swiglu_value(gate.y, up.y, limit));
+        output[i * 2 + 1] = __halves2half2(
+            fat_swiglu_value(gate.z, up.z, limit),
+            fat_swiglu_value(gate.w, up.w, limit));
+    }
+}
+
 void check_common(
     const at::Tensor& a,
     const at::Tensor& packed,
@@ -219,26 +296,31 @@ void check_common(
                 "exl3_fat_gemm tensors must share a device");
 }
 
-template <bool scatter>
+template <bool scatter, bool pair = false>
 void launch(
     at::Tensor a,
     at::Tensor packed,
     at::Tensor out,
     at::Tensor svh,
     at::Tensor token_idx,
-    at::Tensor route_weight)
+    at::Tensor route_weight,
+    at::Tensor packed_right = at::Tensor(),
+    at::Tensor svh_right = at::Tensor())
 {
     const at::cuda::OptionalCUDAGuard device_guard(a.device());
     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
     int size_m = static_cast<int>(a.size(0));
     int size_k = static_cast<int>(a.size(1));
-    int size_n = static_cast<int>(svh.numel());
+    int left_n = static_cast<int>(svh.numel());
+    int size_n = left_n;
+    if constexpr (pair) size_n += static_cast<int>(svh_right.numel());
     dim3 block(FAT_THREADS);
     dim3 grid(size_n / FAT_TILE_N, (size_m + FAT_TILE_M - 1) / FAT_TILE_M);
-    size_t shared = FAT_TILE_M * FAT_TILE_K * sizeof(half)
-                  + FAT_N_BLOCKS * FAT_PACKED_WORDS * sizeof(uint16_t)
+    size_t shared = 2 * FAT_TILE_M * FAT_TILE_K * sizeof(half)
+                  + 2 * FAT_N_BLOCKS * FAT_PACKED_WORDS * sizeof(uint16_t)
                   + 16 * FAT_TILE_N * sizeof(float);
-    exl3_fat_gemm_kernel<scatter><<<grid, block, shared, stream>>>(
+    if (size_m == 0) return;
+    exl3_fat_gemm_kernel<scatter, pair><<<grid, block, shared, stream>>>(
         reinterpret_cast<const half*>(a.data_ptr()),
         reinterpret_cast<const uint16_t*>(packed.data_ptr()),
         reinterpret_cast<float*>(out.data_ptr()),
@@ -247,7 +329,10 @@ void launch(
         scatter ? reinterpret_cast<const half*>(route_weight.data_ptr()) : nullptr,
         size_m,
         size_k,
-        size_n);
+        size_n,
+        pair ? reinterpret_cast<const uint16_t*>(packed_right.data_ptr()) : nullptr,
+        pair ? reinterpret_cast<const half*>(svh_right.data_ptr()) : nullptr,
+        left_n);
     cuda_check(cudaPeekAtLastError());
 }
 
@@ -266,6 +351,59 @@ void exl3_fat_gemm(
     TORCH_CHECK(out.size(0) == a.size(0) && out.size(1) == svh.numel(),
                 "out shape must be [M, N]");
     launch<false>(a, packed, out, svh, at::Tensor(), at::Tensor());
+}
+
+// Concatenated projections without materializing a combined packed weight tensor.
+void exl3_fat_gemm_pair(
+    at::Tensor a,
+    at::Tensor packed_left,
+    at::Tensor packed_right,
+    at::Tensor out,
+    at::Tensor svh_left,
+    at::Tensor svh_right,
+    int64_t K,
+    bool mcg,
+    bool mul1)
+{
+    check_common(a, packed_left, out, svh_left, K, mcg, mul1);
+    check_common(a, packed_right, out, svh_right, K, mcg, mul1);
+    TORCH_CHECK(out.size(0) == a.size(0)
+                && out.size(1) == svh_left.numel() + svh_right.numel(),
+                "pair out shape must be [M, N_left + N_right]");
+    launch<false, true>(a, packed_left, out, svh_left,
+                        at::Tensor(), at::Tensor(), packed_right, svh_right);
+}
+
+void exl3_fat_swiglu(at::Tensor input, at::Tensor output, double limit)
+{
+    TORCH_CHECK(input.is_cuda() && output.is_cuda() && input.device() == output.device(),
+                "fat SwiGLU tensors must share a CUDA device");
+    TORCH_CHECK(input.is_contiguous() && output.is_contiguous(),
+                "fat SwiGLU tensors must be contiguous");
+    TORCH_CHECK(input.scalar_type() == at::kFloat && output.scalar_type() == at::kHalf,
+                "fat SwiGLU requires float32 input and float16 output");
+    TORCH_CHECK(input.dim() == 2 && output.dim() == 2
+                && input.size(0) == output.size(0)
+                && input.size(1) == 2 * output.size(1)
+                && output.size(1) > 0 && output.size(1) % 4 == 0,
+                "fat SwiGLU expects [M, 2N] input and [M, N] output, N divisible by 4");
+    // This half-output fast path excludes limits that can amplify a flushed
+    // FP32 sigmoid subnormal into a representable FP16 result.
+    TORCH_CHECK(limit > 0 && limit <= 65504.0,
+                "fat SwiGLU clamp limit must be in (0, 65504]");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(input.data_ptr()) % alignof(float4) == 0
+                && reinterpret_cast<uintptr_t>(output.data_ptr()) % alignof(half2) == 0,
+                "fat SwiGLU input/output must be vector aligned");
+    int64_t vectors = output.numel() / 4;
+    if (vectors == 0) return;
+    const at::cuda::OptionalCUDAGuard device_guard(input.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+    int blocks = static_cast<int>(std::min<int64_t>((vectors + 255) / 256, 65535));
+    exl3_fat_swiglu_kernel<<<blocks, 256, 0, stream>>>(
+        reinterpret_cast<const float4*>(input.data_ptr()),
+        reinterpret_cast<half2*>(output.data_ptr()), vectors,
+        static_cast<int>(output.size(1) / 4), static_cast<float>(limit));
+    cuda_check(cudaPeekAtLastError());
 }
 
 void exl3_fat_gemm_scatter(

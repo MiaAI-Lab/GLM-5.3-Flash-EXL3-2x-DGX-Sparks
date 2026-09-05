@@ -1,0 +1,313 @@
+BEGIN extended-suite node=head tool=memcheck extra=
+========= COMPUTE-SANITIZER
+CHECK _check_fat_kernel
+exl3 E2 direct/scatter parity OK rows=145 direct=0.00002 scatter=0.00002 bound=6.91432
+CHECK _check_fat_pair
+exl3 pair projection parity OK, including production dimensions
+CHECK _check_fat_k_tails
+exl3 single/odd K tile direct and repeated scatter parity OK
+CHECK _check_fat_swiglu
+exl3 fused float32 SwiGLU to half parity and graph OK
+PASS nondefault-stream graph M=1 K=16 N=128
+PASS nondefault-stream graph M=65 K=80 N=256
+PASS nondefault-stream graph M=173 K=4096 N=1024
+PASS all fat numerical and stream/graph checks
+========= ERROR SUMMARY: 0 errors
+END extended-suite node=head tool=memcheck
+BEGIN extended-suite node=head tool=racecheck extra=
+========= COMPUTE-SANITIZER
+CHECK _check_fat_kernel
+exl3 E2 direct/scatter parity OK rows=145 direct=0.00003 scatter=0.00002 bound=7.51698
+CHECK _check_fat_pair
+exl3 pair projection parity OK, including production dimensions
+CHECK _check_fat_k_tails
+exl3 single/odd K tile direct and repeated scatter parity OK
+CHECK _check_fat_swiglu
+exl3 fused float32 SwiGLU to half parity and graph OK
+PASS nondefault-stream graph M=1 K=16 N=128
+PASS nondefault-stream graph M=65 K=80 N=256
+PASS nondefault-stream graph M=173 K=4096 N=1024
+PASS all fat numerical and stream/graph checks
+========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
+END extended-suite node=head tool=racecheck
+BEGIN extended-suite node=head tool=synccheck extra=--num-cuda-barriers 64
+========= COMPUTE-SANITIZER
+CHECK _check_fat_kernel
+exl3 E2 direct/scatter parity OK rows=145 direct=0.00002 scatter=0.00002 bound=6.54466
+CHECK _check_fat_pair
+exl3 pair projection parity OK, including production dimensions
+CHECK _check_fat_k_tails
+exl3 single/odd K tile direct and repeated scatter parity OK
+CHECK _check_fat_swiglu
+exl3 fused float32 SwiGLU to half parity and graph OK
+PASS nondefault-stream graph M=1 K=16 N=128
+PASS nondefault-stream graph M=65 K=80 N=256
+PASS nondefault-stream graph M=173 K=4096 N=1024
+PASS all fat numerical and stream/graph checks
+========= ERROR SUMMARY: 0 errors
+END extended-suite node=head tool=synccheck
+BEGIN panel node=head arm=reference utc=2026-09-05T12:07:11Z
+MODE validation=upstream panel=kernels projection_arm=not-requested
+DEVICE name='NVIDIA GB10' torch=2.13.0+cu130 cuda=13.0 seed=618
+SOURCE benchmark_sha256=100d4a8449c367a8aa654a70cc6cc65ff26117c3befad80776f658c4aec14f1d extension=/usr/local/lib/python3.12/dist-packages/exllamav3_ext.cpython-312-aarch64-linux-gnu.so extension_sha256=351420074d56061f132b722788b05da63b9ade68a4f0537bc0a5b18b01e51e0b
+ENV {}
+SELFCHECK path=/opt/glm53/test_exl3_overlay.py sha256=21af9e305adcfc0ad991ce82f5c7b4e23e8b59903e2a28b4956c1ef08065abe2
+exl3 E2 direct/scatter parity OK rows=145 direct=0.00002 scatter=0.00002 bound=7.53336
+CORRECTNESS validation=upstream checks=('_check_fat_kernel',) PASS
+SCOPE upstream baseline only; pair/SwiGLU/K-tail candidate checks not requested, NOT candidate validation
+KERNEL m=129 direct_ms=0.130528 scatter_ms=0.054784 pair_ms=0.185312
+KERNEL m=256 direct_ms=0.140032 scatter_ms=0.061312 pair_ms=0.201344
+KERNEL m=512 direct_ms=0.158752 scatter_ms=0.109568 pair_ms=0.268320
+KERNEL m=1024 direct_ms=0.402400 scatter_ms=0.244992 pair_ms=0.647392
+KERNEL m=2048 direct_ms=0.701472 scatter_ms=0.593696 pair_ms=1.295168
+KERNEL m=4096 direct_ms=1.383328 scatter_ms=1.136256 pair_ms=2.519584
+KERNEL m=7168 direct_ms=2.331616 scatter_ms=2.004576 pair_ms=4.336192
+METRIC fat_panel_ms=9.453312
+METRIC fat_row_geomean_us=0.706768
+METRIC m129_direct_ms=0.130528
+METRIC m129_scatter_ms=0.054784
+METRIC m256_direct_ms=0.140032
+METRIC m256_scatter_ms=0.061312
+METRIC m512_direct_ms=0.158752
+METRIC m512_scatter_ms=0.109568
+METRIC m1024_direct_ms=0.402400
+METRIC m1024_scatter_ms=0.244992
+METRIC m2048_direct_ms=0.701472
+METRIC m2048_scatter_ms=0.593696
+METRIC m4096_direct_ms=1.383328
+METRIC m4096_scatter_ms=1.136256
+METRIC m7168_direct_ms=2.331616
+METRIC m7168_scatter_ms=2.004576
+END panel node=head arm=reference
+BEGIN panel node=head arm=candidate utc=2026-09-05T12:07:20Z
+MODE validation=candidate panel=kernels projection_arm=not-requested
+DEVICE name='NVIDIA GB10' torch=2.13.0+cu130 cuda=13.0 seed=618
+SOURCE benchmark_sha256=100d4a8449c367a8aa654a70cc6cc65ff26117c3befad80776f658c4aec14f1d extension=/usr/local/lib/python3.12/dist-packages/exllamav3_ext.cpython-312-aarch64-linux-gnu.so extension_sha256=c4fd12698d73e8244fde7a93f152bf53d5e4ef3454b8906b8229f3a65915ee2a
+ENV {}
+SELFCHECK path=/opt/glm53/test_exl3_overlay.py sha256=988d474df276c309ccd922f3673c9d37f315a9a17dab344d777b6f0b14c42cab
+exl3 E2 direct/scatter parity OK rows=145 direct=0.00002 scatter=0.00002 bound=7.16455
+exl3 pair projection parity OK, including production dimensions
+exl3 fused float32 SwiGLU to half parity and graph OK
+exl3 single/odd K tile direct and repeated scatter parity OK
+CORRECTNESS validation=candidate checks=('_check_fat_kernel', '_check_fat_pair', '_check_fat_swiglu', '_check_fat_k_tails') PASS
+KERNEL m=129 direct_ms=0.069216 scatter_ms=0.036256 pair_ms=0.105472
+KERNEL m=256 direct_ms=0.094240 scatter_ms=0.048896 pair_ms=0.143136
+KERNEL m=512 direct_ms=0.141920 scatter_ms=0.084992 pair_ms=0.226912
+KERNEL m=1024 direct_ms=0.281408 scatter_ms=0.165472 pair_ms=0.446880
+KERNEL m=2048 direct_ms=0.527392 scatter_ms=0.439200 pair_ms=0.966592
+KERNEL m=4096 direct_ms=1.092480 scatter_ms=1.002816 pair_ms=2.095296
+KERNEL m=7168 direct_ms=1.783296 scatter_ms=1.642688 pair_ms=3.425984
+METRIC fat_panel_ms=7.410272
+METRIC fat_row_geomean_us=0.519435
+METRIC m129_direct_ms=0.069216
+METRIC m129_scatter_ms=0.036256
+METRIC m256_direct_ms=0.094240
+METRIC m256_scatter_ms=0.048896
+METRIC m512_direct_ms=0.141920
+METRIC m512_scatter_ms=0.084992
+METRIC m1024_direct_ms=0.281408
+METRIC m1024_scatter_ms=0.165472
+METRIC m2048_direct_ms=0.527392
+METRIC m2048_scatter_ms=0.439200
+METRIC m4096_direct_ms=1.092480
+METRIC m4096_scatter_ms=1.002816
+METRIC m7168_direct_ms=1.783296
+METRIC m7168_scatter_ms=1.642688
+END panel node=head arm=candidate
+BEGIN panel node=head arm=candidate utc=2026-09-05T12:07:29Z
+MODE validation=candidate panel=kernels projection_arm=not-requested
+DEVICE name='NVIDIA GB10' torch=2.13.0+cu130 cuda=13.0 seed=618
+SOURCE benchmark_sha256=100d4a8449c367a8aa654a70cc6cc65ff26117c3befad80776f658c4aec14f1d extension=/usr/local/lib/python3.12/dist-packages/exllamav3_ext.cpython-312-aarch64-linux-gnu.so extension_sha256=c4fd12698d73e8244fde7a93f152bf53d5e4ef3454b8906b8229f3a65915ee2a
+ENV {}
+SELFCHECK path=/opt/glm53/test_exl3_overlay.py sha256=988d474df276c309ccd922f3673c9d37f315a9a17dab344d777b6f0b14c42cab
+exl3 E2 direct/scatter parity OK rows=145 direct=0.00003 scatter=0.00002 bound=6.91977
+exl3 pair projection parity OK, including production dimensions
+exl3 fused float32 SwiGLU to half parity and graph OK
+exl3 single/odd K tile direct and repeated scatter parity OK
+CORRECTNESS validation=candidate checks=('_check_fat_kernel', '_check_fat_pair', '_check_fat_swiglu', '_check_fat_k_tails') PASS
+KERNEL m=129 direct_ms=0.069184 scatter_ms=0.036160 pair_ms=0.105344
+KERNEL m=256 direct_ms=0.095520 scatter_ms=0.049920 pair_ms=0.145440
+KERNEL m=512 direct_ms=0.141472 scatter_ms=0.084864 pair_ms=0.226336
+KERNEL m=1024 direct_ms=0.283584 scatter_ms=0.181952 pair_ms=0.465536
+KERNEL m=2048 direct_ms=0.507040 scatter_ms=0.435968 pair_ms=0.943008
+KERNEL m=4096 direct_ms=1.045376 scatter_ms=0.891744 pair_ms=1.937120
+KERNEL m=7168 direct_ms=1.739680 scatter_ms=1.595232 pair_ms=3.334912
+METRIC fat_panel_ms=7.157696
+METRIC fat_row_geomean_us=0.513751
+METRIC m129_direct_ms=0.069184
+METRIC m129_scatter_ms=0.036160
+METRIC m256_direct_ms=0.095520
+METRIC m256_scatter_ms=0.049920
+METRIC m512_direct_ms=0.141472
+METRIC m512_scatter_ms=0.084864
+METRIC m1024_direct_ms=0.283584
+METRIC m1024_scatter_ms=0.181952
+METRIC m2048_direct_ms=0.507040
+METRIC m2048_scatter_ms=0.435968
+METRIC m4096_direct_ms=1.045376
+METRIC m4096_scatter_ms=0.891744
+METRIC m7168_direct_ms=1.739680
+METRIC m7168_scatter_ms=1.595232
+END panel node=head arm=candidate
+BEGIN panel node=head arm=reference utc=2026-09-05T12:07:38Z
+MODE validation=upstream panel=kernels projection_arm=not-requested
+DEVICE name='NVIDIA GB10' torch=2.13.0+cu130 cuda=13.0 seed=618
+SOURCE benchmark_sha256=100d4a8449c367a8aa654a70cc6cc65ff26117c3befad80776f658c4aec14f1d extension=/usr/local/lib/python3.12/dist-packages/exllamav3_ext.cpython-312-aarch64-linux-gnu.so extension_sha256=351420074d56061f132b722788b05da63b9ade68a4f0537bc0a5b18b01e51e0b
+ENV {}
+SELFCHECK path=/opt/glm53/test_exl3_overlay.py sha256=21af9e305adcfc0ad991ce82f5c7b4e23e8b59903e2a28b4956c1ef08065abe2
+exl3 E2 direct/scatter parity OK rows=145 direct=0.00003 scatter=0.00002 bound=6.77463
+CORRECTNESS validation=upstream checks=('_check_fat_kernel',) PASS
+SCOPE upstream baseline only; pair/SwiGLU/K-tail candidate checks not requested, NOT candidate validation
+KERNEL m=129 direct_ms=0.131200 scatter_ms=0.054912 pair_ms=0.186112
+KERNEL m=256 direct_ms=0.183712 scatter_ms=0.062176 pair_ms=0.245888
+KERNEL m=512 direct_ms=0.161472 scatter_ms=0.111584 pair_ms=0.273056
+KERNEL m=1024 direct_ms=0.408288 scatter_ms=0.231072 pair_ms=0.639360
+KERNEL m=2048 direct_ms=0.700000 scatter_ms=0.679520 pair_ms=1.379520
+KERNEL m=4096 direct_ms=1.399840 scatter_ms=1.143840 pair_ms=2.543680
+KERNEL m=7168 direct_ms=2.346304 scatter_ms=1.980224 pair_ms=4.326528
+METRIC fat_panel_ms=9.594144
+METRIC fat_row_geomean_us=0.735566
+METRIC m129_direct_ms=0.131200
+METRIC m129_scatter_ms=0.054912
+METRIC m256_direct_ms=0.183712
+METRIC m256_scatter_ms=0.062176
+METRIC m512_direct_ms=0.161472
+METRIC m512_scatter_ms=0.111584
+METRIC m1024_direct_ms=0.408288
+METRIC m1024_scatter_ms=0.231072
+METRIC m2048_direct_ms=0.700000
+METRIC m2048_scatter_ms=0.679520
+METRIC m4096_direct_ms=1.399840
+METRIC m4096_scatter_ms=1.143840
+METRIC m7168_direct_ms=2.346304
+METRIC m7168_scatter_ms=1.980224
+END panel node=head arm=reference
+BEGIN panel node=head arm=reference utc=2026-09-05T12:07:47Z
+MODE validation=upstream panel=kernels projection_arm=not-requested
+DEVICE name='NVIDIA GB10' torch=2.13.0+cu130 cuda=13.0 seed=618
+SOURCE benchmark_sha256=100d4a8449c367a8aa654a70cc6cc65ff26117c3befad80776f658c4aec14f1d extension=/usr/local/lib/python3.12/dist-packages/exllamav3_ext.cpython-312-aarch64-linux-gnu.so extension_sha256=351420074d56061f132b722788b05da63b9ade68a4f0537bc0a5b18b01e51e0b
+ENV {}
+SELFCHECK path=/opt/glm53/test_exl3_overlay.py sha256=21af9e305adcfc0ad991ce82f5c7b4e23e8b59903e2a28b4956c1ef08065abe2
+exl3 E2 direct/scatter parity OK rows=145 direct=0.00002 scatter=0.00002 bound=7.13576
+CORRECTNESS validation=upstream checks=('_check_fat_kernel',) PASS
+SCOPE upstream baseline only; pair/SwiGLU/K-tail candidate checks not requested, NOT candidate validation
+KERNEL m=129 direct_ms=0.131168 scatter_ms=0.054976 pair_ms=0.186144
+KERNEL m=256 direct_ms=0.131968 scatter_ms=0.061088 pair_ms=0.193056
+KERNEL m=512 direct_ms=0.157184 scatter_ms=0.115808 pair_ms=0.272992
+KERNEL m=1024 direct_ms=0.392256 scatter_ms=0.243456 pair_ms=0.635712
+KERNEL m=2048 direct_ms=0.672640 scatter_ms=0.574560 pair_ms=1.247200
+KERNEL m=4096 direct_ms=1.375872 scatter_ms=1.100608 pair_ms=2.476480
+KERNEL m=7168 direct_ms=2.289088 scatter_ms=1.943136 pair_ms=4.232224
+METRIC fat_panel_ms=9.243808
+METRIC fat_row_geomean_us=0.694977
+METRIC m129_direct_ms=0.131168
+METRIC m129_scatter_ms=0.054976
+METRIC m256_direct_ms=0.131968
+METRIC m256_scatter_ms=0.061088
+METRIC m512_direct_ms=0.157184
+METRIC m512_scatter_ms=0.115808
+METRIC m1024_direct_ms=0.392256
+METRIC m1024_scatter_ms=0.243456
+METRIC m2048_direct_ms=0.672640
+METRIC m2048_scatter_ms=0.574560
+METRIC m4096_direct_ms=1.375872
+METRIC m4096_scatter_ms=1.100608
+METRIC m7168_direct_ms=2.289088
+METRIC m7168_scatter_ms=1.943136
+END panel node=head arm=reference
+BEGIN panel node=head arm=candidate utc=2026-09-05T12:07:55Z
+MODE validation=candidate panel=kernels projection_arm=not-requested
+DEVICE name='NVIDIA GB10' torch=2.13.0+cu130 cuda=13.0 seed=618
+SOURCE benchmark_sha256=100d4a8449c367a8aa654a70cc6cc65ff26117c3befad80776f658c4aec14f1d extension=/usr/local/lib/python3.12/dist-packages/exllamav3_ext.cpython-312-aarch64-linux-gnu.so extension_sha256=c4fd12698d73e8244fde7a93f152bf53d5e4ef3454b8906b8229f3a65915ee2a
+ENV {}
+SELFCHECK path=/opt/glm53/test_exl3_overlay.py sha256=988d474df276c309ccd922f3673c9d37f315a9a17dab344d777b6f0b14c42cab
+exl3 E2 direct/scatter parity OK rows=145 direct=0.00002 scatter=0.00002 bound=7.76341
+exl3 pair projection parity OK, including production dimensions
+exl3 fused float32 SwiGLU to half parity and graph OK
+exl3 single/odd K tile direct and repeated scatter parity OK
+CORRECTNESS validation=candidate checks=('_check_fat_kernel', '_check_fat_pair', '_check_fat_swiglu', '_check_fat_k_tails') PASS
+KERNEL m=129 direct_ms=0.069792 scatter_ms=0.036672 pair_ms=0.106464
+KERNEL m=256 direct_ms=0.095008 scatter_ms=0.048928 pair_ms=0.143936
+KERNEL m=512 direct_ms=0.159584 scatter_ms=0.084768 pair_ms=0.244352
+KERNEL m=1024 direct_ms=0.286624 scatter_ms=0.145120 pair_ms=0.431744
+KERNEL m=2048 direct_ms=0.638112 scatter_ms=0.419520 pair_ms=1.057632
+KERNEL m=4096 direct_ms=1.025408 scatter_ms=0.849440 pair_ms=1.874848
+KERNEL m=7168 direct_ms=1.710656 scatter_ms=1.545920 pair_ms=3.256576
+METRIC fat_panel_ms=7.115552
+METRIC fat_row_geomean_us=0.518150
+METRIC m129_direct_ms=0.069792
+METRIC m129_scatter_ms=0.036672
+METRIC m256_direct_ms=0.095008
+METRIC m256_scatter_ms=0.048928
+METRIC m512_direct_ms=0.159584
+METRIC m512_scatter_ms=0.084768
+METRIC m1024_direct_ms=0.286624
+METRIC m1024_scatter_ms=0.145120
+METRIC m2048_direct_ms=0.638112
+METRIC m2048_scatter_ms=0.419520
+METRIC m4096_direct_ms=1.025408
+METRIC m4096_scatter_ms=0.849440
+METRIC m7168_direct_ms=1.710656
+METRIC m7168_scatter_ms=1.545920
+END panel node=head arm=candidate
+SOURCE path=/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/sparse_attn_indexer_kpool.py sha256=68154975f0ceb3066c3eaaeff7c5ab8863524f26f30265441d72b153c41e8127 loop_ast_sha256=b646b4489502403646d31f951fa63475c5a8bedb9bb534998248bbe46422b0e5 lifetime_patch_present=True
+BENCHMARK sha256=0a17f780cb79768fec1a92edf26d1d01c0b7a9496aac05c6dd912a9226b73719
+ENV {}
+DEVICE name='NVIDIA GB10' torch=2.13.0+cu130 cuda=13.0 seed=20260719 repeats=3
+SCOPE actual installed prefill chunk loop; staged FP8 cache; allocation-peak/correctness screen, NOT end-to-end performance. Units: *_mb are MiB (2**20 bytes); timing includes host loop and final CUDA sync.
+INFO 09-05 12:08:14 [deep_gemm.py:191] deep_gemm not found in site-packages, trying vendored vllm.third_party.deep_gemm
+CORRECTNESS M=1024,N=32768 warmup: PASS row-sorted (same token multiset; top-k ordering differs); rows=3072 selected_entries=6283776
+SAMPLE M=1024,N=32768 path=candidate repeat=0 baseline_bytes=89083904 peak_delta_bytes=153096192 loop_ms=12.559143
+CORRECTNESS M=1024,N=32768 candidate repeat=0: PASS row-sorted (same token multiset; top-k ordering differs); rows=3072 selected_entries=6283776
+SAMPLE M=1024,N=32768 path=reference repeat=0 baseline_bytes=89083904 peak_delta_bytes=287313920 loop_ms=12.856230
+CORRECTNESS M=1024,N=32768 reference repeat=0: PASS row-sorted (same token multiset; top-k ordering differs); rows=3072 selected_entries=6283776
+SAMPLE M=1024,N=32768 path=reference repeat=1 baseline_bytes=89083904 peak_delta_bytes=287313920 loop_ms=12.281175
+CORRECTNESS M=1024,N=32768 reference repeat=1: PASS row-sorted (same token multiset; top-k ordering differs); rows=3072 selected_entries=6283776
+SAMPLE M=1024,N=32768 path=candidate repeat=1 baseline_bytes=89083904 peak_delta_bytes=153096192 loop_ms=12.850295
+CORRECTNESS M=1024,N=32768 candidate repeat=1: PASS row-sorted (same token multiset; top-k ordering differs); rows=3072 selected_entries=6283776
+SAMPLE M=1024,N=32768 path=candidate repeat=2 baseline_bytes=89083904 peak_delta_bytes=153096192 loop_ms=12.391319
+CORRECTNESS M=1024,N=32768 candidate repeat=2: PASS row-sorted (same token multiset; top-k ordering differs); rows=3072 selected_entries=6283776
+SAMPLE M=1024,N=32768 path=reference repeat=2 baseline_bytes=89083904 peak_delta_bytes=287313920 loop_ms=12.409575
+CORRECTNESS M=1024,N=32768 reference repeat=2: PASS row-sorted (same token multiset; top-k ordering differs); rows=3072 selected_entries=6283776
+CASE M=1024,N=32768 candidate_peak_mb=146.003906 reference_peak_mb=274.003906 saved_mb=128.000000 loop_ms=12.559143 reference_loop_ms=12.409575
+CORRECTNESS M=1777,N=75008 warmup: PASS row-sorted (same token multiset; top-k ordering differs); rows=5331 selected_entries=10904561
+SAMPLE M=1777,N=75008 path=candidate repeat=0 baseline_bytes=132313600 peak_delta_bytes=564392448 loop_ms=53.696074
+CORRECTNESS M=1777,N=75008 candidate repeat=0: PASS row-sorted (same token multiset; top-k ordering differs); rows=5331 selected_entries=10904561
+SAMPLE M=1777,N=75008 path=reference repeat=0 baseline_bytes=132313600 peak_delta_bytes=1096030720 loop_ms=54.004298
+CORRECTNESS M=1777,N=75008 reference repeat=0: PASS row-sorted (same token multiset; top-k ordering differs); rows=5331 selected_entries=10904561
+SAMPLE M=1777,N=75008 path=reference repeat=1 baseline_bytes=132313600 peak_delta_bytes=1096030720 loop_ms=53.289626
+DIAGNOSTIC M=1777,N=75008 reference repeat=1: differing_rows=[1333]
+DIAGNOSTIC M=1777,N=75008 reference repeat=1 row=1333 pool_range=[0,74008) retained_pools=511 actual_only=[39500] reference_only=[42029]
+DIAGNOSTIC M=1777,N=75008 reference repeat=1 actual_only_scores=[{'pool': 39500, 'value': 0.40018224716186523, 'hex': '0x1.99c9600000000p-2', 'fp32_bits': '0x3ecce4b0'}]
+DIAGNOSTIC M=1777,N=75008 reference repeat=1 reference_only_scores=[{'pool': 42029, 'value': 0.40018224716186523, 'hex': '0x1.99c9600000000p-2', 'fp32_bits': '0x3ecce4b0'}]
+DIAGNOSTIC M=1777,N=75008 reference repeat=1 actual min_selected=0.40018224716186523 max_omitted=0.40018224716186523 boundary=0.40018224716186523 valid_retained_boundary=True
+DIAGNOSTIC M=1777,N=75008 reference repeat=1 reference min_selected=0.40018224716186523 max_omitted=0.40018224716186523 boundary=0.40018224716186523 valid_retained_boundary=True
+DIAGNOSTIC M=1777,N=75008 reference repeat=1 row=1333: PROVEN exact-score retained-boundary tie; valid unique pools, equal cardinality, identical tail, real expansion parity
+CORRECTNESS M=1777,N=75008 reference repeat=1: PASS proven exact-score boundary ties (1 rows); rows=5331 selected_entries=10904561
+SAMPLE M=1777,N=75008 path=candidate repeat=1 baseline_bytes=132313600 peak_delta_bytes=564392448 loop_ms=54.348681
+CORRECTNESS M=1777,N=75008 candidate repeat=1: PASS row-sorted (same token multiset; top-k ordering differs); rows=5331 selected_entries=10904561
+SAMPLE M=1777,N=75008 path=candidate repeat=2 baseline_bytes=132313600 peak_delta_bytes=564392448 loop_ms=54.064010
+CORRECTNESS M=1777,N=75008 candidate repeat=2: PASS row-sorted (same token multiset; top-k ordering differs); rows=5331 selected_entries=10904561
+SAMPLE M=1777,N=75008 path=reference repeat=2 baseline_bytes=132313600 peak_delta_bytes=1096030720 loop_ms=54.063930
+CORRECTNESS M=1777,N=75008 reference repeat=2: PASS row-sorted (same token multiset; top-k ordering differs); rows=5331 selected_entries=10904561
+CASE M=1777,N=75008 candidate_peak_mb=538.246582 reference_peak_mb=1045.256348 saved_mb=507.009766 loop_ms=54.064010 reference_loop_ms=54.004298
+CORRECTNESS M=769,N=49152 warmup: PASS row-sorted (same token multiset; top-k ordering differs); rows=2307 selected_entries=4718969
+SAMPLE M=769,N=49152 path=candidate repeat=0 baseline_bytes=78498816 peak_delta_bytes=165237248 loop_ms=16.135061
+CORRECTNESS M=769,N=49152 candidate repeat=0: PASS row-sorted (same token multiset; top-k ordering differs); rows=2307 selected_entries=4718969
+SAMPLE M=769,N=49152 path=reference repeat=0 baseline_bytes=78498816 peak_delta_bytes=315838976 loop_ms=16.173381
+CORRECTNESS M=769,N=49152 reference repeat=0: PASS row-sorted (same token multiset; top-k ordering differs); rows=2307 selected_entries=4718969
+SAMPLE M=769,N=49152 path=reference repeat=1 baseline_bytes=78498816 peak_delta_bytes=315838976 loop_ms=16.209652
+CORRECTNESS M=769,N=49152 reference repeat=1: PASS row-sorted (same token multiset; top-k ordering differs); rows=2307 selected_entries=4718969
+SAMPLE M=769,N=49152 path=candidate repeat=1 baseline_bytes=78498816 peak_delta_bytes=165237248 loop_ms=15.822997
+CORRECTNESS M=769,N=49152 candidate repeat=1: PASS row-sorted (same token multiset; top-k ordering differs); rows=2307 selected_entries=4718969
+SAMPLE M=769,N=49152 path=candidate repeat=2 baseline_bytes=78498816 peak_delta_bytes=165237248 loop_ms=16.186548
+CORRECTNESS M=769,N=49152 candidate repeat=2: PASS row-sorted (same token multiset; top-k ordering differs); rows=2307 selected_entries=4718969
+SAMPLE M=769,N=49152 path=reference repeat=2 baseline_bytes=78498816 peak_delta_bytes=315838976 loop_ms=16.165924
+CORRECTNESS M=769,N=49152 reference repeat=2: PASS row-sorted (same token multiset; top-k ordering differs); rows=2307 selected_entries=4718969
+CASE M=769,N=49152 candidate_peak_mb=157.582520 reference_peak_mb=301.207520 saved_mb=143.625000 loop_ms=16.135061 reference_loop_ms=16.173381
+METRIC indexer_peak_mb=841.833008
+METRIC indexer_peak_max_mb=538.246582
+METRIC loop_ms=82.758214
+METRIC reference_peak_mb=1620.467773
+METRIC reference_loop_ms=82.587254
+CORRECTNESS all cases/repeats PASS

@@ -371,6 +371,7 @@ PY
 # rebuild exllamav3_ext. The aarch64 stub patch must stay in this layer.
 COPY overlay/patch_exl3_ext_aarch64.py /opt/glm53/patch_exl3_ext_aarch64.py
 COPY overlay/patch_exl3_fat_kernel.py /opt/glm53/patch_exl3_fat_kernel.py
+COPY tests/test_exl3_fat_patch.py /opt/glm53/test_exl3_fat_patch.py
 COPY overlay/exl3_fat_gemm.cu /opt/glm53/exl3-fat-kernel/exl3_fat_gemm.cu
 COPY overlay/exl3_fat_gemm.cuh /opt/glm53/exl3-fat-kernel/exl3_fat_gemm.cuh
 
@@ -428,7 +429,7 @@ RUN set -eux; \
     cd /tmp/exllamav3; \
     TORCH_CUDA_ARCH_LIST=12.1a MAX_JOBS=8 \
       pip install --no-deps --no-build-isolation --no-cache-dir .; \
-    python3 -c "import torch; import exllamav3_ext; assert hasattr(exllamav3_ext, 'exl3_moe'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_gemm'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_gemm_scatter'), dir(exllamav3_ext); print('exllamav3_ext', exllamav3_ext.__file__, 'exl3_moe=yes fat_gemm=yes')"; \
+    python3 -c "import torch; import exllamav3_ext; assert hasattr(exllamav3_ext, 'exl3_moe'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_gemm'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_gemm_scatter'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_gemm_pair'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_swiglu'), dir(exllamav3_ext); print('exllamav3_ext', exllamav3_ext.__file__, 'exl3_moe=yes fat_gemm=yes')"; \
     rm -rf /tmp/exllamav3 /root/.cache/pip
 
 # Keep this AFTER the CUDA compile layer so Python-only hook edits do not
@@ -458,6 +459,8 @@ COPY overlay/patch_spinwait.py /opt/glm53/patch_spinwait.py
 COPY tests/test_spinwait_patch.py /opt/glm53/test_spinwait_patch.py
 COPY overlay/patch_indexer_workspace.py /opt/glm53/patch_indexer_workspace.py
 COPY tests/test_indexer_workspace.py /opt/glm53/test_indexer_workspace.py
+COPY overlay/patch_indexer_logits_lifetime.py /opt/glm53/patch_indexer_logits_lifetime.py
+COPY tests/test_indexer_logits_lifetime.py /opt/glm53/test_indexer_logits_lifetime.py
 COPY overlay/ablit_runtime.py /opt/glm53/ablit_runtime.py
 COPY overlay/patch_ablit.py /opt/glm53/patch_ablit.py
 COPY tests/test_ablit.py /opt/glm53/test_ablit.py
@@ -474,10 +477,12 @@ RUN python3 /opt/glm53/patch_kpool_tail_slotmap.py
 # Applied unconditionally; the injected sizing reads GLM53_INDEXER_WORKSPACE
 # at runtime and returns the stock expression unless it is "rightsize".
 RUN python3 /opt/glm53/patch_indexer_workspace.py
+RUN python3 /opt/glm53/patch_indexer_logits_lifetime.py
 RUN python3 /opt/glm53/patch_spinwait.py --preflight
 RUN python3 /opt/glm53/patch_ablit.py
 
 RUN EXL3_SELFCHECK_GPU=0 python3 /opt/glm53/test_exl3_overlay.py \
+    && python3 /opt/glm53/test_exl3_fat_patch.py \
     && python3 /opt/glm53/test_suppress_stops.py \
     && python3 /opt/glm53/test_scheduler_decode_floor.py \
     && python3 /opt/glm53/test_hybrid_prefix_hit.py \
@@ -485,6 +490,7 @@ RUN EXL3_SELFCHECK_GPU=0 python3 /opt/glm53/test_exl3_overlay.py \
     && python3 /opt/glm53/test_kpool_tail_slotmap.py \
     && python3 /opt/glm53/test_spinwait_patch.py \
     && python3 /opt/glm53/test_indexer_workspace.py \
+    && python3 /opt/glm53/test_indexer_logits_lifetime.py \
     && python3 /opt/glm53/test_ablit.py
 
 # Baked by start.sh --build-arg so a git pull that changes overlay/Dockerfile

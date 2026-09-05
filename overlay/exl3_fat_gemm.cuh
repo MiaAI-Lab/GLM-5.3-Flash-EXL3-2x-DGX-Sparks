@@ -11,6 +11,19 @@ void exl3_fat_gemm(
     bool mcg,
     bool mul1);
 
+void exl3_fat_gemm_pair(
+    at::Tensor a,
+    at::Tensor packed_left,
+    at::Tensor packed_right,
+    at::Tensor out,
+    at::Tensor svh_left,
+    at::Tensor svh_right,
+    int64_t K,
+    bool mcg,
+    bool mul1);
+
+void exl3_fat_swiglu(at::Tensor input, at::Tensor output, double limit);
+
 void exl3_fat_gemm_scatter(
     at::Tensor a,
     at::Tensor packed,

@@ -1,0 +1,207 @@
+unittest.case.FunctionTestCase (check_bf16_serve_dtype)
+test_ablit.py::check_bf16_serve_dtype ... ok
+unittest.case.FunctionTestCase (check_direction_files)
+test_ablit.py::check_direction_files ... ok
+unittest.case.FunctionTestCase (check_math_fp32)
+test_ablit.py::check_math_fp32 ... ok
+unittest.case.FunctionTestCase (check_maybe_apply_gating)
+test_ablit.py::check_maybe_apply_gating ... ok
+unittest.case.FunctionTestCase (check_module_walk)
+test_ablit.py::check_module_walk ... ablit: skipped layers.1.self_attn.o_proj: out_features=2048 != direction dim 4096
+ok
+unittest.case.FunctionTestCase (check_parse_layers)
+test_ablit.py::check_parse_layers ... ok
+unittest.case.FunctionTestCase (check_recipe_integrity)
+test_ablit.py::check_recipe_integrity ... ok
+unittest.case.FunctionTestCase (check_tp_shard_equivalence)
+test_ablit.py::check_tp_shard_equivalence ... ok
+unittest.case.FunctionTestCase (transplant)
+test_ablit.py::check_transplant ... ok
+unittest.case.FunctionTestCase (test_hf_cli_fallback_wired)
+test_bringup_robustness.py::test_hf_cli_fallback_wired ... ok
+unittest.case.FunctionTestCase (test_sync_revision_marker_wired)
+test_bringup_robustness.py::test_sync_revision_marker_wired ... ok
+unittest.case.FunctionTestCase (test_worker_cache_writability_preflight_wired)
+test_bringup_robustness.py::test_worker_cache_writability_preflight_wired ... ok
+unittest.case.FunctionTestCase (test_worker_death_detection_wired)
+test_bringup_robustness.py::test_worker_death_detection_wired ... ok
+test_explicit_thinking_preserves_reasoning_effort (test_chat_template.ChatTemplateTests.test_explicit_thinking_preserves_reasoning_effort) ... ok
+test_thinking_alias_matches_parser_behavior (test_chat_template.ChatTemplateTests.test_thinking_alias_matches_parser_behavior) ... ok
+test_thinking_can_be_disabled (test_chat_template.ChatTemplateTests.test_thinking_can_be_disabled) ... ok
+test_thinking_defaults_on (test_chat_template.ChatTemplateTests.test_thinking_defaults_on) ... ok
+test_effort_levels_share_the_prompt_up_to_the_effort_word (test_chat_template.PrefixStabilityTests.test_effort_levels_share_the_prompt_up_to_the_effort_word) ... ok
+test_toggle_is_prefix_stable_with_tools (test_chat_template.PrefixStabilityTests.test_toggle_is_prefix_stable_with_tools) ... ok
+test_toggle_is_prefix_stable_without_tools (test_chat_template.PrefixStabilityTests.test_toggle_is_prefix_stable_without_tools) ... ok
+test_drift_and_duplicates (test_exl3_fat_patch.TestFatPatch.test_drift_and_duplicates) ... ok
+test_fresh_and_repeat (test_exl3_fat_patch.TestFatPatch.test_fresh_and_repeat) ... ok
+test_upgrade_original_patch (test_exl3_fat_patch.TestFatPatch.test_upgrade_original_patch) ... ok
+unittest.case.FunctionTestCase (run)
+test_exl3_overlay.py ... skipped 'separate image/GPU self-check'
+test_capture_preserves_utf8_across_read_boundaries (test_exl3_pr_live.PanelTests.test_capture_preserves_utf8_across_read_boundaries) ... ok
+test_cli_defaults_and_health_failure_receipt (test_exl3_pr_live.PanelTests.test_cli_defaults_and_health_failure_receipt) ... ok
+test_decode_exception_keeps_partial_json (test_exl3_pr_live.PanelTests.test_decode_exception_keeps_partial_json) ... ok
+test_fitting_uses_historical_seed_and_calibration (test_exl3_pr_live.PanelTests.test_fitting_uses_historical_seed_and_calibration) ... ok
+test_full_mocked_run_request_counts_salts_provenance_and_aggregation (test_exl3_pr_live.PanelTests.test_full_mocked_run_request_counts_salts_provenance_and_aggregation) ... ok
+test_guard_threshold_and_invalid_cache_evidence (test_exl3_pr_live.PanelTests.test_guard_threshold_and_invalid_cache_evidence) ... ok
+test_invalid_rates_are_preserved_and_never_filtered (test_exl3_pr_live.PanelTests.test_invalid_rates_are_preserved_and_never_filtered) ... ok
+test_malformed_json_is_saved_not_silently_skipped (test_exl3_pr_live.PanelTests.test_malformed_json_is_saved_not_silently_skipped) ... ok
+test_metrics_failure_does_not_lose_completed_generation (test_exl3_pr_live.PanelTests.test_metrics_failure_does_not_lose_completed_generation) ... ok
+test_nan_sample_is_checkpointed_before_validation_raises (test_exl3_pr_live.PanelTests.test_nan_sample_is_checkpointed_before_validation_raises) ... ok
+test_stream_failure_keeps_partial_events_and_restores_helper (test_exl3_pr_live.PanelTests.test_stream_failure_keeps_partial_events_and_restores_helper) ... ok
+test_zero_draft_diagnostic_allowed_but_measured_sample_rejected (test_exl3_pr_live.PanelTests.test_zero_draft_diagnostic_allowed_but_measured_sample_rejected) ... ok
+test_zero_draft_diagnostic_still_checks_output_timing_and_counters (test_exl3_pr_live.PanelTests.test_zero_draft_diagnostic_still_checks_output_timing_and_counters) ... ok
+unittest.case.FunctionTestCase (run)
+test_hybrid_prefix_hit.py ... skipped 'requires the installed pinned vLLM source'
+unittest.case.FunctionTestCase (test_documented_defaults)
+test_image_recipe.py::test_documented_defaults ... ok
+unittest.case.FunctionTestCase (test_overlay_recipe_hash_runs)
+test_image_recipe.py::test_overlay_recipe_hash_runs ... ok
+unittest.case.FunctionTestCase (test_recipe_stamp_wiring)
+test_image_recipe.py::test_recipe_stamp_wiring ... ok
+test_anchor_drift (test_indexer_logits_lifetime.TestLogitsLifetime.test_anchor_drift) ... ok
+test_atomic_file_and_mode (test_indexer_logits_lifetime.TestLogitsLifetime.test_atomic_file_and_mode) ... ok
+test_consumed_chunks_do_not_overlap (test_indexer_logits_lifetime.TestLogitsLifetime.test_consumed_chunks_do_not_overlap) ... ok
+test_idempotence (test_indexer_logits_lifetime.TestLogitsLifetime.test_idempotence) ... ok
+unittest.case.FunctionTestCase (test_builder_agreeing_ratios_pass)
+test_indexer_workspace.py::test_builder_agreeing_ratios_pass ... ok
+unittest.case.FunctionTestCase (test_builder_guard_has_no_ratio_condition)
+test_indexer_workspace.py::test_builder_guard_has_no_ratio_condition ... ok
+unittest.case.FunctionTestCase (test_builder_guard_is_inert_in_stock_mode)
+test_indexer_workspace.py::test_builder_guard_is_inert_in_stock_mode ... ok
+unittest.case.FunctionTestCase (test_builder_ratio_mismatch_raises_both_directions)
+test_indexer_workspace.py::test_builder_ratio_mismatch_raises_both_directions ... ok
+unittest.case.FunctionTestCase (test_chunking_is_identical_to_stock)
+test_indexer_workspace.py::test_chunking_is_identical_to_stock ... ok
+unittest.case.FunctionTestCase (test_chunking_test_has_power)
+test_indexer_workspace.py::test_chunking_test_has_power ... ok
+unittest.case.FunctionTestCase (test_fail_closed_on_drift)
+test_indexer_workspace.py::test_fail_closed_on_drift ... ok
+unittest.case.FunctionTestCase (test_fail_closed_on_half_patched)
+test_indexer_workspace.py::test_fail_closed_on_half_patched ... ok
+unittest.case.FunctionTestCase (test_fixture_apply_and_idempotence)
+test_indexer_workspace.py::test_fixture_apply_and_idempotence ... ok
+unittest.case.FunctionTestCase (run)
+test_indexer_workspace.py::test_live_container_copy_if_enabled ... skipped 'installed-source or live-server coverage is outside this CPU suite'
+unittest.case.FunctionTestCase (run)
+test_indexer_workspace.py::test_live_copy_if_present ... skipped 'installed-source or live-server coverage is outside this CPU suite'
+unittest.case.FunctionTestCase (test_mode_enum)
+test_indexer_workspace.py::test_mode_enum ... ok
+unittest.case.FunctionTestCase (test_mode_enum_matches_launcher_enum)
+test_indexer_workspace.py::test_mode_enum_matches_launcher_enum ... ok
+unittest.case.FunctionTestCase (test_never_exceeds_stock)
+test_indexer_workspace.py::test_never_exceeds_stock ... ok
+unittest.case.FunctionTestCase (test_no_op_when_uncompressed)
+test_indexer_workspace.py::test_no_op_when_uncompressed ... ok
+unittest.case.FunctionTestCase (test_patched_sizing_dispatch)
+test_indexer_workspace.py::test_patched_sizing_dispatch ... ok
+unittest.case.FunctionTestCase (test_prefill_request_count_is_mnbt_bounded)
+test_indexer_workspace.py::test_prefill_request_count_is_mnbt_bounded ... ok
+unittest.case.FunctionTestCase (test_recipe_wiring_if_present)
+test_indexer_workspace.py::test_recipe_wiring_if_present ... ok
+unittest.case.FunctionTestCase (test_spec_tokens_are_headroom)
+test_indexer_workspace.py::test_spec_tokens_are_headroom ... ok
+unittest.case.FunctionTestCase (test_stock_matches_live_workspace_receipt)
+test_indexer_workspace.py::test_stock_matches_live_workspace_receipt ... ok
+unittest.case.FunctionTestCase (test_true_per_step_maximum)
+test_indexer_workspace.py::test_true_per_step_maximum ... ok
+unittest.case.FunctionTestCase (test_circular_math)
+test_kpool_tail_slotmap.py::test_circular_math ... ok
+unittest.case.FunctionTestCase (test_fail_closed)
+test_kpool_tail_slotmap.py::test_fail_closed ... ok
+unittest.case.FunctionTestCase (test_fixture)
+test_kpool_tail_slotmap.py::test_fixture ... ok
+unittest.case.FunctionTestCase (run)
+test_kpool_tail_slotmap.py::test_installed_copy_if_present ... skipped 'installed-source or live-server coverage is outside this CPU suite'
+unittest.case.FunctionTestCase (test_recipe_wiring_if_present)
+test_kpool_tail_slotmap.py::test_recipe_wiring_if_present ... ok
+unittest.case.FunctionTestCase (run)
+test_mixed_prefill_decode.py ... skipped 'separate live-API integration test'
+test_absolute_floors (test_model_memory_watch.MemoryWatchTests.test_absolute_floors) ... ok
+test_proc_snapshot (test_model_memory_watch.MemoryWatchTests.test_proc_snapshot) ... ok
+test_stops_only_named_container (test_model_memory_watch.MemoryWatchTests.test_stops_only_named_container) ... ok
+unittest.case.FunctionTestCase (test_decimal_normalization)
+test_numeric_config.py::test_decimal_normalization ... ok
+unittest.case.FunctionTestCase (test_indexer_workspace_enum)
+test_numeric_config.py::test_indexer_workspace_enum ... ok
+unittest.case.FunctionTestCase (test_matrix)
+test_numeric_config.py::test_matrix ... ok
+unittest.case.FunctionTestCase (test_restart_validates_before_stop)
+test_numeric_config.py::test_restart_validates_before_stop ... ok
+unittest.case.FunctionTestCase (test_spinwait_numeric_contract)
+test_numeric_config.py::test_spinwait_numeric_contract ... ok
+test_additional_deletion_rejected (test_prefill_bench_tools.BenchmarkToolsTest.test_additional_deletion_rejected) ... ok
+test_ambiguous_function_and_loop_rejected (test_prefill_bench_tools.BenchmarkToolsTest.test_ambiguous_function_and_loop_rejected) ... ok
+test_candidate_never_accepts_missing_new_symbols (test_prefill_bench_tools.BenchmarkToolsTest.test_candidate_never_accepts_missing_new_symbols) ... ok
+test_cli_defaults (test_prefill_bench_tools.BenchmarkToolsTest.test_cli_defaults) ... ok
+test_compile_preserves_real_helpers_and_ast (test_prefill_bench_tools.BenchmarkToolsTest.test_compile_preserves_real_helpers_and_ast) ... ok
+test_exact_patch_removal_only (test_prefill_bench_tools.BenchmarkToolsTest.test_exact_patch_removal_only) ... ok
+test_failed_selfcheck_import_not_stubbed (test_prefill_bench_tools.BenchmarkToolsTest.test_failed_selfcheck_import_not_stubbed) ... ok
+test_fixed_workloads (test_prefill_bench_tools.BenchmarkToolsTest.test_fixed_workloads) ... ok
+test_global_collision_rejected (test_prefill_bench_tools.BenchmarkToolsTest.test_global_collision_rejected) ... ok
+test_help_without_cuda_dependencies (test_prefill_bench_tools.BenchmarkToolsTest.test_help_without_cuda_dependencies) ... ok
+test_marker_drift_rejected (test_prefill_bench_tools.BenchmarkToolsTest.test_marker_drift_rejected) ... ok
+test_normal_selfcheck_import (test_prefill_bench_tools.BenchmarkToolsTest.test_normal_selfcheck_import) ... bf16 roundtrip OK (post-edit matches (1-alpha)*pre, max err 3.30e-02)
+direction files OK (fp32 [4096], unit-norm, sources match)
+orthogonalization math OK (fp32: alpha relation exact, orth preserved)
+maybe_apply gating OK (off=no-op, on=edits, empty=loud)
+module walk OK (target 15-44, MTP 45, skips, empty-match)
+layer parsing OK
+recipe integrity OK (46 entries, anchors 0-14, edits 15-45)
+TP shard equivalence OK (row-space edit, max err 0.00e+00)
+transplant CUDA device-mismatch skip (no GPU)
+transplant OK (byte-copy, TP shard slice, deltas, auto fallback)
+SELFCHECK path=/tmp/tmpq04h19dl/test_exl3_overlay.py sha256=1208022bd48d718204c70231f57e65ef8d8ec88e4d47f5c6f4c17d7b85ae8ae5
+ok
+test_release_outside_loop_rejected (test_prefill_bench_tools.BenchmarkToolsTest.test_release_outside_loop_rejected) ... ok
+test_unpatched_reference_is_identity (test_prefill_bench_tools.BenchmarkToolsTest.test_unpatched_reference_is_identity) ... ok
+test_upstream_mode_requires_explicit_work (test_prefill_bench_tools.BenchmarkToolsTest.test_upstream_mode_requires_explicit_work) ... ok
+test_upstream_still_requires_direct_scatter (test_prefill_bench_tools.BenchmarkToolsTest.test_upstream_still_requires_direct_scatter) ... ok
+unittest.case.FunctionTestCase (run)
+test_scheduler_decode_floor.py ... skipped 'requires the installed pinned vLLM source'
+unittest.case.FunctionTestCase (test_cli_preflight_apply_mode_and_pyc_cleanup)
+test_spinwait_patch.py::test_cli_preflight_apply_mode_and_pyc_cleanup ... ok
+unittest.case.FunctionTestCase (test_drift_and_ambiguity_fail_closed)
+test_spinwait_patch.py::test_drift_and_ambiguity_fail_closed ... ok
+unittest.case.FunctionTestCase (test_invalid_cli_never_writes)
+test_spinwait_patch.py::test_invalid_cli_never_writes ... ok
+unittest.case.FunctionTestCase (run)
+test_spinwait_patch.py::test_live_source_if_enabled ... skipped 'installed-source or live-server coverage is outside this CPU suite'
+unittest.case.FunctionTestCase (test_numeric_patch_and_idempotence)
+test_spinwait_patch.py::test_numeric_patch_and_idempotence ... ok
+unittest.case.FunctionTestCase (test_parse_contract)
+test_spinwait_patch.py::test_parse_contract ... ok
+unittest.case.FunctionTestCase (test_recipe_wiring)
+test_spinwait_patch.py::test_recipe_wiring ... ok
+unittest.case.FunctionTestCase (test_seconds_literals)
+test_spinwait_patch.py::test_seconds_literals ... ok
+unittest.case.FunctionTestCase (test_stock_is_exact_noop)
+test_spinwait_patch.py::test_stock_is_exact_noop ... ok
+unittest.case.FunctionTestCase (test_indexer_workspace_caller_capture_is_setness_aware)
+test_start_overrides.py::test_indexer_workspace_caller_capture_is_setness_aware ... ok
+unittest.case.FunctionTestCase (test_max_num_seqs_inline_override_wins)
+test_start_overrides.py::test_max_num_seqs_inline_override_wins ... ok
+unittest.case.FunctionTestCase (test_spinwait_caller_capture_is_setness_aware)
+test_start_overrides.py::test_spinwait_caller_capture_is_setness_aware ... ok
+unittest.case.FunctionTestCase (test_apply_then_skip)
+test_suppress_stops.py::test_apply_then_skip ... ok
+unittest.case.FunctionTestCase (test_missing_anchor_fails_closed)
+test_suppress_stops.py::test_missing_anchor_fails_closed ... ok
+unittest.case.FunctionTestCase (test_import_time_overlay_never_writes_stdout)
+test_warm_restart_stdout.py::test_import_time_overlay_never_writes_stdout ... ok
+unittest.case.FunctionTestCase (test_json_command_substitutions_skip_sitecustomize)
+test_warm_restart_stdout.py::test_json_command_substitutions_skip_sitecustomize ... ok
+unittest.case.FunctionTestCase (test_fail_closed)
+test_xgrammar_termination.py::test_fail_closed ... ok
+unittest.case.FunctionTestCase (test_fixture)
+test_xgrammar_termination.py::test_fixture ... ok
+unittest.case.FunctionTestCase (run)
+test_xgrammar_termination.py::test_installed_copy_if_present ... skipped 'installed-source or live-server coverage is outside this CPU suite'
+unittest.case.FunctionTestCase (test_recipe_wiring_if_present)
+test_xgrammar_termination.py::test_recipe_wiring_if_present ... ok
+unittest.case.FunctionTestCase (run)
+test_ablit.py::check_transplant::CUDA subcase ... skipped 'GPU execution disabled for this CPU suite'
+
+----------------------------------------------------------------------
+Ran 118 tests in 11.564s
+
+OK (skipped=10)
