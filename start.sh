@@ -169,6 +169,10 @@ MTP_TOKENS="${MTP_TOKENS:-2}"
 SPEC_METHOD="${SPEC_METHOD:-dflash}"
 DFLASH_MODEL="${DFLASH_MODEL:-incoai/GLM-5.3-Flash-DFlash2}"
 DFLASH_CACHE_NAME="${DFLASH_CACHE_NAME:-models--${DFLASH_MODEL//\//--}}"
+# Receipt-matched DFlash2 checkpoint used by the 2026-08-30 TP=2 results.
+# A mutable Hub main has already changed weights, so fresh and warm installs
+# must resolve the same snapshot unless the operator deliberately overrides it.
+DFLASH_REVISION="${DFLASH_REVISION:-dc77ff1c99eeb2df044ee3d4f0094eb033fee410}"
 DFLASH_TOKENS="${DFLASH_TOKENS:-7}"
 # 2 = shard the ~2.3 GiB DFlash2 drafter across TP (C4 keep, 2026-08-30:
 # idle 8k 938 / 16k 972 / 100k 997; decode structured 65.1 / prose 27.1).
@@ -415,10 +419,15 @@ ensure_dflash_refs_main() {
 
 resolve_dflash_dir() {
     local ref="$DFLASH_PATH/refs/main" hash dir
-    ensure_dflash_refs_main
-    hash="$(<"$ref")"
+    if [ -n "${DFLASH_REVISION:-}" ] && [ -d "$DFLASH_PATH/snapshots/$DFLASH_REVISION" ]; then
+        hash="$DFLASH_REVISION"
+    else
+        ensure_dflash_refs_main
+        hash="$(<"$ref")"
+    fi
     dir="$DFLASH_PATH/snapshots/$hash"
     [ -f "$dir/config.json" ] || die "DFlash2 config.json missing in $dir"
+    [ -f "$dir/model.safetensors" ] || die "DFlash2 model.safetensors missing in $dir"
     printf '/root/.cache/huggingface/hub/%s/snapshots/%s' "$DFLASH_CACHE_NAME" "$hash"
 }
 
@@ -833,8 +842,13 @@ download_weights() {
 download_dflash() {
     [ "$SPEC_METHOD" = "dflash" ] || return 0
     [ "${SKIP_DOWNLOAD:-0}" = "1" ] && { log "SKIP_DOWNLOAD=1 — skipping DFlash2 download check"; return; }
-    local have
-    have="$(find "$DFLASH_PATH/snapshots" -name 'model.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]' || true)"
+    local have=0 selected=""
+    if [ -n "${DFLASH_REVISION:-}" ]; then
+        selected="$DFLASH_PATH/snapshots/$DFLASH_REVISION"
+    elif [ -s "$DFLASH_PATH/refs/main" ]; then
+        selected="$DFLASH_PATH/snapshots/$(<"$DFLASH_PATH/refs/main")"
+    fi
+    [ -n "$selected" ] && [ -f "$selected/model.safetensors" ] && have=1
     if [ "${have:-0}" -ge 1 ] && [ "${REFRESH_WEIGHTS:-0}" != "1" ]; then
         log "DFlash2 already present: $DFLASH_PATH"
         ensure_dflash_refs_main
@@ -843,9 +857,11 @@ download_dflash() {
     resolve_hf_bin || die "no 'hf' / 'huggingface-cli' on PATH and no python huggingface_hub — pip install --user -U 'huggingface_hub[cli]' (or set HF_BIN=/path/to/hf)"
     mkdir -p "$HF_CACHE_DIR"
     log "downloading ${DFLASH_MODEL} (~2.3 GiB) into ${HF_CACHE_DIR} ..."
-    HF_HOME="$HF_CACHE_DIR" "${HF_BIN_CMD[@]}" download "$DFLASH_MODEL"
-    ensure_dflash_refs_main
-    have="$(find "$DFLASH_PATH/snapshots" -name 'model.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]' || true)"
+    local -a dflash_args=("$DFLASH_MODEL")
+    [ -n "${DFLASH_REVISION:-}" ] && dflash_args+=(--revision "$DFLASH_REVISION")
+    HF_HOME="$HF_CACHE_DIR" "${HF_BIN_CMD[@]}" download "${dflash_args[@]}"
+    selected="$(resolve_dflash_dir)"
+    have=1
     [ "${have:-0}" -ge 1 ] || die "DFlash2 download finished without model.safetensors"
     log "DFlash2 download complete"
 }
@@ -888,19 +904,23 @@ download_only() {
 # (issue #22, item 2). FORCE_SYNC=1 bypasses the marker; deleting the
 # marker file on the worker has the same effect.
 sync_repo_marker_rev() {
-    local src="$1"
+    local src="$1" preferred="${2:-}"
     local rev
-    rev="$(cat "$src/refs/main" 2>/dev/null || true)"
+    if [ -n "$preferred" ] && [ -d "$src/snapshots/$preferred" ]; then
+        rev="$preferred"
+    else
+        rev="$(cat "$src/refs/main" 2>/dev/null || true)"
+    fi
     [ -n "$rev" ] || rev="$(ls -1t "$src/snapshots" 2>/dev/null | head -n 1 || true)"
     [ -n "$rev" ] || rev="unknown"
     printf '%s' "$rev"
 }
 
 sync_repo_to_worker() {
-    local src="$1" cache_name="$2" label="$3"
+    local src="$1" cache_name="$2" label="$3" preferred="${4:-}"
     local marker rev
     marker="${WORKER_CACHE_DIR}/hub/${cache_name}/.glm53-exl3-synced"
-    rev="$(sync_repo_marker_rev "$src")"
+    rev="$(sync_repo_marker_rev "$src" "$preferred")"
     if [ "${FORCE_SYNC:-0}" != "1" ] \
        && [ "$(worker_ssh "cat '$marker' 2>/dev/null" || true)" = "$rev" ]; then
         log "worker ${cache_name} already at ${rev} — rsync skipped (FORCE_SYNC=1 to force)"
@@ -919,7 +939,7 @@ sync_weights() {
     sync_repo_to_worker "$MODEL_PATH" "$MODEL_CACHE_NAME" "weights"
     if [ "$SPEC_METHOD" = "dflash" ]; then
         [ -d "$DFLASH_PATH" ] || die "DFlash2 weights missing at $DFLASH_PATH"
-        sync_repo_to_worker "$DFLASH_PATH" "$DFLASH_CACHE_NAME" "DFlash2 draft"
+        sync_repo_to_worker "$DFLASH_PATH" "$DFLASH_CACHE_NAME" "DFlash2 draft" "$DFLASH_REVISION"
     fi
     log "worker weights in sync"
 }
