@@ -433,6 +433,28 @@ and weights, does not change the supported 2× path. First run copies
 
 Do not pull `glm53-flash-sm121:v8` — that is the older NVFP4/Ray kernel.
 
+**Measured on a 4-Spark kit (2026-09-02).** Four DGX Sparks (two at 200G, two
+at 100G, CRS812 switch), this image and overlay at 493cb88, DFlash2 draft TP=4,
+1M context, launched per rank with the same `docker run` shape as `start.sh`.
+TP=4 vs the 2-node baseline on the same production-mix bench (temperature 0,
+30-min soak): decode 1.45x, mixed phases 20-35 % shorter, **cold prefill only
++29 %** at 282k tokens (1162 vs 901 tok/s: a 4-node TP job is fabric-bound on
+prefill). One caveat found by a 150-minute soak on 2026-09-03: with the DFlash2
+draft on, a 96k chunked prefill sharing steps with 6-7 speculative decode
+streams hangs all four ranks (3/3 runs, 31-78 min; independent of the E2
+fat-expert kernel), while the same soak with the draft off passed clean, so the
+4-node production config runs without speculation until that is fixed (details
+and receipts in the linked repo). The defaults above are tuned for 2 nodes; on 4 nodes an autoresearch
+loop (one knob per relaunch, hard reliability gates) settled on the values now
+in `.env.tp4.example`: `GPU_MEM_UTIL=0.75` (0.85 left <2 GiB host memory per
+rank and preceded two engine deaths), `MAX_NUM_SEQS=8` (135 vs 84 tok/s
+aggregate at 8 streams, worst first token 1.0 s vs 27 s), `DFLASH_TOKENS=3`
+(53 % accepted vs 30 % at 7; prose decode 31-33 vs 26-28 tok/s),
+`MAX_NUM_BATCHED_TOKENS=2048` (larger chunks do not prefill faster on TP=4 and
+hurt first-token latency), `GLM53_MIXED_PREFILL_CHUNK=off`. Full recipe,
+launcher, watchdog, benchmark and every receipt:
+<https://github.com/punkjazz-labs/glm-5.3-flash-exl3-4x-dgx-spark>.
+
 API: `http://127.0.0.1:8888/v1` (LAN: `http://10.0.0.1:8888/v1`).
 `/v1` is unauthenticated unless you set `VLLM_API_KEY` in `.env` (opt-in;
 empty = no auth). vLLM reads the env var natively so the key never lands in
