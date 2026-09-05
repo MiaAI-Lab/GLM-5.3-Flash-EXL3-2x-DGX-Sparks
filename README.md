@@ -365,6 +365,30 @@ tokens — the 7168 / 10752 / 14336 hit rows above are exactly 2 / 3 / 4 full
 pages. And since this build exposes **no cache-reset endpoint**, the bench
 salts its filler content per invocation so every cold is genuinely cold.
 
+### Optional sparse retention and DFlash replay
+
+`GLM53_APC_RETENTION_INTERVAL_SWA` controls the DFlash2 drafter separately
+from target retention. Empty inherits the global retention policy and keeps
+ordinary eviction priority. Explicit `0` retains reachable drafter boundaries
+and makes cached draft-only blocks lower priority than target cache blocks.
+Sparse target Mamba state also retains the prior replay boundary; a cached
+DFlash window is reused only after successful EAGLE verification, otherwise
+the request backs up to rebuild its window.
+
+**Sparse retention is not a general performance upgrade.** On one 2× Spark
+deployment, explicit global/SWA `0/0` retained four independent 210K histories
+for ~2.5 s revisits. In a matched 128K comparison, however, an edit at 90%
+took 112.49 s instead of 14.70 s, and a branch at 90% took 99.89 s instead of
+3.35 s: the sparse policy reused zero tokens where the old runtime reused
+111,104. All tested answers were correct. These are sequential histories,
+not four simultaneously active 210K streams.
+
+Both retention knobs remain unset by default. Keep that default unless the
+tradeoff fits the workload. SWA-only sparse retention with a dense target is
+a separate configuration; the all-zero results do not qualify it. See the
+[protocol, raw measurements, and limitations](docs/apc-retention-qualification.md)
+before selecting a policy or a cache budget for another kit.
+
 ## Quick start (2× Spark)
 
 ```bash
@@ -520,6 +544,7 @@ that are now documented/enforced:
 | `MTP_TOKENS` | `2` | MTP speculative tokens (`SPEC_METHOD=mtp`) |
 | `SPEC_METHOD` | `dflash` | `dflash` / `mtp` / `none`. Rollback: `SPEC_METHOD=mtp ./start.sh restart` |
 | `DFLASH_MODEL` | `incoai/GLM-5.3-Flash-DFlash2` | DFlash2 draft Hub repo (~2.3 GiB BF16) |
+| `DFLASH_REVISION` | `dc77ff1c99eeb2df044ee3d4f0094eb033fee410` | Immutable lowercase 40-hex Hub commit. The launcher requires the exact snapshot and repairs a stale `refs/main`; symbolic branches/tags are rejected before start, restart, or download work |
 | `DFLASH_TOKENS` | `7` | DFlash2 speculative tokens (trained block 8) |
 | `DFLASH_DRAFT_TP` | `2` | shard DFlash2 across TP (C4 keep: 8k 938 / decode 65.1). `1` = rank 0 only. Empty = inherit TP |
 | DFlash2 draft KV | `auto` (bf16) | target stays `fp8`/`fp8_ds_mla`; dense draft has no MLA FP8 backend on SM121 |
@@ -532,7 +557,7 @@ that are now documented/enforced:
 | `MAX_MODEL_LEN` | `1000000` | default context. Pool size varies with MNBT, activation/graph reservations and hybrid block geometry |
 | `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq |
 | `MAX_NUM_BATCHED_TOKENS` | `7168` | current maintainer default at `MAX_NUM_SEQS=4`. MNBT 2048 was the clean PR77 A/B configuration and the best measured balance on an independent `MAX_NUM_SEQS=16` geometry. Tune per deployment; change after a repeated same-kit comparison |
-| `GLM53_APC_RETENTION_INTERVAL_SWA` | *(unset)* | TP=2 per-group prefix-cache retention for the DFlash2 drafter's sliding-window group (overlay `patch_apc_per_group_retention.py`; TP=4 rejects a non-empty value). Root cause of the two-long-conversation eviction: a cached 3584-token segment costs 38 block ids of which 33 are drafter blocks that are hashed and freed mid-prefill to the LRU tail, ahead of the MLA/mamba blocks that carry the hit. Unset inherits the global retention value but keeps ordinary LRU priority. Explicit `0` also enables the drafter's low-priority/free-order policy and keeps snapshots only at reachable boundaries → ≈5 ids per segment (≈54 segments ≈ 190K tokens per conversation) while MLA/mamba stay on the dense 3584 grid; `N` = multiple of 3584. Sparse values are opt-in because a drafter miss after a warm target hit can leave part of its window uncomputed; qualify draft acceptance before deployment. A non-empty value requires `SPEC_METHOD=dflash`; the launcher rejects incompatible modes before stopping a healthy deployment. Boot log for explicit `0`: `[glm53-apc-per-group] retention_by_group=[None,…,None,0]`. Refuses to boot if set without `patch_hybrid_prefix_hit.py` (EAGLE min-exemption required) |
+| `GLM53_APC_RETENTION_INTERVAL_SWA` | *(unset)* | TP=2 DFlash2 drafter retention. Empty inherits global retention with ordinary priority; explicit `0` keeps reachable boundaries and enables draft-only eviction priority; positive values must be multiples of 3584, at most 1,000,000. Requires `SPEC_METHOD=dflash` and the hybrid prefix overlay. TP=4 rejects a non-empty value. Qualify retention, branching, and draft acceptance for the chosen global/SWA pair; see [measurements](docs/apc-retention-qualification.md) |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (7168) |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
 | `GLM53_INDEXER_WORKSPACE` | `stock` | sparse-indexer prefill gather workspace. `stock` = `max_model_len * 40` entries (**5036.40 MB** locked at 1M — measured, `VLLM_DEBUG_WORKSPACE=1`). `rightsize` = the legal per-step maximum `min(MAX_NUM_SEQS, MNBT) * cdiv(MAX_MODEL_LEN + k, index_kpool)` = 126 MB at `MAX_NUM_SEQS=4` / 504 MB at 16, so **~+26–28% KV**. Opt-in; see [docs/DESIGN-indexer-workspace.md](docs/DESIGN-indexer-workspace.md) |
@@ -566,7 +591,7 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `overlay/patch_model_overrides.py` | `"exl3"` in ModelConfig overrides |
 | `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0` |
 | `tests/test_apc_per_group_retention.py` | host: overlay apply/idempotence, min-exemption derivation, routing, env validation, composition with `patch_hybrid_prefix_hit.py` in both orders, id-cost/capacity arithmetic (needs `GLM53_KV_COORDINATOR_PY_SRC` + `_PRISTINE` copies of the fork's coordinator) |
-| `tests/test_launcher_rank_parity.py` | launcher (CPU-only, docker/ssh stubbed): `GLM53_APC_RETENTION_INTERVAL_SWA` guard matrix where wired, `restart` fails closed on a bad knob or a missing / mis-pointed / broken overlay (every artifact) before anything is stopped, overlay order pinned `hybrid -> per-group -> fine-grained` in both rank scripts, both ranks mount the same host artifacts (head mount = scp source = worker mount) and receive identical `GLM53_APC_RETENTION_INTERVAL[_SWA]` / `GLM53_FINEGRAINED_APC` values |
+| `tests/test_launcher_rank_parity.py` | launcher (CPU-only, docker/ssh stubbed): retention validation, pre-stop artifact checks, ordered hybrid/per-group overlays, and matching rank environments and mounts |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
 | `start.sh` / `stop.sh` / `download.sh` | 2-node launch; Hub fetch on the head only |
 | `start-tp4.sh` / `.env.tp4.example` | experimental 4-node TP=4 launch; knobs stay out of `.env` |
