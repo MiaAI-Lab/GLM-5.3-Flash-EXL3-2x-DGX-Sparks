@@ -430,15 +430,30 @@ def main() -> int:
         text = replace_once(
             text, EAGLE_VERIFY_V2, EAGLE_VERIFY_V3, "dflash-eagle-verification"
         )
-        text = replace_once(
-            text, RECONCILE_LOOP_V2, RECONCILE_LOOP_V3, "dflash-reconcile-index"
-        )
-        text = replace_once(
-            text,
-            RECONCILE_CHECK_V2,
-            RECONCILE_CHECK_V3,
-            "dflash-reconcile-verification",
-        )
+        reconcile_loop_v3_count = text.count(RECONCILE_LOOP_V3)
+        if reconcile_loop_v3_count == 0:
+            text = replace_once(
+                text,
+                RECONCILE_LOOP_V2,
+                RECONCILE_LOOP_V3,
+                "dflash-reconcile-index",
+            )
+        elif reconcile_loop_v3_count != 1 or RECONCILE_LOOP_V2 in text:
+            raise SystemExit(
+                f"{P}: invalid mixed/duplicate dflash-reconcile-index anchors"
+            )
+        reconcile_check_v3_count = text.count(RECONCILE_CHECK_V3)
+        if reconcile_check_v3_count == 0:
+            text = replace_once(
+                text,
+                RECONCILE_CHECK_V2,
+                RECONCILE_CHECK_V3,
+                "dflash-reconcile-verification",
+            )
+        elif reconcile_check_v3_count != 1 or RECONCILE_CHECK_V2 in text:
+            raise SystemExit(
+                f"{P}: invalid mixed/duplicate dflash-reconcile-verification anchors"
+            )
     # Canonicalize only the two adjacent injected helper boundaries. The two
     # overlays both insert before the upstream validator, so without this the
     # application order can differ by one blank line despite identical code.
