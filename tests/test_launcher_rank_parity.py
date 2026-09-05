@@ -338,13 +338,21 @@ def part_b(h: Harness) -> None:
     print("Part B: restart fails closed before any container is stopped")
     text = source()
     main_at = text.index("main() {")
+    v_revision = text.index("validate_dflash_revision", main_at)
     v_num = text.index("validate_numeric_config", main_at)
     v_art = text.index("validate_overlay_artifacts", main_at)
     restart = text.index("restart)  stop; start", main_at)
-    check(v_num < restart and v_art < restart, "B1 main() runs both validators before `restart) stop; start`")
+    check(
+        v_revision < v_num < restart and v_art < restart,
+        "B1 main() runs revision, numeric and artifact validators before `restart) stop; start`",
+    )
     check(
         "start|restart) validate_numeric_config; validate_overlay_artifacts ;;" in text,
-        "B1 the validators share the start|restart arm",
+        "B1 numeric and artifact validators share the start|restart arm",
+    )
+    check(
+        "start|restart|download) validate_dflash_revision ;;" in text,
+        "B1 the immutable revision guard covers start, restart and download",
     )
     guard_begin = text.index("# GLM53 overlay artifact guard (begin)")
     guard_end = text.index("# GLM53 overlay artifact guard (end)")

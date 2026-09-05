@@ -148,7 +148,7 @@ def test_revision_guard_accepts_only_lowercase_commit_hashes() -> None:
         tmp = Path(raw_tmp)
         script = _launcher(tmp)
 
-        valid = _run(script, _env(tmp), "validate_numeric_config")
+        valid = _run(script, _env(tmp), "validate_dflash_revision")
         assert valid.returncode == 0, valid.stderr
 
         for revision in (
@@ -162,7 +162,7 @@ def test_revision_guard_accepts_only_lowercase_commit_hashes() -> None:
             rejected = _run(
                 script,
                 _env(tmp, DFLASH_REVISION=revision),
-                "validate_numeric_config",
+                "validate_dflash_revision",
             )
             assert rejected.returncode == 2
             assert "must be a lowercase 40-hex commit" in rejected.stderr
@@ -203,10 +203,46 @@ def test_restart_rejects_tag_before_stop_or_download() -> None:
         assert not calls.exists(), "restart reached docker/ssh before validation"
 
 
+def test_download_rejects_tag_before_cache_mutation() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        tmp = Path(raw_tmp)
+        script = _launcher(tmp)
+        calls = tmp / "mutation-calls"
+        fake_bin = tmp / "bin"
+        fake_bin.mkdir()
+        for command in ("df", "hf", "huggingface-cli"):
+            stub = fake_bin / command
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                'printf "%s\\n" "$0 $*" >>"$DFLASH_TEST_CALLS"\n'
+                "exit 99\n"
+            )
+            stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+        env = _env(
+            tmp,
+            DFLASH_REVISION="v1.0",
+            DFLASH_TEST_CALLS=str(calls),
+            PATH=f"{fake_bin}:{os.environ['PATH']}",
+        )
+
+        result = subprocess.run(
+            ["bash", str(script), "main", "download"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        assert result.returncode == 2
+        assert "must be a lowercase 40-hex commit" in result.stderr
+        assert not calls.exists(), "download reached disk or Hub commands before validation"
+
+
 if __name__ == "__main__":
     test_resolve_rewrites_stale_main_to_complete_pin()
     test_resolve_rejects_stale_cache_when_pin_is_missing()
     test_download_does_not_accept_an_unrelated_cached_snapshot()
     test_revision_guard_accepts_only_lowercase_commit_hashes()
     test_restart_rejects_tag_before_stop_or_download()
+    test_download_rejects_tag_before_cache_mutation()
     print("DFlash immutable revision regression OK")

@@ -133,9 +133,10 @@ def test_spinwait_numeric_contract() -> None:
 def test_restart_validates_before_stop() -> None:
     source = START.read_text()
     main = source.index("main() {")
+    revision = source.index("start|restart|download) validate_dflash_revision", main)
     validation = source.index("start|restart) validate_numeric_config", main)
     restart = source.index("restart)  stop; start", main)
-    assert validation < restart
+    assert revision < validation < restart
 
 
 def test_tp4_rejects_swa_override() -> None:
