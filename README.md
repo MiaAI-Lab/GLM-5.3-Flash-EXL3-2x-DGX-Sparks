@@ -462,7 +462,7 @@ The Hub `generation_config.json` stamps `temperature=1.0` / `top_p=0.95` unless
 the request overrides. The launcher sets
 `--chat-template /opt/glm53/chat_template.jinja` (checkpoint jinja is language-only).
 
-Needs: Docker (no sudo) on both nodes, passwordless SSH head → worker,
+Needs: Docker (no sudo) on both nodes, python3 on the head (verifies the overlay artifacts before `restart` stops anything), passwordless SSH head → worker,
 `hf` / `huggingface-cli` + `curl` + `rsync` on the head, ~180 GiB free per
 node for the first download. The GHCR image is public; login is only needed
 if you hit anonymous pull rate limits (`GHCR_TOKEN` + `GHCR_USER`).
@@ -532,6 +532,7 @@ that are now documented/enforced:
 | `MAX_MODEL_LEN` | `1000000` | default context. Pool size varies with MNBT, activation/graph reservations and hybrid block geometry |
 | `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq |
 | `MAX_NUM_BATCHED_TOKENS` | `7168` | current maintainer default at `MAX_NUM_SEQS=4`. MNBT 2048 was the clean PR77 A/B configuration and the best measured balance on an independent `MAX_NUM_SEQS=16` geometry. Tune per deployment; change after a repeated same-kit comparison |
+| `GLM53_APC_NO_STORE` | `1` | honour a client's per-request GPU prefix-cache **no-store** flag (overlay `patch_apc_no_store.py`; see [Opting a request out of the prefix cache](#opting-a-request-out-of-the-prefix-cache)). Requests never opt in on their own, so `1` changes nothing until a client sends the flag. `0` = ignore the flag (logged once); malformed values are rejected either way. Exactly `0` or `1`; the launcher refuses anything else before `restart` stops the pair |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (7168) |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
 | `GLM53_INDEXER_WORKSPACE` | `stock` | sparse-indexer prefill gather workspace. `stock` = `max_model_len * 40` entries (**5036.40 MB** locked at 1M — measured, `VLLM_DEBUG_WORKSPACE=1`). `rightsize` = the legal per-step maximum `min(MAX_NUM_SEQS, MNBT) * cdiv(MAX_MODEL_LEN + k, index_kpool)` = 126 MB at `MAX_NUM_SEQS=4` / 504 MB at 16, so **~+26–28% KV**. Opt-in; see [docs/DESIGN-indexer-workspace.md](docs/DESIGN-indexer-workspace.md) |
@@ -544,6 +545,50 @@ that are now documented/enforced:
 | `HEAD_CX7_IF` / `WORKER_CX7_IF` | `enp1s0f1np1` / `enp1s0f0np0` | NCCL sockets |
 | `HEAD_CX7_IB` / `WORKER_CX7_IB` | `rocep1s0f1` / `rocep1s0f0` | NCCL HCAs |
 | `USE_HOST_NCCL` | `0` | image nvidia-nccl; host preload duplicates DeepEP |
+
+## Opting a request out of the prefix cache
+
+`BlockPool.free_blocks` puts **hashed** blocks at the back of the free queue (LRU) and unhashed
+ones at the front (LIFO). A one-off batch/eval request therefore stores its blocks *behind* the
+owner's idle 80K conversation and the owner's blocks are what gets evicted next — the batch job
+re-orders the LRU in its own favour. `cache_salt` namespaces and still stores; vLLM's
+`skip_reading_prefix_cache` is read-side only. Overlay `patch_apc_no_store.py` adds the write-side
+opt-out: `SamplingParams.skip_writing_prefix_cache`, reachable on `/v1/chat/completions`,
+`/v1/completions` and `/v1/responses` through `vllm_xargs` (no entrypoint edits):
+
+```bash
+curl -s "$BASE/v1/chat/completions" -H 'Content-Type: application/json' -d '{
+  "model": "GLM-5.3-Flash-EXL3", "messages": [{"role": "user", "content": "classify: ..."}],
+  "max_tokens": 64, "cache_salt": "batch-lane-07",
+  "vllm_xargs": {"skip_writing_prefix_cache": 1}}'
+```
+
+Send the integer `1` (`"1"` and JSON `true` also work: `vllm_xargs` is typed
+`dict[str, str | int | float | list]` and pydantic coerces a JSON boolean to `1`/`0` — verified on
+pydantic 2.13). Any other value (`1.0`, `"yes"`, `2`, …) is rejected with HTTP 400 naming the field
+(validated in `SamplingParams.__post_init__`, i.e. in the API server — never a silent no-op). The
+request then:
+
+- is **still allowed to read** the cache (a lane that shares the system prompt gets the free prefix;
+  reading touches blocks, i.e. refreshes their LRU position — the flag is write-only);
+- inserts **no** block hash in any KV-cache group (MLA, mamba partial tails, drafter SWA) and emits no
+  `BlockStored` event; all allocation bookkeeping (`num_cached_block`, partial-hit CoW for what it
+  *read*) proceeds exactly as for a normal request — the guards sit at the two `_insert_block_hash`
+  sites in `BlockPool`, not at `allocate_slots`, because `num_cached_block` doubles as the
+  running-request sentinel for SWA/drafter allocation;
+- has its blocks freed to the **front** of the free queue, so they are the next ids recycled and the
+  resident conversation is not displaced;
+- if preempted, resumes from whatever it could *read* — nothing, when its prefix was cold — so prefer
+  it for short lanes, ideally with a low `priority`.
+
+Server-log receipts (each once per process): `[glm53-apc-no-store] first request resolved
+skip_writing_prefix_cache=1` (the flag reached the engine) and `[glm53-apc-no-store] suppressing
+prefix-cache store (full site)` / `(partial site)` (a store was actually cut; the partial site only
+fires where fine-grained hits are enabled, i.e. with `patch_apc_fine_grained_hits.py`, for a prompt whose
+64-token boundary is not a 3584 multiple). If the first line never appears, the flag did not reach the
+engine — do not trust an A/B measured without it. Not covered:
+KV connectors / CPU offload (none on this kit), pooling requests. Kill switch: `GLM53_APC_NO_STORE=0`.
+Design + receipts protocol: `docs/DESIGN-apc-no-store.md`.
 
 ## Image / overlay
 
@@ -564,6 +609,9 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `overlay/patch_exl3_ext_aarch64.py` | stub AVX CPU allreduce so the ext builds on GB10 |
 | `overlay/patch_model_overrides.py` | `"exl3"` in ModelConfig overrides |
 | `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0` |
+| `overlay/patch_apc_no_store.py` | per-request GPU prefix-cache no-store (`skip_writing_prefix_cache` / `vllm_xargs`): strict 0/1 validation in `SamplingParams.__post_init__`, never-raising resolver on `Request`, guards at the two `_insert_block_hash` sites in `BlockPool`; transactional, fail-closed; kill switch `GLM53_APC_NO_STORE` |
+| `tests/test_apc_no_store.py` | host: anchors / idempotence / per-anchor drift with nothing written / partial-marker refusal; resolver accept-reject matrix + kill-switch matrix; on a CPU vLLM (`GLM53_VLLM_SRC_ROOT`, mandatory in the image): real `BlockPool` LIFO-front vs LRU-back, chunked-prefill `num_cached_block` parity with a normal twin, hybrid mamba partial-tail producer/reader/CoW, the live MLA+mamba×4+EAGLE-SWA layout (+`KpoolTailSpec` in-image), preemption, `skip_reading`+`skip_writing`, receipts; launcher 0/1 guard |
+| `tests/test_launcher_rank_parity.py` | launcher (CPU-only, docker/ssh stubbed): `GLM53_APC_RETENTION_INTERVAL_SWA` guard matrix where wired, `restart` fails closed on a bad knob or a missing / mis-pointed / broken overlay (every artifact) before anything is stopped, overlay order pinned `hybrid -> per-group -> fine-grained -> no-store` in both rank scripts, both ranks mount the same host artifacts (head mount = scp source = worker mount) and receive identical `GLM53_APC_RETENTION_INTERVAL[_SWA]` / `GLM53_FINEGRAINED_APC` / `GLM53_APC_NO_STORE` values |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
 | `start.sh` / `stop.sh` / `download.sh` | 2-node launch; Hub fetch on the head only |
 | `start-tp4.sh` / `.env.tp4.example` | experimental 4-node TP=4 launch; knobs stay out of `.env` |

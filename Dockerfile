@@ -450,6 +450,8 @@ COPY overlay/patch_scheduler_decode_floor.py /opt/glm53/patch_scheduler_decode_f
 COPY tests/test_scheduler_decode_floor.py /opt/glm53/test_scheduler_decode_floor.py
 COPY overlay/patch_hybrid_prefix_hit.py /opt/glm53/patch_hybrid_prefix_hit.py
 COPY tests/test_hybrid_prefix_hit.py /opt/glm53/test_hybrid_prefix_hit.py
+COPY overlay/patch_apc_no_store.py /opt/glm53/patch_apc_no_store.py
+COPY tests/test_apc_no_store.py /opt/glm53/test_apc_no_store.py
 COPY overlay/patch_xgrammar_termination.py /opt/glm53/patch_xgrammar_termination.py
 COPY tests/test_xgrammar_termination.py /opt/glm53/test_xgrammar_termination.py
 COPY overlay/patch_kpool_tail_slotmap.py /opt/glm53/patch_kpool_tail_slotmap.py
@@ -469,6 +471,13 @@ RUN python3 /opt/glm53/patch_glm5_drafter_group.py
 RUN python3 /opt/glm53/patch_suppress_stops_in_reasoning.py
 RUN python3 /opt/glm53/patch_scheduler_decode_floor.py
 RUN python3 /opt/glm53/patch_hybrid_prefix_hit.py
+# Runs BEFORE the patch it validates: Part A needs the pristine
+# sampling_params.py / v1/request.py / v1/core/block_pool.py, and Part C
+# (real BlockPool / KVCacheManager / hybrid coordinator on patched copies)
+# is mandatory in-image (GLM53_REQUIRE_VLLM=1), including the KpoolTailSpec
+# group when the fork exposes it.
+RUN GLM53_VLLM_SRC_ROOT=/usr/local/lib/python3.12/dist-packages/vllm GLM53_REQUIRE_VLLM=1 python3 /opt/glm53/test_apc_no_store.py
+RUN python3 /opt/glm53/patch_apc_no_store.py
 RUN python3 /opt/glm53/patch_xgrammar_termination.py
 RUN python3 /opt/glm53/patch_kpool_tail_slotmap.py
 # Applied unconditionally; the injected sizing reads GLM53_INDEXER_WORKSPACE
