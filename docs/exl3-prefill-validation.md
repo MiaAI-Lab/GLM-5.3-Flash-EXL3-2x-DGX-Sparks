@@ -28,6 +28,11 @@ ExLlamaV3 package version 0.0.43. Image IDs and production-file hashes are in
   8k warmup. No measured baseline samples completed. Further model runs were
   stopped; the PR remains a draft without an end-to-end speedup claim.
 
+The follow-up [memory-budget audit](gb10-memory-budget-audit.md) uses retained
+records only. It confirms that fat scratch was already initialized before the
+failed request, separates the allocation budgets, and documents the missing
+telemetry. It does not establish a safe replacement control configuration.
+
 ## Fresh isolated results
 
 Each device ran the panel in reference/candidate/candidate/reference/reference/
