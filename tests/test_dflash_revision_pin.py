@@ -45,8 +45,8 @@ def _env(tmp: Path, **extra: str) -> dict[str, str]:
         DFLASH_MODEL=MODEL,
         DFLASH_REVISION=PIN,
         SPEC_METHOD="dflash",
-        **extra,
     )
+    env.update(extra)
     return env
 
 
@@ -143,8 +143,34 @@ printf test >"$snapshot/model.safetensors"
         assert (cache / "snapshots" / PIN / "model.safetensors").is_file()
 
 
+def test_revision_guard_accepts_only_lowercase_commit_hashes() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        tmp = Path(raw_tmp)
+        script = _launcher(tmp)
+
+        valid = _run(script, _env(tmp), "validate_numeric_config")
+        assert valid.returncode == 0, valid.stderr
+
+        for revision in (
+            "main",
+            "v1.0",
+            "A" * 40,
+            "a" * 39,
+            "a" * 41,
+            "g" * 40,
+        ):
+            rejected = _run(
+                script,
+                _env(tmp, DFLASH_REVISION=revision),
+                "validate_numeric_config",
+            )
+            assert rejected.returncode == 2
+            assert "must be a lowercase 40-hex commit" in rejected.stderr
+
+
 if __name__ == "__main__":
     test_resolve_rewrites_stale_main_to_complete_pin()
     test_resolve_rejects_stale_cache_when_pin_is_missing()
     test_download_does_not_accept_an_unrelated_cached_snapshot()
+    test_revision_guard_accepts_only_lowercase_commit_hashes()
     print("DFlash immutable revision regression OK")

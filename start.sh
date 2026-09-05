@@ -403,6 +403,10 @@ _glm53_validate_spinwait_ms() {
 }
 
 validate_numeric_config() {
+    if ! [[ "$DFLASH_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "DFLASH_REVISION must be a lowercase 40-hex commit (got: $DFLASH_REVISION)" >&2
+        return 2
+    fi
     if ! [[ "$GPU_MEM_UTIL" =~ ^(0([.][0-9]+)?|[.][0-9]+|1([.]0+)?)$ ]] \
        || ! awk -v u="$GPU_MEM_UTIL" 'BEGIN { exit !(u > 0 && u <= 1) }'; then
         echo "GPU_MEM_UTIL must be greater than 0 and at most 1 (got: $GPU_MEM_UTIL)" >&2
