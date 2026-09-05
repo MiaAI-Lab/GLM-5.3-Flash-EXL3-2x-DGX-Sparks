@@ -84,11 +84,14 @@ _cli_indexer_workspace_set="${GLM53_INDEXER_WORKSPACE+1}"
 _cli_indexer_workspace="${GLM53_INDEXER_WORKSPACE-}"
 _cli_spinwait_ms_set="${GLM53_SPINWAIT_MS+1}"
 _cli_spinwait_ms="${GLM53_SPINWAIT_MS-}"
+_cli_kvcap_set="${GLM53_KV_CAPACITY_LOG+1}"
+_cli_kvcap="${GLM53_KV_CAPACITY_LOG-}"
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
 set +a
 [ -n "${_cli_mtp}" ] && MTP_TOKENS="$_cli_mtp"
+[ -n "${_cli_kvcap_set}" ] && GLM53_KV_CAPACITY_LOG="$_cli_kvcap"
 [ -n "${_cli_spec}" ] && SPEC_METHOD="$_cli_spec"
 [ -n "${_cli_eager}" ] && ENFORCE_EAGER="$_cli_eager"
 [ -n "${_cli_fused}" ] && EXL3_FUSED_MOE="$_cli_fused"
@@ -189,6 +192,7 @@ STOP_PATCH_HOST="${STOP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_suppress_stops_in_
 SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode_floor.py}"
 DRAFTER_PATCH_HOST="${DRAFTER_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm5_drafter_group.py}"
 APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py}"
+KVCAP_PATCH_HOST="${KVCAP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kv_capacity_log.py}"
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
@@ -252,6 +256,16 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # Mixed-step prefill policy when a peer is already decoding (issue #6).
 # skip = do not mix; N>0 = cap tokens; 0 = off.
 GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
+# 1 = at boot, after vLLM's "GPU KV cache size: N tokens" line (which is
+# max_concurrency x max_model_len, not a pool size), log one line per KV-cache
+# group (spec, block_size, blocks per max_model_len request) and a summary with
+# the usable block ids, the ids one aligned cached segment costs across groups
+# and the resulting cached-conversation capacity (overlay
+# patch_kv_capacity_log.py). 0 = do not log (one line saying so). Log-only:
+# no serving behaviour changes either way. Default applies only when UNSET: an
+# explicitly empty value is an operator error and validate_numeric_config
+# rejects it.
+GLM53_KV_CAPACITY_LOG="${GLM53_KV_CAPACITY_LOG-1}"
 # Sparse-indexer prefill gather workspace (overlay/patch_indexer_workspace.py).
 # stock = max_model_len * 40 entries (5036.40 MB locked at 1M, measured);
 # rightsize = the legal per-step maximum, ~+26% KV. Default applies only
@@ -325,6 +339,21 @@ _glm53_canonical_positive_int() {
     export "$name"
 }
 
+# Kill switches are exactly 0 or 1. Not "non-empty means on", not `[ "$v" = 0 ]`
+# with everything else treated as on: a typo'd knob must not silently pick a
+# serving mode. GLM53_KV_CAPACITY_LOG decides whether the boot-time KV
+# capacity breakdown is logged, and the overlay itself refuses at the log site
+# on anything but 0/1 (overlay/patch_kv_capacity_log.py,
+# _glm53_kv_capacity_log_enabled), so catching it here turns a container boot
+# failure into a launcher error.
+_glm53_validate_bool_flag() {
+    local name="$1" value="$2"
+    if [ "$value" != 0 ] && [ "$value" != 1 ]; then
+        echo "$name must be exactly 0 or 1 (got: $value)" >&2
+        return 2
+    fi
+}
+
 # Enum knobs are exactly one of a fixed set. Not "non-empty means on": a
 # typo'd knob must not silently pick a serving mode. GLM53_INDEXER_WORKSPACE
 # sizes the sparse-indexer prefill workspace, and the patched
@@ -364,8 +393,89 @@ validate_numeric_config() {
     _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-stock}" \
         stock rightsize || return
     _glm53_validate_spinwait_ms || return
+    _glm53_validate_bool_flag GLM53_KV_CAPACITY_LOG "${GLM53_KV_CAPACITY_LOG-1}" || return
 }
 # GLM53 numeric config guard (end)
+
+# GLM53 overlay artifact guard (begin)
+# Every file both rank containers mount. main() runs validate_overlay_artifacts
+# on start|restart BEFORE `restart` stops anything: a missing, empty,
+# mis-pointed, truncated or syntactically broken input is a launcher error
+# with the healthy pair left serving, not a container that dies at boot after
+# the old one is gone. Python overlays: path|identity string|last line -
+# the identity string (MARK / target path / hook marker) is distinct per file
+# so a *_PATCH_HOST pointed at a different overlay is caught, and the last
+# non-blank line must match exactly so a copy truncated anywhere before EOF
+# (even one that still parses) is caught too. This guards against operator
+# error (wrong path, stale checkout, truncated copy); it is not a
+# tamper-proof manifest. Needs python3 on the head (DGX OS ships it).
+# preflight() re-checks existence later; this is the fail-closed early gate.
+validate_overlay_artifacts() {
+    # Sentinels that contain quotes live in single-quoted locals.
+    local main_guard='    sys.exit(main())'
+    local video_end='    print("glm53: overlay install ok aligned=True", file=sys.stderr)'
+    local ablit_marker='MARKER = "ABLIT-HOOK"'
+    local -a artifacts=(
+        "$VIDEO_PATCH_HOST|vllm/model_executor/layers/|$video_end"
+        "$STOP_PATCH_HOST|[suppress-stops-in-reasoning]|    raise SystemExit(main(sys.argv))"
+        "$SCHED_PATCH_HOST|[glm53-decode-floor]|$main_guard"
+        "$DRAFTER_PATCH_HOST|vllm/v1/core/kv_cache_utils.py|$main_guard"
+        "$APC_PATCH_HOST|[glm53-hybrid-apc]|$main_guard"
+        "$KVCAP_PATCH_HOST|[glm53-kv-capacity-log]|$main_guard"
+        "$XGRAMMAR_PATCH_HOST|vllm/v1/structured_output/|$main_guard"
+        "$KPOOL_TAIL_PATCH_HOST|[glm53-kpool-tail-slotmap]|$main_guard"
+        "$SPINWAIT_PATCH_HOST|device_communicators/shm_broadcast.py|$main_guard"
+        "$SCRIPT_DIR/overlay/patch_ablit.py|$ablit_marker|    main()"
+        "$SCRIPT_DIR/overlay/ablit_runtime.py|o_proj abliteration (ABLIT)|    return report"
+    )
+    local entry path rest tag tail last
+    if [ "${#artifacts[@]}" -eq 0 ]; then
+        echo "overlay artifact list is empty - refusing to launch" >&2
+        return 2
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "python3 is required on the head to verify overlay artifacts before launch" >&2
+        return 2
+    fi
+    for entry in "${artifacts[@]}"; do
+        path="${entry%%|*}"
+        rest="${entry#*|}"
+        tag="${rest%%|*}"
+        tail="${rest#*|}"
+        if [ ! -f "$path" ] || [ ! -r "$path" ] || [ ! -s "$path" ]; then
+            echo "overlay artifact missing, unreadable or empty: $path" >&2
+            return 2
+        fi
+        if ! grep -qF -- "$tag" "$path"; then
+            echo "overlay artifact $path does not carry its identity string '$tag' (wrong file?)" >&2
+            return 2
+        fi
+        # `|| true`: under pipefail a whitespace-only file makes grep exit 1,
+        # which must surface as the rc=2 diagnostic below, not a bare exit 1.
+        last="$(grep -v '^[[:space:]]*$' "$path" | tail -n 1 || true)"
+        if [ "$last" != "$tail" ]; then
+            echo "overlay artifact $path does not end with '$tail' (truncated copy? last line: '$last')" >&2
+            return 2
+        fi
+        # Parse-only: proves the file is importable Python without executing it
+        # or leaving __pycache__ litter in the checkout.
+        if ! python3 -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' "$path" 2>/dev/null; then
+            echo "overlay artifact does not parse as Python: $path" >&2
+            return 2
+        fi
+    done
+    # Non-Python inputs both ranks mount: the chat template and the ablit
+    # layer map (the .pt payloads are ABLIT's own concern at hook time).
+    if [ ! -f "$CHAT_TEMPLATE_HOST" ] || [ ! -r "$CHAT_TEMPLATE_HOST" ] || [ ! -s "$CHAT_TEMPLATE_HOST" ]; then
+        echo "chat template missing, unreadable, empty or not a regular file: $CHAT_TEMPLATE_HOST" >&2
+        return 2
+    fi
+    if ! python3 -c 'import json, sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$SCRIPT_DIR/ablit/LAYER_MAP.json" 2>/dev/null; then
+        echo "ablit layer map missing or not JSON: $SCRIPT_DIR/ablit/LAYER_MAP.json" >&2
+        return 2
+    fi
+}
+# GLM53 overlay artifact guard (end)
 
 banner() {
     local label="${1:-start.sh}"
@@ -499,6 +609,7 @@ preflight() {
     [ -f "$SCHED_PATCH_HOST" ] || die "$SCHED_PATCH_HOST missing"
     [ -f "$DRAFTER_PATCH_HOST" ] || die "$DRAFTER_PATCH_HOST missing"
     [ -f "$APC_PATCH_HOST" ] || die "$APC_PATCH_HOST missing"
+    [ -f "$KVCAP_PATCH_HOST" ] || die "$KVCAP_PATCH_HOST missing"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "$XGRAMMAR_PATCH_HOST missing"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "$KPOOL_TAIL_PATCH_HOST missing"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "$SPINWAIT_PATCH_HOST missing"
@@ -925,6 +1036,42 @@ sync_weights() {
 }
 
 # ------------------------ inner container scripts --------------------------
+# Overlay application order inside BOTH rank containers. write_inner_scripts
+# emits this one list verbatim into the head and the worker inner script, so
+# the two ranks cannot drift apart. Pinned for the prefix-cache overlays,
+# which share the kv_cache_coordinator.py helper insert point:
+#   patch_hybrid_prefix_hit -> patch_apc_per_group_retention -> patch_apc_fine_grained_hits
+# (hybrid = Mia's partial-hit base, per-group = PR #83, fine-grained = PR #84),
+# then patch_kv_capacity_log (kv_cache_utils.py only, log-only; it must follow
+# patch_glm5_drafter_group, which edits the same file, and has no shared
+# anchors with the coordinator overlays).
+# Entries that are not mounted are skipped in-container (`[ -f ]`); which ones
+# MUST exist is decided by the overlay artifact guard above, not here.
+GLM53_OVERLAY_ORDER=(
+    patch_glm_video_placeholders.py
+    patch_suppress_stops_in_reasoning.py
+    patch_scheduler_decode_floor.py
+    patch_glm5_drafter_group.py
+    patch_hybrid_prefix_hit.py
+    patch_apc_per_group_retention.py
+    patch_apc_fine_grained_hits.py
+    patch_kv_capacity_log.py
+    patch_xgrammar_termination.py
+    patch_kpool_tail_slotmap.py
+    patch_spinwait.py
+    patch_indexer_workspace.py
+    patch_ablit.py
+)
+
+# Emits the in-container apply block for GLM53_OVERLAY_ORDER (same bytes for
+# both ranks).
+emit_overlay_block() {
+    local p
+    for p in "${GLM53_OVERLAY_ORDER[@]}"; do
+        printf 'if [ -f /opt/glm53/%s ]; then\n    python3 /opt/glm53/%s\nfi\n' "$p" "$p"
+    done
+}
+
 write_inner_scripts() {
     cat > "$HEAD_SCRIPT" <<'EOF'
 #!/bin/bash
@@ -984,36 +1131,9 @@ if [ -n "${EXTRA_ARGS:-}" ]; then
 fi
 
 [ -f "${MODEL_DIR}/config.json" ] || { say "FATAL: ${MODEL_DIR}/config.json missing"; ls -la "${MODEL_DIR}" | head; exit 1; }
-if [ -f /opt/glm53/patch_glm_video_placeholders.py ]; then
-    python3 /opt/glm53/patch_glm_video_placeholders.py
-fi
-if [ -f /opt/glm53/patch_suppress_stops_in_reasoning.py ]; then
-    python3 /opt/glm53/patch_suppress_stops_in_reasoning.py
-fi
-if [ -f /opt/glm53/patch_scheduler_decode_floor.py ]; then
-    python3 /opt/glm53/patch_scheduler_decode_floor.py
-fi
-if [ -f /opt/glm53/patch_glm5_drafter_group.py ]; then
-    python3 /opt/glm53/patch_glm5_drafter_group.py
-fi
-if [ -f /opt/glm53/patch_hybrid_prefix_hit.py ]; then
-    python3 /opt/glm53/patch_hybrid_prefix_hit.py
-fi
-if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
-    python3 /opt/glm53/patch_xgrammar_termination.py
-fi
-if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
-    python3 /opt/glm53/patch_kpool_tail_slotmap.py
-fi
-if [ -f /opt/glm53/patch_spinwait.py ]; then
-    python3 /opt/glm53/patch_spinwait.py
-fi
-if [ -f /opt/glm53/patch_indexer_workspace.py ]; then
-    python3 /opt/glm53/patch_indexer_workspace.py
-fi
-if [ -f /opt/glm53/patch_ablit.py ]; then
-    python3 /opt/glm53/patch_ablit.py
-fi
+EOF
+    emit_overlay_block >> "$HEAD_SCRIPT"
+    cat >> "$HEAD_SCRIPT" <<'EOF'
 if [ "${ABLIT:-0}" = "1" ]; then
     say "ablit: o_proj orthogonalization ON (method=${ABLIT_METHOD:-auto} direction=${ABLIT_DIRECTION:-dealign} layers=${ABLIT_LAYERS:-15-45} alpha=${ABLIT_ALPHA:-3.0})"
 else
@@ -1080,36 +1200,9 @@ if [ -n "${EXTRA_ARGS:-}" ]; then
 fi
 
 [ -f "${MODEL_DIR}/config.json" ] || { say "FATAL: ${MODEL_DIR}/config.json missing"; ls -la "${MODEL_DIR}" | head; exit 1; }
-if [ -f /opt/glm53/patch_glm_video_placeholders.py ]; then
-    python3 /opt/glm53/patch_glm_video_placeholders.py
-fi
-if [ -f /opt/glm53/patch_suppress_stops_in_reasoning.py ]; then
-    python3 /opt/glm53/patch_suppress_stops_in_reasoning.py
-fi
-if [ -f /opt/glm53/patch_scheduler_decode_floor.py ]; then
-    python3 /opt/glm53/patch_scheduler_decode_floor.py
-fi
-if [ -f /opt/glm53/patch_glm5_drafter_group.py ]; then
-    python3 /opt/glm53/patch_glm5_drafter_group.py
-fi
-if [ -f /opt/glm53/patch_hybrid_prefix_hit.py ]; then
-    python3 /opt/glm53/patch_hybrid_prefix_hit.py
-fi
-if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
-    python3 /opt/glm53/patch_xgrammar_termination.py
-fi
-if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
-    python3 /opt/glm53/patch_kpool_tail_slotmap.py
-fi
-if [ -f /opt/glm53/patch_spinwait.py ]; then
-    python3 /opt/glm53/patch_spinwait.py
-fi
-if [ -f /opt/glm53/patch_indexer_workspace.py ]; then
-    python3 /opt/glm53/patch_indexer_workspace.py
-fi
-if [ -f /opt/glm53/patch_ablit.py ]; then
-    python3 /opt/glm53/patch_ablit.py
-fi
+EOF
+    emit_overlay_block >> "$WORKER_SCRIPT"
+    cat >> "$WORKER_SCRIPT" <<'EOF'
 if [ "${ABLIT:-0}" = "1" ]; then
     say "ablit: o_proj orthogonalization ON (method=${ABLIT_METHOD:-auto} direction=${ABLIT_DIRECTION:-dealign} layers=${ABLIT_LAYERS:-15-45} alpha=${ABLIT_ALPHA:-3.0})"
 else
@@ -1140,7 +1233,9 @@ launch_cluster() {
     [ -f "$DRAFTER_PATCH_HOST" ] || die "missing $DRAFTER_PATCH_HOST"
     scp -q -o BatchMode=yes "$DRAFTER_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_glm5_drafter_group.py"
     [ -f "$APC_PATCH_HOST" ] || die "missing $APC_PATCH_HOST"
+    [ -f "$KVCAP_PATCH_HOST" ] || die "missing $KVCAP_PATCH_HOST"
     scp -q -o BatchMode=yes "$APC_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_hybrid_prefix_hit.py"
+    scp -q -o BatchMode=yes "$KVCAP_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kv_capacity_log.py"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "missing $XGRAMMAR_PATCH_HOST"
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
@@ -1170,6 +1265,7 @@ launch_cluster() {
         -e VLLM_CACHE_ROOT=/root/.cache/vllm
         -e "GLM53_SUPPRESS_STOPS_IN_REASONING=$GLM53_SUPPRESS_STOPS_IN_REASONING"
         -e "GLM53_MIXED_PREFILL_CHUNK=$GLM53_MIXED_PREFILL_CHUNK"
+        -e "GLM53_KV_CAPACITY_LOG=$GLM53_KV_CAPACITY_LOG"
         -e "GLM53_INDEXER_WORKSPACE=$GLM53_INDEXER_WORKSPACE"
         -e "GLM53_SPINWAIT_MS=$GLM53_SPINWAIT_MS"
         -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
@@ -1186,6 +1282,7 @@ launch_cluster() {
         -e DO_NOT_TRACK=1
         -e "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=$CG_ESTIMATE"
     )
+    log "boot KV-capacity breakdown log: GLM53_KV_CAPACITY_LOG=${GLM53_KV_CAPACITY_LOG} (both ranks)"
     local worker_nccl="" e
     for e in "${nccl_common[@]}"; do
         [ "$e" = "-e" ] && continue
@@ -1242,6 +1339,7 @@ launch_cluster() {
         -v '/tmp/patch_scheduler_decode_floor.py:/opt/glm53/patch_scheduler_decode_floor.py:ro' \
         -v '/tmp/patch_glm5_drafter_group.py:/opt/glm53/patch_glm5_drafter_group.py:ro' \
         -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
+        -v '/tmp/patch_kv_capacity_log.py:/opt/glm53/patch_kv_capacity_log.py:ro' \
         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
         -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
@@ -1274,6 +1372,7 @@ launch_cluster() {
         -v "$SCHED_PATCH_HOST:/opt/glm53/patch_scheduler_decode_floor.py:ro" \
         -v "$DRAFTER_PATCH_HOST:/opt/glm53/patch_glm5_drafter_group.py:ro" \
         -v "$APC_PATCH_HOST:/opt/glm53/patch_hybrid_prefix_hit.py:ro" \
+        -v "$KVCAP_PATCH_HOST:/opt/glm53/patch_kv_capacity_log.py:ro" \
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
         -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
@@ -1515,7 +1614,7 @@ logs() {
 main() {
     local cmd="${1:-start}"
     case "$cmd" in
-        start|restart) validate_numeric_config ;;
+        start|restart) validate_numeric_config; validate_overlay_artifacts ;;
     esac
     case "$cmd" in
         stop)     banner stop.sh ;;

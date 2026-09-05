@@ -462,7 +462,7 @@ The Hub `generation_config.json` stamps `temperature=1.0` / `top_p=0.95` unless
 the request overrides. The launcher sets
 `--chat-template /opt/glm53/chat_template.jinja` (checkpoint jinja is language-only).
 
-Needs: Docker (no sudo) on both nodes, passwordless SSH head → worker,
+Needs: Docker (no sudo) on both nodes, python3 on the head (verifies the overlay artifacts before `restart` stops anything), passwordless SSH head → worker,
 `hf` / `huggingface-cli` + `curl` + `rsync` on the head, ~180 GiB free per
 node for the first download. The GHCR image is public; login is only needed
 if you hit anonymous pull rate limits (`GHCR_TOKEN` + `GHCR_USER`).
@@ -533,6 +533,7 @@ that are now documented/enforced:
 | `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq |
 | `MAX_NUM_BATCHED_TOKENS` | `7168` | current maintainer default at `MAX_NUM_SEQS=4`. MNBT 2048 was the clean PR77 A/B configuration and the best measured balance on an independent `MAX_NUM_SEQS=16` geometry. Tune per deployment; change after a repeated same-kit comparison |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (7168) |
+| `GLM53_KV_CAPACITY_LOG` | `1` | after vLLM's `GPU KV cache size: N tokens` boot line (N = max_concurrency × max_model_len, **not** a pool size) log one line per KV-cache group and a summary with the usable block ids, the ids one aligned cached segment costs across groups and the resulting cached-conversation capacity (overlay `patch_kv_capacity_log.py`; see [What the KV cache boot line means](#what-the-kv-cache-boot-line-means)). `0` = off (one line saying so). Log-only, no serving change either way. Exactly `0` or `1`; the launcher refuses anything else before `restart` stops the pair |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
 | `GLM53_INDEXER_WORKSPACE` | `stock` | sparse-indexer prefill gather workspace. `stock` = `max_model_len * 40` entries (**5036.40 MB** locked at 1M — measured, `VLLM_DEBUG_WORKSPACE=1`). `rightsize` = the legal per-step maximum `min(MAX_NUM_SEQS, MNBT) * cdiv(MAX_MODEL_LEN + k, index_kpool)` = 126 MB at `MAX_NUM_SEQS=4` / 504 MB at 16, so **~+26–28% KV**. Opt-in; see [docs/DESIGN-indexer-workspace.md](docs/DESIGN-indexer-workspace.md) |
 | `GLM53_SPINWAIT_MS` | `stock` | SpinCondition reader busy-loop window. `stock` preserves vLLM's 1 s default; `1..1000` selects milliseconds. A frozen TP=2 sweep selected `16` (+0.95% median decode vs stock, 85.3% less active EngineCore CPU) |
@@ -544,6 +545,54 @@ that are now documented/enforced:
 | `HEAD_CX7_IF` / `WORKER_CX7_IF` | `enp1s0f1np1` / `enp1s0f0np0` | NCCL sockets |
 | `HEAD_CX7_IB` / `WORKER_CX7_IB` | `rocep1s0f1` / `rocep1s0f0` | NCCL HCAs |
 | `USE_HOST_NCCL` | `0` | image nvidia-nccl; host preload duplicates DeepEP |
+
+## What the KV cache boot line means
+
+vLLM logs once per boot (`v1/core/kv_cache_utils.py`, `update_kv_cache_capacity`):
+
+```
+GPU KV cache size: 1,553,140 tokens, Maximum concurrency for 1,000,000 tokens per request: 1.55x
+```
+
+The first number is `int(max_concurrency × max_model_len)`, with `max_concurrency = num_blocks /
+num_blocks_per_request` and `num_blocks_per_request` a **sum over KV-cache groups** of
+`cdiv(spec.max_memory_usage_bytes, spec.page_size_bytes)`. It is a concurrency figure in token units, not the
+size of a prefix cache. On this hybrid model (MLA + kpool tail + 4 mamba + DFlash2 drafter SWA, one shared
+`BlockPool` with globally unique block ids) the pool behind that line was **643 block ids** (642 usable; id 0 is
+the null block) and one cached 3584-token segment costs **38** of them (1 MLA + 4 mamba + 33 drafter), so
+about **57K tokens** of cached conversation fit with nothing running — not 1.5M. Neither `num_blocks` nor
+`num_blocks_per_request` is logged by stock vLLM (feature request
+[vllm-project/vllm#54662](https://github.com/vllm-project/vllm/issues/54662)).
+
+Overlay `patch_kv_capacity_log.py` (`GLM53_KV_CAPACITY_LOG=1`, default) keeps that line byte-identical and adds,
+from the same config objects, one line per group and one summary — on the 643-id boot:
+
+```
+[glm53-kv-capacity-log] group 0: MLAAttentionSpec layers=11 block_size=3584 page_size=… B blocks/request@1,000,000=280 prefix_caching=yes
+[glm53-kv-capacity-log] group 1: KpoolTailSpec layers=11 block_size=4 page_size=… B blocks/request@1,000,000=1 prefix_caching=no (scratch) window=4 eagle=no
+[glm53-kv-capacity-log] group 2: MambaSpec layers=9 block_size=3584 page_size=… B blocks/request@1,000,000=9 prefix_caching=yes mamba_cache_mode=align
+… groups 3-5 identical to group 2 …
+[glm53-kv-capacity-log] group 6: SlidingWindowSpec layers=1 block_size=64 page_size=… B blocks/request@1,000,000=97 prefix_caching=yes window=2048 eagle=yes
+[glm53-kv-capacity-log] usable block ids: 642 (num_blocks=643 incl. the null block; 414 ids per 1,000,000-token request => 1.55x); ids per 3584-token cached segment across groups: 38 (per group: [1, 0, 1, 1, 1, 1, 33]); cached-conversation capacity at this alignment ≈ 57,344 tokens = 16 segments (aligned dense-retention prefix-cache upper bound: nothing running, every reachable block hashed, block-aligned hits). The 'GPU KV cache size' line above is max_concurrency x max_model_len, not this figure.
+```
+
+`blocks/request` is the same `cdiv` expression the stock line is built from (its column sum, 414, is the stock
+denominator). "Ids per cached segment" is the dense-retention cost with block-aligned hits — what each manager's
+`reachable_block_mask` hashes with no retention interval: every block for `FullAttentionSpec` / `MLAAttentionSpec`
+and for `MambaSpec` in `align`/`all` mode (read from the spec the manager acts on),
+`min(cdiv(window − 1, 64) + 1 (EAGLE), 3584 / 64)` = 33 for the drafter (`SlidingWindowSpec` /
+`SlidingWindowMLASpec`), 0 for the kpool tail (opts out of prefix caching). Exact class names only: any other
+spec — subclasses such as `SinkFullAttentionSpec` included, since they come with their own manager rule — is
+reported as unmodelled and the capacity is withheld rather than guessed, as it is under DCP/PCP > 1 (block sizes
+are rescaled per rank there). The alignment is the lcm of the group block sizes (the coordinator's scheduler
+block). The figure is an upper bound: a running request holds its own blocks, and PR #83's per-group retention
+lowers the drafter's cost to boundary tails only (not modelled here — the summary states its assumption).
+
+The numbers move with the boot, the arithmetic does not: the figures elsewhere in this README (690 blocks /
+1,754,237 tokens / 1.75× at 1M) are the same quantity on the reference kit's boot (690 / 1.75 ≈ 394 ids per
+1M-token request under that config); our 2026-08-31 boot had 643 ids at 414 per request, and the current
+rightsized-workspace boot 820 (`usable block ids: 819 … ≈ 75,264 tokens = 21 segments`). Read your own boot's
+summary line rather than any number in this section.
 
 ## Image / overlay
 
@@ -580,6 +629,9 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `tests/test_xgrammar_termination.py` | exact two-file patch, idempotence, cross-file fail-closed drift, termination/rollback/reset and post-reasoning draft behavior, launcher wiring |
 | `overlay/patch_kpool_tail_slotmap.py` | clamp KpoolTail one-block circular slot mapping; identity for other KV groups |
 | `tests/test_kpool_tail_slotmap.py` | circular addressing math, exact kernel patch, idempotence, fail-closed drift, launcher wiring |
+| `overlay/patch_kv_capacity_log.py` | log-only: after the stock `GPU KV cache size` line (kept byte-identical) log per-group `blocks/request` (the stock line's own denominator) and the usable-block-ids / ids-per-aligned-segment / cached-conversation-capacity summary; unmodelled spec kinds withhold the figure; knob `GLM53_KV_CAPACITY_LOG` (0/1); two pinned anchors, preflighted before either is written, atomic, idempotent |
+| `tests/test_kv_capacity_log.py` | host: pure-python replica of the derivation against the deployment's hybrid layout (blocks/request `[280,1,9,9,9,9,97]` = 414, 643 ids → the logged `1,553,140` / `1.55x`, 642 usable, alignment 3584, ids per segment `[1,0,1,1,1,1,33]` = 38, ≈ 57,344 tokens; the 820-id boot → 75,264), single-group / uniform-type / non-EAGLE / subclass-unmodelled / mamba-mode-from-spec / DCP-withheld / null-block edge cases, knob matrix, the exec'd helpers are the shipped text; apply on a vendored fixture of the in-image `kv_cache_utils.py` (and the real file when present): stock line untouched, idempotent, per-anchor drift refuses with nothing written, partial marker refused; launcher 0/1 guard and wiring |
+| `tests/test_launcher_rank_parity.py` | launcher (CPU-only, docker/ssh stubbed): `restart` fails closed on a bad knob or a missing / mis-pointed / broken overlay (every artifact) before anything is stopped, overlay order pinned in one list emitted into both rank scripts (kv-capacity-log after the drafter-group patch it shares a file with), both ranks mount the same host artifacts (head mount = scp source = worker mount) and receive identical `GLM53_KV_CAPACITY_LOG` values |
 | `overlay/patch_indexer_workspace.py` | opt-in `GLM53_INDEXER_WORKSPACE=rightsize`: size the sparse-indexer prefill workspace to the legal per-step maximum instead of `max_model_len * 40`; boot-time compress-ratio cross-check |
 | `tests/test_indexer_workspace.py` | sizing formula (MNBT/`max_num_seqs`/spec-token edge cases, stock clamp), chunk-list equivalence vs stock by exhaustion, exact three-site patch, idempotence, fail-closed drift, launcher wiring |
 | `overlay/patch_spinwait.py` | opt-in numeric `GLM53_SPINWAIT_MS`: fail-closed runtime patch of SpinCondition's reader busy-loop window on both ranks |
