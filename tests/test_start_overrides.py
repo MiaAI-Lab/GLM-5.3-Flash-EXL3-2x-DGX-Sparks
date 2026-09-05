@@ -42,6 +42,7 @@ def test_max_num_seqs_inline_override_wins() -> None:
 
 
 def _run_preamble(env_file: str, caller: dict[str, str], probe: str) -> str:
+    """Run start.sh's pre-configuration preamble with a synthetic .env."""
     source = (ROOT / "start.sh").read_text()
     marker = "# ----------------------------- configuration -------------------------------"
     preamble, separator, _rest = source.partition(marker)
@@ -55,12 +56,37 @@ def _run_preamble(env_file: str, caller: dict[str, str], probe: str) -> str:
         (tmp / ".env").write_text(env_file)
 
         env = {k: v for k, v in os.environ.items()
-               if k not in ("GLM53_INDEXER_WORKSPACE", "GLM53_SPINWAIT_MS")}
+               if k not in ("GLM53_INDEXER_WORKSPACE", "GLM53_SPINWAIT_MS",
+                            "GLM53_DEFAULT_REASONING_EFFORT")}
         env.update(caller)
         result = subprocess.run(
             ["bash", str(script)], check=True, capture_output=True, text=True, env=env
         )
     return result.stdout.strip()
+
+
+def test_default_reasoning_effort_caller_override_is_setness_aware() -> None:
+    """An explicitly EMPTY caller value must beat .env, not be swallowed by it.
+
+    The knob's own default is empty, so ``[ -n "$_cli_x" ]`` cannot tell
+    ``GLM53_DEFAULT_REASONING_EFFORT= ./start.sh`` (deliberately back to the
+    template default) apart from an unset var. Only ``${VAR+1}`` can.
+    """
+    probe = '\nprintf "EFFORT=[%s]\\n" "${GLM53_DEFAULT_REASONING_EFFORT-unset}"\n'
+    env_file = "GLM53_DEFAULT_REASONING_EFFORT=high\n"
+
+    # caller unset -> .env wins
+    assert _run_preamble(env_file, {}, probe) == "EFFORT=[high]"
+
+    # caller sets a value -> caller wins
+    assert _run_preamble(
+        env_file, {"GLM53_DEFAULT_REASONING_EFFORT": "low"}, probe
+    ) == "EFFORT=[low]"
+
+    # caller sets it EMPTY -> caller still wins (the setness-aware case)
+    assert _run_preamble(
+        env_file, {"GLM53_DEFAULT_REASONING_EFFORT": ""}, probe
+    ) == "EFFORT=[]"
 
 
 def test_indexer_workspace_caller_capture_is_setness_aware() -> None:
@@ -106,6 +132,7 @@ def test_spinwait_caller_capture_is_setness_aware() -> None:
 
 if __name__ == "__main__":
     test_max_num_seqs_inline_override_wins()
+    test_default_reasoning_effort_caller_override_is_setness_aware()
     test_indexer_workspace_caller_capture_is_setness_aware()
     test_spinwait_caller_capture_is_setness_aware()
     print("start.sh caller override regression OK")

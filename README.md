@@ -455,7 +455,30 @@ curl -s http://127.0.0.1:8888/v1/chat/completions \
 
 Thinking defaults on. Disable it with the **top-level** JSON field
 `"chat_template_kwargs": {"enable_thinking": false}`. This closes the empty
-thinking block in the generation prompt and omits the reasoning-effort hint.
+thinking block in the generation prompt. The `Reasoning Effort:` line itself
+renders unconditionally since #63 (prefix-cache stability), thinking on or off.
+
+**Reasoning effort defaults to `max`, not to something cheap.** `files/chat_template.jinja`
+maps `reasoning_effort` to itself only for `low` and `high`, and to `max` for
+everything else — *including when the field is absent*:
+
+```jinja
+{%- set effective_reasoning_effort = reasoning_effort if reasoning_effort is defined and reasoning_effort in ['low', 'high'] else 'max' -%}
+```
+
+So any client that does not send `chat_template_kwargs` (OpenCode, Cline, plain
+`curl`, most SDK defaults) silently gets the most expensive setting. On one
+agentic build task, unset(max) and `high` scored an identical 80/80 while max
+took **4.6×** the wall time and generated **4.8×** the completion tokens
+(`docs/RECEIPTS-default-reasoning-effort.md`).
+
+Set a server-side default with `GLM53_DEFAULT_REASONING_EFFORT` in `.env`
+(recommended `high` for agentic coding); the launcher then passes
+`--default-chat-template-kwargs '{"reasoning_effort":"high"}'` on both ranks.
+The launcher default stays empty, so behaviour is unchanged unless you set it.
+A request that sends `"chat_template_kwargs": {"reasoning_effort": "low"}`
+still overrides the server default — vLLM merges the server defaults first and
+lets request kwargs win.
 Do not send a literal nested `extra_body` object over raw HTTP; `extra_body` is
 an OpenAI Python SDK option that merges its contents into the top-level request.
 The Hub `generation_config.json` stamps `temperature=1.0` / `top_p=0.95` unless
@@ -534,6 +557,7 @@ that are now documented/enforced:
 | `MAX_NUM_BATCHED_TOKENS` | `7168` | current maintainer default at `MAX_NUM_SEQS=4`. MNBT 2048 was the clean PR77 A/B configuration and the best measured balance on an independent `MAX_NUM_SEQS=16` geometry. Tune per deployment; change after a repeated same-kit comparison |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (7168) |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
+| `GLM53_DEFAULT_REASONING_EFFORT` | *(empty)* | server-side default effort via `--default-chat-template-kwargs`. Empty sends no flag, and the template then renders **Max** for any client that omits `chat_template_kwargs`. `high` is the recommendation for agentic coding: same 80/80 grader score as unset(max) at **4.6×** less wall time and **4.8×** fewer completion tokens ([receipts](docs/RECEIPTS-default-reasoning-effort.md)). `low`/`high`/`max` only — `medium` is rejected at launch because the template does not recognize it |
 | `GLM53_INDEXER_WORKSPACE` | `stock` | sparse-indexer prefill gather workspace. `stock` = `max_model_len * 40` entries (**5036.40 MB** locked at 1M — measured, `VLLM_DEBUG_WORKSPACE=1`). `rightsize` = the legal per-step maximum `min(MAX_NUM_SEQS, MNBT) * cdiv(MAX_MODEL_LEN + k, index_kpool)` = 126 MB at `MAX_NUM_SEQS=4` / 504 MB at 16, so **~+26–28% KV**. Opt-in; see [docs/DESIGN-indexer-workspace.md](docs/DESIGN-indexer-workspace.md) |
 | `GLM53_SPINWAIT_MS` | `stock` | SpinCondition reader busy-loop window. `stock` preserves vLLM's 1 s default; `1..1000` selects milliseconds. A frozen TP=2 sweep selected `16` (+0.95% median decode vs stock, 85.3% less active EngineCore CPU) |
 | `GLM53_BOOT_SHAPE_WARMUP` | `1` | after `/health`, burn DFlash2 BLOCK / sampler / kpool shapes (nonfatal) |
@@ -588,6 +612,7 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `overlay/patch_ablit.py` | install the load_weights hook; bind-mounted and run on both ranks |
 | `ablit/` | direction vectors + `LAYER_MAP.json` from drowzeys' published recipe; `fetch_transplant.py` + `transplant/` for the donor o_proj byte-copy |
 | `tests/test_ablit.py` | recipe integrity, orthogonalization math, TP-shard equivalence, transplant byte-copy + TP slice, hook gating |
+| `tests/test_default_reasoning_effort.sh` | `GLM53_DEFAULT_REASONING_EFFORT` enum guard (`""`/`low`/`high`/`max`; `medium` rejected) and the `--default-chat-template-kwargs` flag at both rank sites, sliced out of `start.sh` and evaluated |
 | `scripts/boot-shape-warmup.sh` | post-`/health` DFlash2 k=7 BLOCK ladder + sampler/kpool arms |
 
 Image-build runs `EXL3_SELFCHECK_GPU=0`. `./start.sh` runs the GPU self-check

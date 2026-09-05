@@ -84,6 +84,12 @@ _cli_indexer_workspace_set="${GLM53_INDEXER_WORKSPACE+1}"
 _cli_indexer_workspace="${GLM53_INDEXER_WORKSPACE-}"
 _cli_spinwait_ms_set="${GLM53_SPINWAIT_MS+1}"
 _cli_spinwait_ms="${GLM53_SPINWAIT_MS-}"
+# Setness-aware: the recipe default is EMPTY, so "non-empty means the
+# caller set it" cannot distinguish `GLM53_DEFAULT_REASONING_EFFORT= ./start.sh`
+# (deliberately back to the template default) from an unset var. An
+# explicitly empty caller value must win over .env, not be swallowed by it.
+_cli_default_effort_set="${GLM53_DEFAULT_REASONING_EFFORT+1}"
+_cli_default_effort="${GLM53_DEFAULT_REASONING_EFFORT-}"
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
@@ -110,6 +116,7 @@ set +a
 [ -n "${_cli_ablit_mtp}" ] && ABLIT_INCLUDE_MTP="$_cli_ablit_mtp"
 [ -n "${_cli_indexer_workspace_set}" ] && GLM53_INDEXER_WORKSPACE="$_cli_indexer_workspace"
 [ -n "${_cli_spinwait_ms_set}" ] && GLM53_SPINWAIT_MS="$_cli_spinwait_ms"
+[ -n "${_cli_default_effort_set}" ] && GLM53_DEFAULT_REASONING_EFFORT="$_cli_default_effort"
 
 # ----------------------------- configuration -------------------------------
 MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"
@@ -252,6 +259,19 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # Mixed-step prefill policy when a peer is already decoding (issue #6).
 # skip = do not mix; N>0 = cap tokens; 0 = off.
 GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
+# Server-side default reasoning effort, injected as
+# `--default-chat-template-kwargs '{"reasoning_effort":"<v>"}'`.
+# EMPTY (the default) changes nothing -- but note what "nothing" means here:
+# files/chat_template.jinja line 7 maps reasoning_effort to itself only for
+# 'low'/'high' and to 'max' for everything else, INCLUDING undefined. So a
+# client that omits chat_template_kwargs gets Reasoning Effort: Max, the most
+# expensive setting. Measured on one agentic build task, unset(max) vs high
+# scored identically (80/80) at 4.6x the wall time and 4.8x the completion
+# tokens, so `high` is the recommendation for agentic coding
+# (docs/RECEIPTS-default-reasoning-effort.md). Set per-request
+# chat_template_kwargs.reasoning_effort to override this default.
+# low | high | max; empty or unset = send no flag.
+GLM53_DEFAULT_REASONING_EFFORT="${GLM53_DEFAULT_REASONING_EFFORT-}"
 # Sparse-indexer prefill gather workspace (overlay/patch_indexer_workspace.py).
 # stock = max_model_len * 40 entries (5036.40 MB locked at 1M, measured);
 # rightsize = the legal per-step maximum, ~+26% KV. Default applies only
@@ -333,6 +353,12 @@ _glm53_canonical_positive_int() {
 # here turns a container boot failure into a launcher error. The match is
 # literal on both sides -- the "-stock" default applies only to an UNSET var,
 # so "", " rightsize " and "RIGHTSIZE" all fail here and would fail there.
+# For GLM53_DEFAULT_REASONING_EFFORT the same literal match -- no trimming,
+# no case folding -- means "High" and " high " are rejected here
+# rather than being handed to vLLM, which would accept the JSON and then
+# silently render Max at the template. That is also why the reasoning-effort
+# enum is low|high|max and NOT medium: files/chat_template.jinja recognizes
+# only low/high and falls back to max, so a 'medium' default would be a lie.
 _glm53_validate_enum() {
     local name="$1" value="$2" allowed
     shift 2
@@ -364,6 +390,13 @@ validate_numeric_config() {
     _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-stock}" \
         stock rightsize || return
     _glm53_validate_spinwait_ms || return
+    # Empty/unset is legal and means "send no flag" (the template then renders
+    # Max). Anything non-empty must be exactly one of the three the template
+    # can act on, so the enum stays low|high|max and the error text stays clean.
+    if [ -n "${GLM53_DEFAULT_REASONING_EFFORT-}" ]; then
+        _glm53_validate_enum GLM53_DEFAULT_REASONING_EFFORT \
+            "$GLM53_DEFAULT_REASONING_EFFORT" low high max || return
+    fi
 }
 # GLM53 numeric config guard (end)
 
@@ -954,6 +987,14 @@ ARGS=(
 [ -n "${MAX_NUM_SEQS:-}" ] && ARGS+=(--max-num-seqs "${MAX_NUM_SEQS}")
 [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ] && ARGS+=(--max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}")
 [ -n "${KV_CACHE_DTYPE:-}" ] && ARGS+=(--kv-cache-dtype "${KV_CACHE_DTYPE}")
+# Server-side default reasoning effort. Empty = no flag, and the template then
+# renders Max for any client that omits chat_template_kwargs. The JSON is a
+# single argv element and contains no spaces, so it survives both the array
+# expansion here and the word-split `${worker_nccl}` env path on the worker.
+# Request-level chat_template_kwargs override this default.
+if [ -n "${GLM53_DEFAULT_REASONING_EFFORT:-}" ]; then
+    ARGS+=(--default-chat-template-kwargs "{\"reasoning_effort\":\"${GLM53_DEFAULT_REASONING_EFFORT}\"}")
+fi
 if [ "${SPEC_METHOD:-mtp}" = "dflash" ]; then
     ARGS+=(--speculative-config "$(python3 -S -c 'import json,os
 spec={"method":"dflash","model":os.environ["DFLASH_MODEL_DIR"],"num_speculative_tokens":int(os.environ.get("DFLASH_TOKENS","7")),"kv_cache_dtype":"auto","draft_sample_method":"probabilistic","rejection_sample_method":"standard"}
@@ -1052,6 +1093,14 @@ ARGS=(
 [ -n "${MAX_NUM_SEQS:-}" ] && ARGS+=(--max-num-seqs "${MAX_NUM_SEQS}")
 [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ] && ARGS+=(--max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}")
 [ -n "${KV_CACHE_DTYPE:-}" ] && ARGS+=(--kv-cache-dtype "${KV_CACHE_DTYPE}")
+# Server-side default reasoning effort. Empty = no flag, and the template then
+# renders Max for any client that omits chat_template_kwargs. The JSON is a
+# single argv element and contains no spaces, so it survives both the array
+# expansion here and the word-split `${worker_nccl}` env path on the worker.
+# Request-level chat_template_kwargs override this default.
+if [ -n "${GLM53_DEFAULT_REASONING_EFFORT:-}" ]; then
+    ARGS+=(--default-chat-template-kwargs "{\"reasoning_effort\":\"${GLM53_DEFAULT_REASONING_EFFORT}\"}")
+fi
 if [ "${SPEC_METHOD:-mtp}" = "dflash" ]; then
     ARGS+=(--speculative-config "$(python3 -S -c 'import json,os
 spec={"method":"dflash","model":os.environ["DFLASH_MODEL_DIR"],"num_speculative_tokens":int(os.environ.get("DFLASH_TOKENS","7")),"kv_cache_dtype":"auto","draft_sample_method":"probabilistic","rejection_sample_method":"standard"}
@@ -1170,6 +1219,7 @@ launch_cluster() {
         -e VLLM_CACHE_ROOT=/root/.cache/vllm
         -e "GLM53_SUPPRESS_STOPS_IN_REASONING=$GLM53_SUPPRESS_STOPS_IN_REASONING"
         -e "GLM53_MIXED_PREFILL_CHUNK=$GLM53_MIXED_PREFILL_CHUNK"
+        -e "GLM53_DEFAULT_REASONING_EFFORT=${GLM53_DEFAULT_REASONING_EFFORT-}"
         -e "GLM53_INDEXER_WORKSPACE=$GLM53_INDEXER_WORKSPACE"
         -e "GLM53_SPINWAIT_MS=$GLM53_SPINWAIT_MS"
         -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
