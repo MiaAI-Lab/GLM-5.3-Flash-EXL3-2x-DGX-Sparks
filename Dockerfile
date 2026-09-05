@@ -450,6 +450,11 @@ COPY overlay/patch_scheduler_decode_floor.py /opt/glm53/patch_scheduler_decode_f
 COPY tests/test_scheduler_decode_floor.py /opt/glm53/test_scheduler_decode_floor.py
 COPY overlay/patch_hybrid_prefix_hit.py /opt/glm53/patch_hybrid_prefix_hit.py
 COPY tests/test_hybrid_prefix_hit.py /opt/glm53/test_hybrid_prefix_hit.py
+COPY overlay/patch_kv_offload_scope.py /opt/glm53/patch_kv_offload_scope.py
+COPY overlay/patch_kv_offload_store_local.py /opt/glm53/patch_kv_offload_store_local.py
+COPY overlay/kv_offload_store_gc.py /opt/glm53/kv_offload_store_gc.py
+COPY tests/test_kv_offload_scope.py /opt/glm53/test_kv_offload_scope.py
+COPY tests/test_kv_offload_store_local.py /opt/glm53/test_kv_offload_store_local.py
 COPY overlay/patch_xgrammar_termination.py /opt/glm53/patch_xgrammar_termination.py
 COPY tests/test_xgrammar_termination.py /opt/glm53/test_xgrammar_termination.py
 COPY overlay/patch_kpool_tail_slotmap.py /opt/glm53/patch_kpool_tail_slotmap.py
@@ -469,6 +474,14 @@ RUN python3 /opt/glm53/patch_glm5_drafter_group.py
 RUN python3 /opt/glm53/patch_suppress_stops_in_reasoning.py
 RUN python3 /opt/glm53/patch_scheduler_decode_floor.py
 RUN python3 /opt/glm53/patch_hybrid_prefix_hit.py
+# Order-dependent pair: scope rewrites the offloading connector group
+# pairing; store_local anchors on scope's scheduler output. Host tests run
+# against the REAL in-image tree first (preflight + patched-runtime drive),
+# then the patchers bake the overlays in.
+RUN GLM53_REQUIRE_TARGET=1 python3 /opt/glm53/test_kv_offload_scope.py
+RUN python3 /opt/glm53/patch_kv_offload_scope.py
+RUN python3 /opt/glm53/patch_kv_offload_store_local.py
+RUN python3 /opt/glm53/test_kv_offload_store_local.py
 RUN python3 /opt/glm53/patch_xgrammar_termination.py
 RUN python3 /opt/glm53/patch_kpool_tail_slotmap.py
 # Applied unconditionally; the injected sizing reads GLM53_INDEXER_WORKSPACE
