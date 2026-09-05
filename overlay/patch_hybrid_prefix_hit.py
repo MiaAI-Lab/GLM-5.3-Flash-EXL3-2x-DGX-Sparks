@@ -20,8 +20,15 @@ mamba miss is a correctness hole (vLLM #47491 / #43090).
 This patch: flag only exact SlidingWindowSpec groups as EAGLE, and do not
 let that drafter group shrink ``curr_hit_length``. If the drafter window
 does not cover the MLA/mamba hit, leave its blocks empty so a fresh
-window is allocated (zeros / new pages). Wrong indexer tail state is
-fatal — we do not touch KpoolTailManager.
+window is allocated (zeros / new pages).
+
+KpoolTail is deliberately per-request scratch and cannot prefix-cache. A
+resumed request therefore starts with an empty indexer-tail ring. Replaying
+fewer than one complete kpool leaves the ring incomplete and changes sparse
+attention selection. Clamp the shared hit back to an earlier scheduler
+boundary when necessary so at least one complete kpool is rebuilt before
+decode. This preserves the older MLA/Mamba prefix hit while making the
+non-shareable target state deterministic.
 
 Fail closed if the vLLM coordinator anchors drift.
 """
@@ -38,8 +45,9 @@ P = Path(
     )
 )
 MARK = "# [glm53-hybrid-apc]"
+DFLASH_REPLAY_MARK = "# [glm53-dflash-swa-replay-v1]"
 
-HELPER = '''
+BASE_HELPER = '''
 def _glm53_inner_kv_spec(spec):
     specs = getattr(spec, "kv_cache_specs", None)
     if isinstance(specs, dict) and specs:
@@ -50,6 +58,38 @@ def _glm53_inner_kv_spec(spec):
 def _glm53_is_draft_swa_spec(spec) -> bool:
     """DFlash2 drafter: exact SlidingWindowSpec, not KpoolTailSpec."""
     return type(_glm53_inner_kv_spec(spec)).__name__ == "SlidingWindowSpec"
+
+
+'''
+
+DFLASH_REPLAY_HELPER = '''
+def _glm53_dflash_swa_replay_tokens(kv_cache_groups) -> int:
+    """Fresh tokens required to rebuild the DFlash sliding-attention window."""
+    replay = 0
+    for group in kv_cache_groups:
+        spec = _glm53_inner_kv_spec(group.kv_cache_spec)
+        if type(spec).__name__ == "SlidingWindowSpec":
+            replay = max(replay, int(getattr(spec, "sliding_window", 0) or 0))
+    return replay
+
+
+def _glm53_dflash_replay_safe_hit(
+    hit_length: int,
+    max_cache_hit_length: int,
+    replay_tokens: int,
+    alignment_tokens: int,
+) -> int:
+    """Move an APC hit back until the fresh suffix rebuilds DFlash SWA."""
+    if hit_length <= 0 or replay_tokens <= 0:
+        return hit_length
+    # max_cache_hit_length is prompt_tokens - 1 because the final prompt token
+    # is always recomputed for logits. Include that token in the fresh replay.
+    fresh_tokens = max_cache_hit_length + 1 - hit_length
+    if fresh_tokens >= replay_tokens:
+        return hit_length
+    deficit = replay_tokens - fresh_tokens
+    pages = (deficit + alignment_tokens - 1) // alignment_tokens
+    return max(0, hit_length - pages * alignment_tokens)
 
 
 '''
@@ -139,6 +179,60 @@ LOG_NEW = """        # Propagate the eagle bit to each manager (default to ``use
         )
 """
 
+INIT_OLD = """        self.verify_and_split_kv_cache_groups()
+"""
+
+INIT_NEW = """        self.verify_and_split_kv_cache_groups()
+        # [glm53-dflash-swa-replay-v1] The DFlash drafter needs a complete fresh
+        # sliding-attention window after an APC switch. The target KpoolTail is a
+        # separate 4-token request-local scratch group and is not this 2048-token
+        # replay requirement.
+        self.dflash_swa_replay_tokens = _glm53_dflash_swa_replay_tokens(
+            kv_cache_config.kv_cache_groups
+        )
+        logger.info(
+            "[glm53-dflash-swa-replay-v1] replay_tokens=%d alignment=%d",
+            self.dflash_swa_replay_tokens,
+            self._cache_hit_alignment_tokens,
+        )
+"""
+
+CONVERGE_OLD = """            if curr_hit_length >= hit_length:
+                break
+"""
+
+CONVERGE_NEW = """            if curr_hit_length >= hit_length:
+                replay_safe_hit = _glm53_dflash_replay_safe_hit(  # [glm53-dflash-swa-replay-v1]
+                    curr_hit_length,
+                    max_cache_hit_length,
+                    self.dflash_swa_replay_tokens,
+                    self._cache_hit_alignment_tokens,
+                )
+                if replay_safe_hit < curr_hit_length:
+                    logger.info(
+                        "[glm53-dflash-swa-replay-v1] replay clamp hit=%d->%d "
+                        "fresh=%d required=%d alignment=%d",
+                        curr_hit_length,
+                        replay_safe_hit,
+                        max_cache_hit_length + 1 - curr_hit_length,
+                        self.dflash_swa_replay_tokens,
+                        self._cache_hit_alignment_tokens,
+                    )
+                    hit_length = replay_safe_hit
+                    # Cached drafter blocks were looked up at the larger target
+                    # hit and cannot be paired with a backed-up target state.
+                    # Discard them so the fresh replay rebuilds the complete
+                    # DFlash sliding-attention window at the new boundary.
+                    for draft_spec, draft_group_ids, _, _ in self.attention_groups:
+                        if _glm53_is_draft_swa_spec(draft_spec):
+                            for draft_group_id in draft_group_ids:
+                                hit_blocks_by_group[draft_group_id] = None
+                                hit_length_by_group[draft_group_id] = 0
+                    eagle_verified.clear()
+                    continue
+                break
+"""
+
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
     n = text.count(old)
@@ -151,19 +245,52 @@ def main() -> int:
     if not P.is_file():
         raise SystemExit(f"missing {P}")
     text = P.read_text()
-    if MARK in text:
-        print(f"{P.name}: {MARK} already present — skipping")
-        return 0
     needle = "def _validate_prefix_cache_retention_interval(\n"
     if text.count(needle) != 1:
         raise SystemExit(f"{P}: helper insert point not unique")
-    if "def _glm53_inner_kv_spec(" not in text:
-        text = text.replace(needle, HELPER + needle, 1)
-    text = replace_once(text, EAGLE_OLD, EAGLE_NEW, "eagle-fallback")
-    text = replace_once(text, MIN_OLD, MIN_NEW, "hybrid-min")
-    text = replace_once(text, LOG_OLD, LOG_NEW, "group-log")
+    if MARK not in text:
+        if "def _glm53_inner_kv_spec(" not in text:
+            text = text.replace(needle, BASE_HELPER + needle, 1)
+        text = replace_once(text, EAGLE_OLD, EAGLE_NEW, "eagle-fallback")
+        text = replace_once(text, MIN_OLD, MIN_NEW, "hybrid-min")
+        text = replace_once(text, LOG_OLD, LOG_NEW, "group-log")
+    if DFLASH_REPLAY_MARK not in text:
+        if "def _glm53_dflash_swa_replay_tokens(" not in text:
+            # Keep byte-identical composition with the per-group overlay in
+            # either order: Kpool helpers precede its retention helpers.
+            replay_needle = (
+                "def _glm53_swa_retention_env("
+                if "def _glm53_swa_retention_env(" in text
+                else needle
+            )
+            text = text.replace(
+                replay_needle, DFLASH_REPLAY_HELPER + replay_needle, 1
+            )
+        text = replace_once(text, INIT_OLD, INIT_NEW, "dflash-replay-init")
+        text = replace_once(text, CONVERGE_OLD, CONVERGE_NEW, "dflash-replay-clamp")
+    # Canonicalize only the two adjacent injected helper boundaries. The two
+    # overlays both insert before the upstream validator, so without this the
+    # application order can differ by one blank line despite identical code.
+    for left, right in (
+        (
+            'return type(_glm53_inner_kv_spec(spec)).__name__ == "SlidingWindowSpec"',
+            "def _glm53_dflash_swa_replay_tokens(",
+        ),
+        (
+            "return max(0, hit_length - pages * alignment_tokens)",
+            "def _glm53_swa_retention_env(",
+        ),
+    ):
+        if left in text and right in text:
+            left_end = text.index(left) + len(left)
+            right_start = text.index(right, left_end)
+            if text[left_end:right_start].strip():
+                raise SystemExit(f"{P}: unexpected code between injected helpers")
+            text = text[:left_end] + "\n\n\n" + text[right_start:]
     P.write_text(text)
-    print(f"patched {P.name} (hybrid APC: drafter SWA skipped in min, eagle on SWA only)")
+    print(
+        f"patched {P.name} (hybrid APC + versioned DFlash SWA replay clamp)"
+    )
     return 0
 
 

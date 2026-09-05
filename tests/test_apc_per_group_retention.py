@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Host test for patch_apc_per_group_retention.py (no GPU, no vLLM import).
 
-Applies the overlay to a *copy* of kv_cache_coordinator.py and then exercises the
-injected helpers directly, so the test asserts behaviour rather than the presence
-of strings. Fails closed: any problem exits non-zero.
+Applies the overlay to *copies* of kv_cache_coordinator.py and block_pool.py,
+then exercises the injected helpers and eviction policy directly. Fails closed:
+any problem exits non-zero.
 
     GLM53_KV_COORDINATOR_PY_SRC=/path/to/fork/kv_cache_coordinator.py \\
+    GLM53_BLOCK_POOL_PY_SRC=/path/to/fork/block_pool.py \\
         python3 test_apc_per_group_retention.py
 
 `..._SRC` may already carry overlay/patch_hybrid_prefix_hit.py. The overlay
@@ -18,12 +19,17 @@ Default source is the in-container path.
 from __future__ import annotations
 
 import ast
+import copy
+from collections import namedtuple
+from collections.abc import Iterable
+import difflib
 import os
 import py_compile
 import shutil
 import subprocess
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -42,10 +48,21 @@ MIA_PATCH = _find("patch_hybrid_prefix_hit.py")
 DEFAULT_SRC = Path(
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_coordinator.py"
 )
+DEFAULT_BP_SRC = Path(
+    "/usr/local/lib/python3.12/dist-packages/vllm/v1/core/block_pool.py"
+)
+DEFAULT_STM_SRC = Path(
+    "/usr/local/lib/python3.12/dist-packages/vllm/v1/core/"
+    "single_type_kv_cache_manager.py"
+)
 FALLBACK_PRISTINE = Path("/tmp/kv_cache_coordinator_pristine.py")
 
 MARKER = "# [glm53-apc-per-group]"
 MIA_MARKER = "# [glm53-hybrid-apc]"
+PRIORITY_MARKER = "# [glm53-apc-drafter-priority]"
+PRIOR_HELPER_MARKER = "# [glm53-dflash-prior-helper-v1]"
+PRIOR_POLICY_MARKER = "# [glm53-dflash-prior-policy-v1]"
+PRIOR_MANAGER_MARKER = "# [glm53-dflash-prior-manager-v1]"
 
 HELPERS = (
     "_glm53_inner_kv_spec",
@@ -56,11 +73,17 @@ HELPERS = (
     "_glm53_resolve_retention_by_group",
     "_glm53_validate_retention_intervals",
     "_glm53_format_retention_vector",
+    "_glm53_dflash_prior_mamba_group_ids",
+)
+COMPOSED_HELPERS = HELPERS + (
+    "_glm53_dflash_swa_replay_tokens",
+    "_glm53_dflash_replay_safe_hit",
 )
 
 ALIGN = 3584  # scheduler_block_size on this kit
 DRAFT_WINDOW = 2048
 DRAFT_BLOCK = 64
+KPOOL_TAIL_TOKENS = 4
 SWA_ENV = "VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA"
 
 
@@ -71,25 +94,37 @@ class SlidingWindowSpec:  # exact type name is the discriminator
     def __init__(self, sliding_window=DRAFT_WINDOW, block_size=DRAFT_BLOCK):
         self.sliding_window = sliding_window
         self.block_size = block_size
+        self.participates_in_prefix_caching = True
 
 
 class KpoolTailSpec(SlidingWindowSpec):
     """Subclasses SlidingWindowSpec upstream; must NOT be treated as the drafter."""
 
+    def __init__(self):
+        super().__init__(
+            sliding_window=KPOOL_TAIL_TOKENS, block_size=KPOOL_TAIL_TOKENS
+        )
+        self.participates_in_prefix_caching = False
+
 
 class MambaSpec:
     def __init__(self, block_size=ALIGN):
         self.block_size = block_size
+        self.mamba_cache_mode = "align"
+        self.participates_in_prefix_caching = True
 
 
 class MLAAttentionSpec:
     def __init__(self, block_size=ALIGN):
         self.block_size = block_size
+        self.participates_in_prefix_caching = True
 
 
 class UniformTypeKVCacheSpecs:
     def __init__(self, inner):
         self.kv_cache_specs = {"layer.0": inner}
+        self.block_size = inner.block_size
+        self.participates_in_prefix_caching = inner.participates_in_prefix_caching
 
 
 class Group:
@@ -97,6 +132,7 @@ class Group:
 
     def __init__(self, spec):
         self.kv_cache_spec = spec
+        self.is_eagle_group = False
 
 
 def uniform(inner):
@@ -173,18 +209,18 @@ def max_segments(c, d, b, b_d, turns=3, pool=642):
 # ----------------------------------------------------------------- helpers --
 
 
-def load_helpers(patched_text: str) -> dict:
+def load_helpers(patched_text: str, helpers=HELPERS) -> dict:
     """Exec only the injected helper functions in an isolated namespace."""
     tree = ast.parse(patched_text)
     wanted = {
         node.name: node
         for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name in HELPERS
+        if isinstance(node, ast.FunctionDef) and node.name in helpers
     }
-    missing = set(HELPERS) - set(wanted)
+    missing = set(helpers) - set(wanted)
     if missing:
         raise AssertionError(f"patched file is missing helpers: {sorted(missing)}")
-    module = ast.Module(body=[wanted[name] for name in HELPERS], type_ignores=[])
+    module = ast.Module(body=[wanted[name] for name in helpers], type_ignores=[])
     ast.fix_missing_locations(module)
     ns: dict = {"os": os}
     exec(compile(module, "<glm53-helpers>", "exec"), ns)  # noqa: S102
@@ -204,9 +240,16 @@ def raises(fn, *args, **kwargs):
     return False
 
 
-def apply_patch(patch: Path, target: Path) -> None:
+def apply_patch(
+    patch: Path,
+    target: Path,
+    block_pool: Path,
+    single_type_manager: Path,
+) -> None:
     env = os.environ.copy()
     env["GLM53_KV_COORDINATOR_PY"] = str(target)
+    env["GLM53_BLOCK_POOL_PY"] = str(block_pool)
+    env["GLM53_SINGLE_TYPE_KV_CACHE_MANAGER_PY"] = str(single_type_manager)
     subprocess.check_call([sys.executable, str(patch)], env=env)
 
 
@@ -332,6 +375,28 @@ def test_resolve(ns):
     print("  resolved vector + fail-closed override OK")
 
 
+def test_dflash_prior_groups(ns):
+    """Only sparse Mamba groups in a hybrid DFlash layout get the extra state."""
+    fn = ns["_glm53_dflash_prior_mamba_group_ids"]
+    groups = live_layout()
+    check(
+        fn(groups, (0,) * 7, True) == frozenset({2, 3, 4, 5}),
+        "live all-zero layout must retain one prior checkpoint in four Mamba groups",
+    )
+    check(
+        fn(groups, (None, None, 0, None, 0, None, 0), True)
+        == frozenset({2, 4}),
+        "only Mamba groups whose interval is zero qualify",
+    )
+    check(fn(groups, (0,) * 7, False) == frozenset(), "base coordinator -> none")
+    without_dflash = groups[:-1]
+    check(
+        fn(without_dflash, (0,) * len(without_dflash), True) == frozenset(),
+        "hybrid layout without DFlash SWA -> none",
+    )
+    print("  DFlash prior-Mamba group selection OK")
+
+
 def test_env(ns):
     """Codex #5: the raw env value is validated unconditionally."""
     fn = ns["_glm53_swa_retention_env"]
@@ -452,7 +517,427 @@ def test_call_sites(pristine: str, text: str):
     print("  call sites + boot log line OK")
 
 
-def test_composition(pristine_src: Path, tmp: Path):
+def test_drafter_priority(block_pool_text: str):
+    """Execute the injected free_blocks method against a small fake queue."""
+    tree = ast.parse(block_pool_text)
+    block_pool_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "BlockPool"
+    )
+    free_blocks = next(
+        node
+        for node in block_pool_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "free_blocks"
+    )
+    module = ast.Module(body=[free_blocks], type_ignores=[])
+    ast.fix_missing_locations(module)
+
+    class FakeBlock:
+        def __init__(self, block_id, block_hash, ref_cnt=1, is_null=False):
+            self.block_id = block_id
+            self.block_hash = block_hash
+            self.ref_cnt = ref_cnt
+            self.is_null = is_null
+
+    class FakeQueue:
+        def __init__(self):
+            self.items = ["existing"]
+
+        def prepend_n(self, blocks):
+            self.items[:0] = blocks
+
+        def append_n(self, blocks):
+            self.items.extend(blocks)
+
+    ns = {
+        "Iterable": Iterable,
+        "KVCacheBlock": FakeBlock,
+        "get_group_id": lambda key: key[0],
+    }
+    exec(compile(module, "<glm53-block-pool>", "exec"), ns)  # noqa: S102
+
+    pool = types.SimpleNamespace(
+        enable_caching=True,
+        low_priority_cache_group_ids=frozenset({6}),
+        cached_block_hashes_by_block={4: {(2, "mamba")}},
+        free_block_queue=FakeQueue(),
+    )
+    unhashed = FakeBlock(1, None)
+    drafter = FakeBlock(2, (6, "draft"))
+    target = FakeBlock(3, (0, "mla"))
+    mixed = FakeBlock(4, (6, "draft-shared"))
+    still_used = FakeBlock(5, (6, "active"), ref_cnt=2)
+    ns["free_blocks"](pool, [unhashed, drafter, target, mixed, still_used])
+    check(
+        pool.free_block_queue.items == [unhashed, drafter, "existing", target, mixed],
+        "eviction order must be unhashed, drafter-only, existing, then target/mixed",
+    )
+    check(still_used.ref_cnt == 1, "referenced block must not enter the free queue")
+
+    inherited = types.SimpleNamespace(
+        enable_caching=True,
+        low_priority_cache_group_ids=frozenset(),
+        cached_block_hashes_by_block={},
+        free_block_queue=FakeQueue(),
+    )
+    ordinary_draft = FakeBlock(6, (6, "ordinary"))
+    ns["free_blocks"](inherited, [ordinary_draft])
+    check(
+        inherited.free_block_queue.items == ["existing", ordinary_draft],
+        "without explicit SWA=0, drafter blocks must retain ordinary LRU priority",
+    )
+    print("  drafter-only eviction priority + mixed-block protection OK")
+
+
+def test_prior_boundary_cache_call(single_type_text: str):
+    """Execute cache_blocks and inspect the boundaries passed to Mamba masking."""
+    tree = ast.parse(single_type_text)
+    manager_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SingleTypeKVCacheManager"
+    )
+    cache_blocks = next(
+        node
+        for node in manager_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "cache_blocks"
+    )
+    cache_blocks.decorator_list = []
+    module = ast.Module(body=[cache_blocks], type_ignores=[])
+    ast.fix_missing_locations(module)
+    ns = {"Request": object}
+    exec(compile(module, "<glm53-single-type>", "exec"), ns)  # noqa: S102
+
+    seen = []
+
+    class Pool:
+        def cache_full_blocks(self, **kwargs):
+            seen.append(kwargs["block_mask"])
+
+    def make_manager(enabled):
+        manager = types.SimpleNamespace(
+            num_cached_block={"r": 0},
+            block_size=ALIGN,
+            scheduler_block_size=ALIGN,
+            kv_cache_spec=MambaSpec(),
+            use_eagle=False,
+            block_pool=Pool(),
+            req_to_blocks={"r": [object()] * 6},
+            kv_cache_group_id=2,
+        )
+        if enabled:
+            manager._glm53_retain_previous_dflash_boundary = True
+
+        def reachable_block_mask(**kwargs):
+            return tuple(kwargs["reachable_boundaries"])
+
+        manager.reachable_block_mask = reachable_block_mask
+        return manager
+
+    request = types.SimpleNamespace(
+        request_id="r", num_prompt_tokens=21505, shared_prefix_boundary=14336
+    )
+    ns["cache_blocks"](make_manager(True), request, 21504, retention_interval=0)
+    check(
+        seen.pop() == (21504, 14336, 17920),
+        "non-aligned prompt must retain final, junction, and one prior replay boundary",
+    )
+    ns["cache_blocks"](make_manager(False), request, 21504, retention_interval=0)
+    check(
+        seen.pop() == (21504, 14336),
+        "groups without the scoped policy must retain upstream boundaries only",
+    )
+    print("  prior-boundary cache_blocks append/edit/junction inputs OK")
+
+
+def _method_from_source(text: str, class_name: str, method_name: str):
+    tree = ast.parse(text)
+    cls = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == class_name
+    )
+    method = copy.deepcopy(
+        next(
+            node
+            for node in cls.body
+            if isinstance(node, ast.FunctionDef) and node.name == method_name
+        )
+    )
+    method.decorator_list = []
+    method.name = f"_{class_name}_{method_name}"
+    module = ast.Module(body=[method], type_ignores=[])
+    ast.fix_missing_locations(module)
+    return method.name, module
+
+
+def test_composed_runtime_paths(
+    coordinator_text: str,
+    block_pool_text: str,
+    single_type_text: str,
+):
+    """Execute the injected init/cache/hit/free paths on the live seven groups.
+
+    This is deliberately stubbed below GPU/model loading but uses the methods
+    extracted from the fully composed runtime files. It catches unresolved
+    injected names and marker-only migration mistakes before a production boot.
+    """
+    for marker in (
+        "# [glm53-hybrid-apc]",
+        "# [glm53-dflash-swa-replay-v1]",
+        PRIOR_HELPER_MARKER,
+        PRIOR_POLICY_MARKER,
+    ):
+        check(marker in coordinator_text, f"composed coordinator missing {marker}")
+    check(
+        PRIOR_MANAGER_MARKER in single_type_text,
+        "composed single-type manager missing prior-boundary migration",
+    )
+
+    helper_ns = load_helpers(coordinator_text, COMPOSED_HELPERS)
+
+    class FakeBlockPool:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.low_priority_cache_group_ids = frozenset()
+
+    class FakeManager:
+        supports_fine_grained_hash_lookup = False
+
+        def __init__(self, spec, group_id):
+            self.block_size = spec.block_size
+            self.group_id = group_id
+            self.use_eagle = False
+            self.cache_calls = []
+
+        def cache_blocks(self, request, num_tokens, retention_interval=None):
+            self.cache_calls.append((request, num_tokens, retention_interval))
+
+    def get_manager_for_kv_cache_spec(kv_cache_spec, kv_cache_group_id, **kwargs):
+        return FakeManager(kv_cache_spec, kv_cache_group_id)
+
+    class HybridKVCacheCoordinator:
+        """Temporary discriminator while the exact base initializer is compiled."""
+
+    class FakeLogger:
+        def __init__(self):
+            self.records = []
+
+        def info(self, *args):
+            self.records.append(args)
+
+        def warning_once(self, *args):
+            self.records.append(args)
+
+    init_name, init_module = _method_from_source(
+        coordinator_text, "KVCacheCoordinator", "__init__"
+    )
+    logger = FakeLogger()
+    ns = {
+        **helper_ns,
+        "KVCacheConfig": object,
+        "KVCacheMetricsCollector": object,
+        "BlockPool": FakeBlockPool,
+        "get_manager_for_kv_cache_spec": get_manager_for_kv_cache_spec,
+        "_validate_prefix_cache_retention_interval": lambda *args: None,
+        "envs": types.SimpleNamespace(VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0),
+        "HybridKVCacheCoordinator": HybridKVCacheCoordinator,
+        "logger": logger,
+    }
+    exec(compile(init_module, "<exact-image-coordinator-init>", "exec"), ns)  # noqa: S102
+
+    base_init = ns[init_name]
+
+    class KVCacheCoordinator:
+        def __init__(self, *args, **kwargs):
+            base_init(self, *args, **kwargs)
+
+        def verify_and_split_kv_cache_groups(self):
+            pass
+
+    tree = ast.parse(coordinator_text)
+    exact_hybrid = copy.deepcopy(
+        next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "HybridKVCacheCoordinator"
+        )
+    )
+    exact_hybrid.bases = [ast.Name(id="KVCacheCoordinator", ctx=ast.Load())]
+    exact_hybrid.keywords = []
+    exact_hybrid.body = [
+        node
+        for node in exact_hybrid.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"__init__", "_cache_hit_alignment_tokens"}
+    ]
+    hybrid_module = ast.Module(body=[exact_hybrid], type_ignores=[])
+    ast.fix_missing_locations(hybrid_module)
+    hybrid_ns = {
+        "KVCacheCoordinator": KVCacheCoordinator,
+        "KVCacheConfig": object,
+        "KVCacheMetricsCollector": object,
+        "FullAttentionSpec": MLAAttentionSpec,
+        "MambaSpec": MambaSpec,
+        "logger": logger,
+        **helper_ns,
+    }
+    exec(compile(hybrid_module, "<exact-image-hybrid-init>", "exec"), hybrid_ns)  # noqa: S102
+    HybridKVCacheCoordinator = hybrid_ns["HybridKVCacheCoordinator"]
+    base_init.__globals__["HybridKVCacheCoordinator"] = HybridKVCacheCoordinator
+
+    config = types.SimpleNamespace(
+        kv_cache_groups=live_layout(),
+        num_blocks=390,
+        needs_kv_cache_zeroing=False,
+    )
+    saved = os.environ.get(SWA_ENV)
+    os.environ[SWA_ENV] = "0"
+    try:
+        coordinator = HybridKVCacheCoordinator(
+            config,
+            max_model_len=262144,
+            max_in_flight_tokens=2048,
+            use_eagle=True,
+            enable_caching=True,
+            enable_kv_cache_events=False,
+            dcp_world_size=1,
+            pcp_world_size=1,
+            scheduler_block_size=ALIGN,
+            hash_block_size=64,
+        )
+    finally:
+        if saved is None:
+            os.environ.pop(SWA_ENV, None)
+        else:
+            os.environ[SWA_ENV] = saved
+
+    check(coordinator.eagle_group_ids == {6}, "runtime init must isolate drafter gid 6")
+    check(
+        coordinator.retention_interval_by_group == (0,) * 7,
+        "runtime init must resolve the experimental all-zero vector",
+    )
+    check(
+        coordinator.dflash_replay_prior_group_ids == frozenset({2, 3, 4, 5}),
+        "runtime init must select all four sparse Mamba groups",
+    )
+    check(
+        coordinator.dflash_swa_replay_tokens == DRAFT_WINDOW,
+        "runtime init must derive DFlash's 2048-token SWA replay window",
+    )
+    check(
+        {
+            i
+            for i, manager in enumerate(coordinator.single_type_managers)
+            if getattr(manager, "_glm53_retain_previous_dflash_boundary", False)
+        }
+        == {2, 3, 4, 5},
+        "runtime init must arm only the four Mamba managers",
+    )
+
+    cache_name, cache_module = _method_from_source(
+        coordinator_text, "HybridKVCacheCoordinator", "cache_blocks"
+    )
+    cache_ns = {"Request": object}
+    exec(compile(cache_module, "<exact-image-coordinator-cache>", "exec"), cache_ns)  # noqa: S102
+    coordinator.enable_partial_hash_hits = False
+    coordinator.single_type_managers[6].use_eagle = True
+    request = types.SimpleNamespace(request_id="r")
+    cache_ns[cache_name](coordinator, request, 21569)
+    check(
+        [m.cache_calls[-1][2] for m in coordinator.single_type_managers] == [0] * 7,
+        "cache path must forward the resolved interval to every group",
+    )
+    check(
+        coordinator.single_type_managers[6].cache_calls[-1][1] == 21568,
+        "drafter cache path must preserve the one-block EAGLE lookahead",
+    )
+
+    class FullAttentionSpec:
+        pass
+
+    class HitMambaSpec:
+        pass
+
+    HitMambaSpec.__name__ = "MambaSpec"
+
+    class HitSlidingWindowSpec:
+        pass
+
+    HitSlidingWindowSpec.__name__ = "SlidingWindowSpec"
+
+    class HitManager:
+        supports_fine_grained_hash_lookup = False
+
+        @classmethod
+        def find_longest_cache_hit(cls, max_length, kv_cache_group_ids, **kwargs):
+            length = max_length // ALIGN * ALIGN
+            blocks = [[object()] * (length // ALIGN) for _ in kv_cache_group_ids]
+            return tuple(blocks), length
+
+    class DraftMissAtPriorManager(HitManager):
+        @classmethod
+        def find_longest_cache_hit(cls, max_length, kv_cache_group_ids, **kwargs):
+            # The latest 21504 boundary is cached, but the backed 17920 DFlash
+            # boundary is absent. The coordinator must not retain the stale
+            # later-boundary block list after target reconciliation.
+            if max_length < 21504:
+                return tuple([] for _ in kv_cache_group_ids), 0
+            return super().find_longest_cache_hit(
+                max_length=max_length,
+                kv_cache_group_ids=kv_cache_group_ids,
+                **kwargs,
+            )
+
+    SpecGroup = namedtuple("SpecGroup", "spec group_ids manager_cls use_eagle")
+    coordinator.attention_groups = [
+        SpecGroup(FullAttentionSpec(), [0], HitManager, False),
+        SpecGroup(HitMambaSpec(), [2, 3, 4, 5], HitManager, False),
+        SpecGroup(HitSlidingWindowSpec(), [6], DraftMissAtPriorManager, True),
+    ]
+    coordinator.dflash_swa_replay_tokens = DRAFT_WINDOW
+    coordinator.hash_block_size = 64
+    coordinator.dcp_world_size = 1
+    for i in (0, 2, 3, 4, 5):
+        coordinator.single_type_managers[i].block_size = ALIGN
+    coordinator.single_type_managers[6].block_size = 64
+
+    hit_name, hit_module = _method_from_source(
+        coordinator_text, "HybridKVCacheCoordinator", "find_longest_cache_hit"
+    )
+    hit_ns = {
+        "BlockHash": object,
+        "KVCacheBlock": object,
+        "FullAttentionSpec": FullAttentionSpec,
+        "MambaSpec": HitMambaSpec,
+        "cdiv": lambda a, b: (a + b - 1) // b,
+        "logger": logger,
+        **helper_ns,
+    }
+    exec(compile(hit_module, "<exact-image-coordinator-hit>", "exec"), hit_ns)  # noqa: S102
+    blocks, hit, uncached = hit_ns[hit_name](coordinator, [object()] * 400, 21568)
+    check(hit == 17920, f"hit path must clamp 21504 to prior state, got {hit}")
+    check(uncached == 3584, f"hit path uncached delta must be 3584, got {uncached}")
+    check(len(blocks) == 7 and len(blocks[0]) == 5, "hit path must return 7 groups")
+    check(
+        blocks[6] == [],
+        "backed-up target hit must discard stale later-boundary DFlash blocks, "
+        f"got {len(blocks[6])}",
+    )
+
+    test_prior_boundary_cache_call(single_type_text)
+    test_drafter_priority(block_pool_text)
+    print("  exact composed init/cache/hit/free execution OK")
+
+
+def test_composition(
+    pristine_src: Path,
+    pristine_bp_src: Path,
+    pristine_stm_src: Path,
+    tmp: Path,
+):
     """Codex #8: both overlays, both application orders, on a pristine source."""
     if MIA_PATCH is None:
         raise SystemExit("missing patch_hybrid_prefix_hit.py (overlay composition)")
@@ -462,12 +947,28 @@ def test_composition(pristine_src: Path, tmp: Path):
         ("ours-then-mia", (PATCH, MIA_PATCH)),
     ):
         dst = tmp / f"compose_{label}.py"
+        bp_dst = tmp / f"block_pool_{label}.py"
+        stm_dst = tmp / f"single_type_{label}.py"
         shutil.copyfile(pristine_src, dst)
+        shutil.copyfile(pristine_bp_src, bp_dst)
+        shutil.copyfile(pristine_stm_src, stm_dst)
         for patch in order:
-            apply_patch(patch, dst)
+            apply_patch(patch, dst, bp_dst, stm_dst)
         text = dst.read_text()
+        bp_text = bp_dst.read_text()
+        stm_text = stm_dst.read_text()
         py_compile.compile(str(dst), cfile=str(tmp / f"{label}.pyc"), doraise=True)
+        py_compile.compile(
+            str(bp_dst), cfile=str(tmp / f"block-pool-{label}.pyc"), doraise=True
+        )
+        py_compile.compile(
+            str(stm_dst), cfile=str(tmp / f"single-type-{label}.pyc"), doraise=True
+        )
         check(MARKER in text and MIA_MARKER in text, f"{label}: a MARK is missing")
+        check(PRIORITY_MARKER in bp_text, f"{label}: block-pool priority patch missing")
+        check(PRIOR_HELPER_MARKER in text, f"{label}: coordinator prior helper missing")
+        check(PRIOR_POLICY_MARKER in text, f"{label}: coordinator prior policy missing")
+        check(PRIOR_MANAGER_MARKER in stm_text, f"{label}: manager prior policy missing")
         check(text.count("def _glm53_inner_kv_spec(") == 1,
               f"{label}: shared helper duplicated")
         check(text.count("def _glm53_is_draft_swa_spec(") == 1,
@@ -476,8 +977,10 @@ def test_composition(pristine_src: Path, tmp: Path):
               f"{label}: os import missing or duplicated")
         # Re-applying either patch in either order must be a no-op.
         for patch in order + tuple(reversed(order)):
-            apply_patch(patch, dst)
+            apply_patch(patch, dst, bp_dst, stm_dst)
         check(dst.read_text() == text, f"{label}: composition is not idempotent")
+        check(bp_dst.read_text() == bp_text, f"{label}: block-pool patch is not idempotent")
+        check(stm_dst.read_text() == stm_text, f"{label}: manager patch is not idempotent")
         # Both overlays' behaviour survives composition.
         ns = load_helpers(text)
         check(
@@ -491,9 +994,23 @@ def test_composition(pristine_src: Path, tmp: Path):
               f"{label}: Mia's hybrid-min skip is missing")
         check("swa_ids or set(" in text,
               f"{label}: Mia's eagle_group_ids narrowing is missing")
+        test_prior_boundary_cache_call(stm_text)
+        test_composed_runtime_paths(text, bp_text, stm_text)
         results[label] = text
-    check(results["mia-then-ours"] == results["ours-then-mia"],
-          "the two overlays must compose to the same file in either order")
+    if results["mia-then-ours"] != results["ours-then-mia"]:
+        print(
+            "".join(
+                difflib.unified_diff(
+                    results["mia-then-ours"].splitlines(keepends=True),
+                    results["ours-then-mia"].splitlines(keepends=True),
+                    fromfile="mia-then-ours",
+                    tofile="ours-then-mia",
+                )
+            )
+        )
+        raise AssertionError(
+            "the two overlays must compose to the same file in either order"
+        )
     print("  overlay composition (both orders, idempotent) OK")
 
 
@@ -519,31 +1036,64 @@ def main() -> int:
     if PATCH is None:
         raise SystemExit("missing patch_apc_per_group_retention.py")
     src = Path(os.environ.get("GLM53_KV_COORDINATOR_PY_SRC", DEFAULT_SRC))
+    bp_src = Path(os.environ.get("GLM53_BLOCK_POOL_PY_SRC", DEFAULT_BP_SRC))
+    stm_src = Path(
+        os.environ.get("GLM53_SINGLE_TYPE_KV_CACHE_MANAGER_PY_SRC", DEFAULT_STM_SRC)
+    )
     if not src.is_file():
         raise SystemExit(
             f"missing kv_cache_coordinator.py at {src}; "
             "set GLM53_KV_COORDINATOR_PY_SRC to a copy of the fork's file"
         )
+    if not bp_src.is_file():
+        raise SystemExit(
+            f"missing block_pool.py at {bp_src}; "
+            "set GLM53_BLOCK_POOL_PY_SRC to a copy of the fork's file"
+        )
+    if not stm_src.is_file():
+        raise SystemExit(
+            f"missing single_type_kv_cache_manager.py at {stm_src}; "
+            "set GLM53_SINGLE_TYPE_KV_CACHE_MANAGER_PY_SRC to the fork source copy"
+        )
+    if PRIORITY_MARKER in bp_src.read_text():
+        raise SystemExit(f"{bp_src} already carries {PRIORITY_MARKER}; use a pristine copy")
     pristine_src = resolve_pristine(src)
     if MIA_MARKER in pristine_src.read_text() or MARKER in pristine_src.read_text():
         raise SystemExit(f"{pristine_src} is not pristine (it carries an overlay MARK)")
-    print(f"  source: {src}\n  pristine: {pristine_src}")
+    print(
+        f"  source: {src}\n  pristine: {pristine_src}\n"
+        f"  block pool: {bp_src}\n  single-type manager: {stm_src}"
+    )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         dst = tmp / "kv_cache_coordinator.py"
+        bp_dst = tmp / "block_pool.py"
+        stm_dst = tmp / "single_type_kv_cache_manager.py"
         shutil.copyfile(src, dst)
+        shutil.copyfile(bp_src, bp_dst)
+        shutil.copyfile(stm_src, stm_dst)
 
         pristine = dst.read_text()
-        apply_patch(PATCH, dst)
+        apply_patch(PATCH, dst, bp_dst, stm_dst)
         text = dst.read_text()
+        bp_text = bp_dst.read_text()
+        stm_text = stm_dst.read_text()
         check(MARKER in text, "MARK missing after apply")
+        check(PRIORITY_MARKER in bp_text, "block-pool priority MARK missing after apply")
+        check(PRIOR_HELPER_MARKER in text, "coordinator prior-helper MARK missing")
+        check(PRIOR_POLICY_MARKER in text, "coordinator prior-policy MARK missing")
+        check(PRIOR_MANAGER_MARKER in stm_text, "manager prior-policy MARK missing")
 
         py_compile.compile(str(dst), cfile=str(tmp / "out.pyc"), doraise=True)
+        py_compile.compile(str(bp_dst), cfile=str(tmp / "block-pool.pyc"), doraise=True)
+        py_compile.compile(str(stm_dst), cfile=str(tmp / "single-type.pyc"), doraise=True)
         print("  applies and compiles OK")
 
-        apply_patch(PATCH, dst)
+        apply_patch(PATCH, dst, bp_dst, stm_dst)
         check(dst.read_text() == text, "patch is not idempotent")
+        check(bp_dst.read_text() == bp_text, "block-pool patch is not idempotent")
+        check(stm_dst.read_text() == stm_text, "single-type patch is not idempotent")
         print("  idempotent OK")
 
         test_call_sites(pristine, text)
@@ -551,9 +1101,12 @@ def main() -> int:
         test_min_exemption(ns)
         test_routing(ns)
         test_resolve(ns)
+        test_dflash_prior_groups(ns)
         test_env(ns)
         test_validator(ns)
-        test_composition(pristine_src, tmp)
+        test_drafter_priority(bp_text)
+        test_prior_boundary_cache_call(stm_text)
+        test_composition(pristine_src, bp_src, stm_src, tmp)
 
     test_id_cost()
     print("drafter-retention patch OK")

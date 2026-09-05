@@ -60,6 +60,7 @@ fi
 # Caller exports (MTP_TOKENS=2 ./start.sh restart) must win over .env.
 _cli_mtp="${MTP_TOKENS-}"
 _cli_spec="${SPEC_METHOD-}"
+_cli_dflash_draft_tp="${DFLASH_DRAFT_TP-}"
 _cli_eager="${ENFORCE_EAGER-}"
 _cli_fused="${EXL3_FUSED_MOE-}"
 _cli_row_tile="${EXL3_MOE_ROW_TILE-}"
@@ -72,6 +73,9 @@ _cli_image="${IMAGE-}"
 _cli_util="${GPU_MEM_UTIL-}"
 _cli_lm="${LANGUAGE_MODEL_ONLY-}"
 _cli_max_num_seqs="${MAX_NUM_SEQS-}"
+_cli_max_model_len="${MAX_MODEL_LEN-}"
+_cli_limit_mm="${LIMIT_MM-}"
+_cli_served_model="${SERVED_MODEL_NAME-}"
 _cli_ablit="${ABLIT-}"
 _cli_ablit_method="${ABLIT_METHOD-}"
 _cli_ablit_direction="${ABLIT_DIRECTION-}"
@@ -84,6 +88,8 @@ _cli_indexer_workspace_set="${GLM53_INDEXER_WORKSPACE+1}"
 _cli_indexer_workspace="${GLM53_INDEXER_WORKSPACE-}"
 _cli_spinwait_ms_set="${GLM53_SPINWAIT_MS+1}"
 _cli_spinwait_ms="${GLM53_SPINWAIT_MS-}"
+_cli_apc_global_set="${GLM53_APC_RETENTION_INTERVAL+1}"
+_cli_apc_global="${GLM53_APC_RETENTION_INTERVAL-}"
 _cli_apc_swa_set="${GLM53_APC_RETENTION_INTERVAL_SWA+1}"
 _cli_apc_swa="${GLM53_APC_RETENTION_INTERVAL_SWA-}"
 set -a
@@ -91,8 +97,10 @@ set -a
 source "$SCRIPT_DIR/.env"
 set +a
 [ -n "${_cli_mtp}" ] && MTP_TOKENS="$_cli_mtp"
+[ -n "${_cli_apc_global_set}" ] && GLM53_APC_RETENTION_INTERVAL="$_cli_apc_global"
 [ -n "${_cli_apc_swa_set}" ] && GLM53_APC_RETENTION_INTERVAL_SWA="$_cli_apc_swa"
 [ -n "${_cli_spec}" ] && SPEC_METHOD="$_cli_spec"
+[ -n "${_cli_dflash_draft_tp}" ] && DFLASH_DRAFT_TP="$_cli_dflash_draft_tp"
 [ -n "${_cli_eager}" ] && ENFORCE_EAGER="$_cli_eager"
 [ -n "${_cli_fused}" ] && EXL3_FUSED_MOE="$_cli_fused"
 [ -n "${_cli_row_tile}" ] && EXL3_MOE_ROW_TILE="$_cli_row_tile"
@@ -105,6 +113,9 @@ set +a
 [ -n "${_cli_util}" ] && GPU_MEM_UTIL="$_cli_util"
 [ -n "${_cli_lm}" ] && LANGUAGE_MODEL_ONLY="$_cli_lm"
 [ -n "${_cli_max_num_seqs}" ] && MAX_NUM_SEQS="$_cli_max_num_seqs"
+[ -n "${_cli_max_model_len}" ] && MAX_MODEL_LEN="$_cli_max_model_len"
+[ -n "${_cli_limit_mm}" ] && LIMIT_MM="$_cli_limit_mm"
+[ -n "${_cli_served_model}" ] && SERVED_MODEL_NAME="$_cli_served_model"
 [ -n "${_cli_ablit}" ] && ABLIT="$_cli_ablit"
 [ -n "${_cli_ablit_method}" ] && ABLIT_METHOD="$_cli_ablit_method"
 [ -n "${_cli_ablit_direction}" ] && ABLIT_DIRECTION="$_cli_ablit_direction"
@@ -171,6 +182,7 @@ MTP_TOKENS="${MTP_TOKENS:-2}"
 # dflash (default, incoai/GLM-5.3-Flash-DFlash2, k=7) | mtp | none
 SPEC_METHOD="${SPEC_METHOD:-dflash}"
 DFLASH_MODEL="${DFLASH_MODEL:-incoai/GLM-5.3-Flash-DFlash2}"
+DFLASH_REVISION="${DFLASH_REVISION:-dc77ff1c99eeb2df044ee3d4f0094eb033fee410}"
 DFLASH_CACHE_NAME="${DFLASH_CACHE_NAME:-models--${DFLASH_MODEL//\//--}}"
 DFLASH_TOKENS="${DFLASH_TOKENS:-7}"
 # 2 = shard the ~2.3 GiB DFlash2 drafter across TP (C4 keep, 2026-08-30:
@@ -297,9 +309,9 @@ WORKER_TILELANG_CACHE="${WORKER_TILELANG_CACHE:-$WORKER_VLLM_CACHE/tilelang}"
 TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-/root/.triton/cache}"
 TILELANG_CACHE_DIR="${TILELANG_CACHE_DIR:-/root/.tilelang/cache}"
 
-LOGDIR="$SCRIPT_DIR/logs"
-HEAD_SCRIPT="$SCRIPT_DIR/.glm53-exl3-head.inner.sh"
-WORKER_SCRIPT="$SCRIPT_DIR/.glm53-exl3-worker.inner.sh"
+LOGDIR="${LOGDIR:-$SCRIPT_DIR/logs}"
+HEAD_SCRIPT="${HEAD_SCRIPT:-$SCRIPT_DIR/.glm53-exl3-head.inner.sh}"
+WORKER_SCRIPT="${WORKER_SCRIPT:-$SCRIPT_DIR/.glm53-exl3-worker.inner.sh}"
 EXPECTED_SHARDS="${EXPECTED_SHARDS:-120}"
 
 # ------------------------------- helpers -----------------------------------
@@ -401,8 +413,7 @@ validate_numeric_config() {
     _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-stock}" \
         stock rightsize || return
     _glm53_validate_spinwait_ms || return
-    # GLM53_APC_RETENTION_INTERVAL (global knob, PR #79) takes the same
-    # validator wherever that launcher wiring is present.
+    _glm53_validate_retention_interval GLM53_APC_RETENTION_INTERVAL "${GLM53_APC_RETENTION_INTERVAL-}" || return
     _glm53_validate_retention_interval GLM53_APC_RETENTION_INTERVAL_SWA "${GLM53_APC_RETENTION_INTERVAL_SWA-}" || return
     if [ -n "${GLM53_APC_RETENTION_INTERVAL_SWA:-}" ] && [ "$SPEC_METHOD" != "dflash" ]; then
         echo "GLM53_APC_RETENTION_INTERVAL_SWA requires SPEC_METHOD=dflash (got: $SPEC_METHOD)" >&2
@@ -972,7 +983,7 @@ download_dflash() {
     resolve_hf_bin || die "no 'hf' / 'huggingface-cli' on PATH and no python huggingface_hub — pip install --user -U 'huggingface_hub[cli]' (or set HF_BIN=/path/to/hf)"
     mkdir -p "$HF_CACHE_DIR"
     log "downloading ${DFLASH_MODEL} (~2.3 GiB) into ${HF_CACHE_DIR} ..."
-    HF_HOME="$HF_CACHE_DIR" "${HF_BIN_CMD[@]}" download "$DFLASH_MODEL"
+    HF_HOME="$HF_CACHE_DIR" "${HF_BIN_CMD[@]}" download "$DFLASH_MODEL" --revision "$DFLASH_REVISION"
     ensure_dflash_refs_main
     have="$(find "$DFLASH_PATH/snapshots" -name 'model.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]' || true)"
     [ "${have:-0}" -ge 1 ] || die "DFlash2 download finished without model.safetensors"
@@ -1037,7 +1048,10 @@ sync_repo_to_worker() {
     fi
     log "syncing ${label} to worker (first run moves ~164 GiB over the p2p link) ..."
     worker_ssh "mkdir -p '${WORKER_CACHE_DIR}/hub/${cache_name}'"
-    rsync -a --partial --info=progress2 \
+    # Hugging Face's trees/ directory is local cache bookkeeping, not a
+    # runtime model artifact. Exclude it so host-private metadata cannot block
+    # an otherwise complete immutable snapshots/blobs/refs transfer.
+    rsync -a --partial --info=progress2 --exclude='/trees/' \
         "$src/" "${WORKER_SSH}:${WORKER_CACHE_DIR}/hub/${cache_name}/"
     worker_ssh "printf '%s' '$rev' > '$marker'"
 }
@@ -1295,6 +1309,13 @@ launch_cluster() {
         -e DO_NOT_TRACK=1
         -e "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=$CG_ESTIMATE"
     )
+    # Global sparse retention is implemented by the pinned vLLM runtime.  Full
+    # attention remains dense; Mamba managers use this value.  Keep this an
+    # explicit deployer setting and forward it identically to both ranks.
+    if [ -n "${GLM53_APC_RETENTION_INTERVAL:-}" ]; then
+        nccl_common+=(-e "VLLM_PREFIX_CACHE_RETENTION_INTERVAL=$GLM53_APC_RETENTION_INTERVAL")
+        log "global prefix-cache retention interval: ${GLM53_APC_RETENTION_INTERVAL} (both ranks)"
+    fi
     # Per-group APC retention for the DFlash2 drafter SWA group (overlay patch_apc_per_group_retention.py).
     # "" = inherit global, 0 = boundaries only, N = multiple of the scheduler block.
     if [ -n "${GLM53_APC_RETENTION_INTERVAL_SWA:-}" ]; then
@@ -1342,7 +1363,12 @@ launch_cluster() {
     serve_env+=" -e VLLM_API_KEY='${VLLM_API_KEY:-}'"
 
     log "starting worker on ${WORKER_SSH} (NCCL if=${WORKER_CX7_IF} hca=${WORKER_CX7_IB}) ..."
-    worker_ssh "docker run -d --name '$CONTAINER_WORKER' \
+    worker_ssh "docker run -d --restart no --name '$CONTAINER_WORKER' \
+        --label spark-serve.model='$SERVED_MODEL_NAME' \
+        --label spark-serve.rank=worker \
+        --label spark-serve.lifecycle-owner=spark-a \
+        --label spark-serve.lease-token-sha256='${SPARK_SERVE_LEASE_TOKEN_SHA256:-}' \
+        --label spark-serve.recipe-commit='${MIA_RECIPE_COMMIT:-}' \
         --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
         --device /dev/infiniband --cap-add IPC_LOCK \
         --ulimit memlock=-1 --ulimit stack=67108864 \
@@ -1375,7 +1401,12 @@ launch_cluster() {
         --entrypoint bash '$IMAGE' /start.sh" >/dev/null
 
     log "starting head (vLLM API :${PORT}; NCCL if=${HEAD_CX7_IF} hca=${HEAD_CX7_IB}) ..."
-    docker run -d --name "$CONTAINER_HEAD" \
+    docker run -d --restart no --name "$CONTAINER_HEAD" \
+        --label "spark-serve.model=$SERVED_MODEL_NAME" \
+        --label spark-serve.rank=head \
+        --label spark-serve.lifecycle-owner=spark-a \
+        --label "spark-serve.lease-token-sha256=${SPARK_SERVE_LEASE_TOKEN_SHA256:-}" \
+        --label "spark-serve.recipe-commit=${MIA_RECIPE_COMMIT:-}" \
         --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
         --device /dev/infiniband --cap-add IPC_LOCK \
         --ulimit memlock=-1 --ulimit stack=67108864 \

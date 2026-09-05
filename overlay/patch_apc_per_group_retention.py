@@ -60,8 +60,28 @@ P = Path(
         "/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_coordinator.py",
     )
 )
+BP = Path(
+    os.environ.get(
+        "GLM53_BLOCK_POOL_PY",
+        "/usr/local/lib/python3.12/dist-packages/vllm/v1/core/block_pool.py",
+    )
+)
+STM = Path(
+    os.environ.get(
+        "GLM53_SINGLE_TYPE_KV_CACHE_MANAGER_PY",
+        "/usr/local/lib/python3.12/dist-packages/vllm/v1/core/"
+        "single_type_kv_cache_manager.py",
+    )
+)
 MARK = "# [glm53-apc-per-group]"
 CONTRACT = "glm53-apc-per-group-contract:explicit-v1"
+DIAG_MARK = "# [glm53-apc-retention-diag]"
+DIAG_HIT_MARK = "# [glm53-apc-hit-diag]"
+PRIORITY_MARK = "# [glm53-apc-drafter-priority]"
+BP_PRIORITY_MARK = "# [glm53-apc-drafter-priority]"
+PRIOR_HELPER_MARK = "# [glm53-dflash-prior-helper-v1]"
+PRIOR_POLICY_MARK = "# [glm53-dflash-prior-policy-v1]"
+PRIOR_MANAGER_MARK = "# [glm53-dflash-prior-manager-v1]"
 
 # ---------------------------------------------------------------- anchors ----
 
@@ -258,6 +278,31 @@ def _glm53_format_retention_vector(intervals):  # [glm53-apc-per-group]
 
 '''
 
+DFLASH_PRIOR_HELPER = '''
+def _glm53_dflash_prior_mamba_group_ids(  # [glm53-dflash-prior-helper-v1]
+    kv_cache_groups,
+    retention_intervals,
+    is_hybrid_coordinator,
+):
+    """Sparse Mamba groups needing one prior state for full DFlash SWA replay."""
+    if not is_hybrid_coordinator:
+        return frozenset()
+    has_dflash_swa = any(
+        type(_glm53_inner_kv_spec(g.kv_cache_spec)).__name__ == "SlidingWindowSpec"
+        for g in kv_cache_groups
+    )
+    if not has_dflash_swa:
+        return frozenset()
+    return frozenset(
+        i
+        for i, g in enumerate(kv_cache_groups)
+        if retention_intervals[i] == 0
+        and type(_glm53_inner_kv_spec(g.kv_cache_spec)).__name__ == "MambaSpec"
+    )
+
+
+'''
+
 INIT_OLD = """        self.retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL
         _validate_prefix_cache_retention_interval(
             self.retention_interval, self.scheduler_block_size, kv_cache_config
@@ -343,6 +388,264 @@ HYBRID_CACHE_NEW = """            manager.cache_blocks(
             )
 """
 
+DIAG_IMPORT_OLD = """from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+)
+"""
+
+DIAG_IMPORT_NEW = """from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    get_group_id,  # [glm53-apc-retention-diag]
+)
+"""
+
+DIAG_FREE_OLD = """    def free(self, request_id: str) -> None:
+        \"\"\"
+        Free the blocks for the request.
+
+        Args:
+            request_id: The request ID.
+        \"\"\"
+        for manager in self.single_type_managers:
+            manager.free(request_id)
+"""
+
+DIAG_FREE_NEW = """    def free(self, request_id: str) -> None:
+        \"\"\"
+        Free the blocks for the request.
+
+        Args:
+            request_id: The request ID.
+        \"\"\"
+        def _diag_pool_state():  # [glm53-apc-retention-diag]
+            hashes_by_group = [0] * len(self.single_type_managers)
+            cached_physical = 0
+            for block in self.block_pool.blocks:
+                keys = []
+                if block.block_hash is not None:
+                    keys.append(block.block_hash)
+                keys.extend(
+                    self.block_pool.cached_block_hashes_by_block.get(
+                        block.block_id, ()
+                    )
+                )
+                if keys:
+                    cached_physical += 1
+                for key in keys:
+                    hashes_by_group[get_group_id(key)] += 1
+            return (
+                self.block_pool.get_num_free_blocks(),
+                cached_physical,
+                hashes_by_group,
+            )
+
+        request_nonnull = []
+        request_hashed = []
+        for manager in self.single_type_managers:
+            blocks = manager.req_to_blocks.get(request_id, ())
+            request_nonnull.append(sum(not block.is_null for block in blocks))
+            request_hashed.append(
+                sum(not block.is_null and block.block_hash is not None for block in blocks)
+            )
+        before = _diag_pool_state()
+        for manager in self.single_type_managers:
+            manager.free(request_id)
+        after = _diag_pool_state()
+        logger.info(
+            \"[glm53-apc-retention-diag] request=%s \"
+            \"request_nonnull=%s request_hashed=%s \"
+            \"before_free=(free=%d,cached_physical=%d,hashes_by_group=%s) \"
+            \"after_free=(free=%d,cached_physical=%d,hashes_by_group=%s)\",
+            request_id,
+            request_nonnull,
+            request_hashed,
+            *before,
+            *after,
+        )
+"""
+
+DIAG_HIT_OLD = """        return cache_hit_blocks, hit_length, num_uncached_common_prefix_tokens
+"""
+
+DIAG_HIT_NEW = """        logger.info(  # [glm53-apc-hit-diag]
+            \"[glm53-apc-hit-diag] max=%d per_group=%s reconciled=%d \"
+            \"longest=%d uncached_common=%d\",
+            max_cache_hit_length,
+            hit_length_by_group,
+            hit_length,
+            longest_hit_length,
+            num_uncached_common_prefix_tokens,
+        )
+        return cache_hit_blocks, hit_length, num_uncached_common_prefix_tokens
+"""
+
+PRIORITY_OLD = """        _glm53_validate_retention_intervals(
+            self.retention_interval_by_group, self.scheduler_block_size
+        )
+        logger.info(  # [glm53-apc-per-group]
+            "[glm53-apc-per-group] retention_by_group=%s "
+            "(global=%s swa_env=%s eagle_min_exempt=%s)",
+            _glm53_format_retention_vector(self.retention_interval_by_group),
+            self.retention_interval,
+            _glm53_swa_interval,
+            sorted(_glm53_min_exempt),
+        )
+"""
+
+PRIORITY_NEW = """        _glm53_validate_retention_intervals(
+            self.retention_interval_by_group, self.scheduler_block_size
+        )
+        # Explicit boundary-only retention keeps the min-exempt drafter's
+        # replay window available for immediate reuse, but those blocks must
+        # not evict target MLA/Mamba state under shared-pool pressure.
+        self.block_pool.low_priority_cache_group_ids = (  # [glm53-apc-drafter-priority]
+            frozenset(_glm53_min_exempt)
+            if _glm53_swa_interval == 0
+            else frozenset()
+        )
+        logger.info(  # [glm53-apc-per-group]
+            "[glm53-apc-per-group] retention_by_group=%s "
+            "(global=%s swa_env=%s eagle_min_exempt=%s low_priority=%s)",
+            _glm53_format_retention_vector(self.retention_interval_by_group),
+            self.retention_interval,
+            _glm53_swa_interval,
+            sorted(_glm53_min_exempt),
+            sorted(self.block_pool.low_priority_cache_group_ids),
+        )
+"""
+
+PRIOR_POLICY_OLD = """        self.block_pool.low_priority_cache_group_ids = (  # [glm53-apc-drafter-priority]
+            frozenset(_glm53_min_exempt)
+            if _glm53_swa_interval == 0
+            else frozenset()
+        )
+        logger.info(  # [glm53-apc-per-group]
+            "[glm53-apc-per-group] retention_by_group=%s "
+            "(global=%s swa_env=%s eagle_min_exempt=%s low_priority=%s)",
+            _glm53_format_retention_vector(self.retention_interval_by_group),
+            self.retention_interval,
+            _glm53_swa_interval,
+            sorted(_glm53_min_exempt),
+            sorted(self.block_pool.low_priority_cache_group_ids),
+        )
+"""
+
+PRIOR_POLICY_NEW = """        self.block_pool.low_priority_cache_group_ids = (  # [glm53-apc-drafter-priority]
+            frozenset(_glm53_min_exempt)
+            if _glm53_swa_interval == 0
+            else frozenset()
+        )
+        # [glm53-dflash-prior-policy-v1] A cache switch with a short fresh suffix
+        # cannot rebuild the DFlash drafter's full 2048-token sliding-attention
+        # window. The hybrid lookup backs up one scheduler boundary for that
+        # replay. Under Mamba retention=0 the earlier target state would not
+        # otherwise exist, so retain exactly one prior Mamba checkpoint. The
+        # target KpoolTail is a separate 4-token request-local scratch group.
+        self.dflash_replay_prior_group_ids = _glm53_dflash_prior_mamba_group_ids(
+            kv_cache_config.kv_cache_groups,
+            self.retention_interval_by_group,
+            _glm53_is_hybrid,
+        )
+        for i in self.dflash_replay_prior_group_ids:
+            self.single_type_managers[i]._glm53_retain_previous_dflash_boundary = True
+        logger.info(  # [glm53-apc-per-group]
+            "[glm53-apc-per-group] retention_by_group=%s "
+            "(global=%s swa_env=%s eagle_min_exempt=%s low_priority=%s "
+            "dflash_prior_mamba=%s)",
+            _glm53_format_retention_vector(self.retention_interval_by_group),
+            self.retention_interval,
+            _glm53_swa_interval,
+            sorted(_glm53_min_exempt),
+            sorted(self.block_pool.low_priority_cache_group_ids),
+            sorted(self.dflash_replay_prior_group_ids),
+        )
+"""
+
+STM_REACHABLE_OLD = """        reachable_boundaries = [request.num_prompt_tokens - 1]
+        if request.shared_prefix_boundary:
+            reachable_boundaries.append(request.shared_prefix_boundary)
+"""
+
+STM_REACHABLE_NEW = """        reachable_boundaries = [request.num_prompt_tokens - 1]
+        if request.shared_prefix_boundary:
+            reachable_boundaries.append(request.shared_prefix_boundary)
+        if getattr(  # [glm53-dflash-prior-manager-v1]
+            self, "_glm53_retain_previous_dflash_boundary", False
+        ):
+            replay_boundary = (
+                (request.num_prompt_tokens - 1)
+                // self.scheduler_block_size
+                * self.scheduler_block_size
+            )
+            previous_replay_boundary = replay_boundary - self.scheduler_block_size
+            if previous_replay_boundary > 0:
+                reachable_boundaries.append(previous_replay_boundary)
+"""
+
+BP_INIT_OLD = """        self.metrics_collector = metrics_collector
+"""
+
+BP_INIT_NEW = """        self.metrics_collector = metrics_collector
+        # Populated only by the hybrid coordinator's explicit drafter policy.
+        self.low_priority_cache_group_ids: frozenset[int] = (  # [glm53-apc-drafter-priority]
+            frozenset()
+        )
+"""
+
+BP_FREE_OLD = """        # Identify blocks with hash (LRU cache) and without it (never match APC)
+        blocks_to_evict_last = []
+        blocks_to_evict_first = []
+        for block in ordered_blocks:
+            block.ref_cnt -= 1
+            if block.ref_cnt == 0 and not block.is_null:
+                if block.block_hash is None or not self.enable_caching:
+                    # LIFO reuse of non-cached blocks for better GPU locality.
+                    blocks_to_evict_first.append(block)
+                else:
+                    # FIFO reuse of cached blocks for LRU eviction behavior.
+                    blocks_to_evict_last.append(block)
+
+        # Blocks to reuse first are prepended to the front of the free queue.
+        self.free_block_queue.prepend_n(blocks_to_evict_first)
+        # Blocks to reuse last are appended to the end of the free queue.
+        self.free_block_queue.append_n(blocks_to_evict_last)
+"""
+
+BP_FREE_NEW = """        # Identify blocks with hash (LRU cache) and without it (never match APC).
+        # An explicitly min-exempt drafter group may be cached for immediate
+        # replay while remaining lower priority than target MLA/Mamba state.
+        blocks_to_evict_last = []
+        blocks_to_evict_first = []
+        blocks_to_evict_before_normal_cache = []  # [glm53-apc-drafter-priority]
+        for block in ordered_blocks:
+            block.ref_cnt -= 1
+            if block.ref_cnt == 0 and not block.is_null:
+                if block.block_hash is None or not self.enable_caching:
+                    # LIFO reuse of non-cached blocks for better GPU locality.
+                    blocks_to_evict_first.append(block)
+                else:
+                    block_hashes = [block.block_hash]
+                    block_hashes.extend(
+                        self.cached_block_hashes_by_block.get(block.block_id, ())
+                    )
+                    if self.low_priority_cache_group_ids and all(
+                        get_group_id(key) in self.low_priority_cache_group_ids
+                        for key in block_hashes
+                    ):
+                        blocks_to_evict_before_normal_cache.append(block)
+                    else:
+                        # FIFO reuse of ordinary cached blocks for LRU behavior.
+                        blocks_to_evict_last.append(block)
+
+        # Low-priority cached blocks sit behind immediately reusable unhashed
+        # blocks, but ahead of ordinary cached target state.
+        self.free_block_queue.prepend_n(blocks_to_evict_before_normal_cache)
+        self.free_block_queue.prepend_n(blocks_to_evict_first)
+        self.free_block_queue.append_n(blocks_to_evict_last)
+"""
+
 # ------------------------------------------------------------------ apply ----
 
 
@@ -354,31 +657,89 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 
 
 def main() -> int:
-    if not P.is_file():
-        raise SystemExit(f"missing {P}")
+    if not P.is_file() or not BP.is_file() or not STM.is_file():
+        raise SystemExit(
+            f"missing coordinator/block pool/single-type manager: {P} / {BP} / {STM}"
+        )
     text = P.read_text()
-    if MARK in text:
-        print(f"{P.name}: {MARK} already present - skipping")
-        return 0
+    block_pool_text = BP.read_text()
+    single_type_text = STM.read_text()
+    if MARK not in text:
+        needle = "def _validate_prefix_cache_retention_interval(\n"
+        if text.count(needle) != 1:
+            raise SystemExit(f"{P}: helper insert point not unique")
 
-    needle = "def _validate_prefix_cache_retention_interval(\n"
-    if text.count(needle) != 1:
-        raise SystemExit(f"{P}: helper insert point not unique")
+        if "\nimport os\n" not in text:
+            text = replace_once(text, IMPORT_OLD, IMPORT_NEW, "import")
+        if "def _glm53_inner_kv_spec(" not in text:
+            text = text.replace(needle, BASE_HELPER + needle, 1)
+        text = text.replace(needle, RETENTION_HELPER + needle, 1)
 
-    if "\nimport os\n" not in text:
-        text = replace_once(text, IMPORT_OLD, IMPORT_NEW, "import")
-    if "def _glm53_inner_kv_spec(" not in text:
-        text = text.replace(needle, BASE_HELPER + needle, 1)
-    text = text.replace(needle, RETENTION_HELPER + needle, 1)
+        text = replace_once(text, INIT_OLD, INIT_NEW, "retention-init")
+        text = replace_once(text, BASE_CACHE_OLD, BASE_CACHE_NEW, "base-cache_blocks")
+        text = replace_once(text, HYBRID_LOOP_OLD, HYBRID_LOOP_NEW, "hybrid-loop")
+        text = replace_once(text, HYBRID_CACHE_OLD, HYBRID_CACHE_NEW, "hybrid-cache_blocks")
 
-    text = replace_once(text, INIT_OLD, INIT_NEW, "retention-init")
-    text = replace_once(text, BASE_CACHE_OLD, BASE_CACHE_NEW, "base-cache_blocks")
-    text = replace_once(text, HYBRID_LOOP_OLD, HYBRID_LOOP_NEW, "hybrid-loop")
-    text = replace_once(text, HYBRID_CACHE_OLD, HYBRID_CACHE_NEW, "hybrid-cache_blocks")
+    # Versioned migration: images built with the reviewed per-group overlay
+    # already carry MARK, but do not yet define the focused DFlash helper.
+    if "def _glm53_dflash_prior_mamba_group_ids(" not in text:
+        needle = "def _validate_prefix_cache_retention_interval(\n"
+        if text.count(needle) != 1:
+            raise SystemExit(f"{P}: DFlash helper insert point not unique")
+        text = text.replace(needle, DFLASH_PRIOR_HELPER + needle, 1)
+
+    if DIAG_MARK not in text:
+        text = replace_once(text, DIAG_IMPORT_OLD, DIAG_IMPORT_NEW, "diagnostic import")
+        text = replace_once(text, DIAG_FREE_OLD, DIAG_FREE_NEW, "diagnostic free")
+    if DIAG_HIT_MARK not in text:
+        text = replace_once(text, DIAG_HIT_OLD, DIAG_HIT_NEW, "diagnostic cache hit")
+    if PRIORITY_MARK not in text:
+        text = replace_once(text, PRIORITY_OLD, PRIORITY_NEW, "drafter priority config")
+    if PRIOR_POLICY_MARK not in text:
+        text = replace_once(
+            text, PRIOR_POLICY_OLD, PRIOR_POLICY_NEW, "dflash prior-boundary policy"
+        )
+    if PRIOR_MANAGER_MARK not in single_type_text:
+        n = single_type_text.count(STM_REACHABLE_OLD)
+        if n != 1:
+            raise SystemExit(
+                f"{STM}: expected one reachable-boundary target, found {n}"
+            )
+        single_type_text = single_type_text.replace(
+            STM_REACHABLE_OLD, STM_REACHABLE_NEW, 1
+        )
+    if BP_PRIORITY_MARK not in block_pool_text:
+        block_pool_text = replace_once(
+            block_pool_text, BP_INIT_OLD, BP_INIT_NEW, "block-pool priority init"
+        )
+        block_pool_text = replace_once(
+            block_pool_text, BP_FREE_OLD, BP_FREE_NEW, "block-pool priority free"
+        )
+
+    # Canonical helper spacing shared with patch_hybrid_prefix_hit.py so the
+    # rendered coordinator bytes do not depend on overlay application order.
+    for left, right in (
+        (
+            'return type(_glm53_inner_kv_spec(spec)).__name__ == "SlidingWindowSpec"',
+            "def _glm53_dflash_swa_replay_tokens(",
+        ),
+        (
+            "return max(0, hit_length - pages * alignment_tokens)",
+            "def _glm53_swa_retention_env(",
+        ),
+    ):
+        if left in text and right in text:
+            left_end = text.index(left) + len(left)
+            right_start = text.index(right, left_end)
+            if text[left_end:right_start].strip():
+                raise SystemExit(f"{P}: unexpected code between injected helpers")
+            text = text[:left_end] + "\n\n\n" + text[right_start:]
 
     P.write_text(text)
+    BP.write_text(block_pool_text)
+    STM.write_text(single_type_text)
     print(
-        f"patched {P.name} (per-group APC retention; "
+        f"patched {P.name} (per-group APC retention + temporary occupancy diagnostics; "
         "VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA drives the DFlash2 drafter group)"
     )
     return 0
