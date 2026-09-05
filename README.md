@@ -394,6 +394,17 @@ is the default. Rollback:
 SPEC_METHOD=mtp ./start.sh restart      # MTP k=2
 ```
 
+Envelope on this image: the MTP rollback is guarded at `MAX_NUM_SEQS` ≤ **12**
+(the largest entry of the launcher's MTP capture list `1 2 3 4 6 8 12`) while
+CUDA graphs are on; the recipe default `4` is the measured MTP boot. Above 12, vLLM's `profile_cudagraph_memory` pass rejects
+the boot in EngineCore init, after weight load (`max_num_seqs (16) exceeds
+available Mamba cache blocks (12)`, #88). The launcher refuses the combination
+up front — before `restart` stops anything — and tells you to lower
+`MAX_NUM_SEQS`, set `ENFORCE_EAGER=1`, or supply a verified larger capture
+list. Only the launcher-generated list is checked: a `--cudagraph-capture-sizes`
+(or `--max-num-seqs`) you put in `EXTRA_ARGS` yourself is passed through
+unvalidated, as before.
+
 `./start.sh` will:
 
 1. Preflight docker/ssh/disk on both nodes
@@ -518,19 +529,19 @@ that are now documented/enforced:
 | `TP` / `NNODES` | `2` / `2` | do not change for this recipe |
 | `QUANTIZATION` | `exl3` | overlay method; never `marlin` |
 | `MTP_TOKENS` | `2` | MTP speculative tokens (`SPEC_METHOD=mtp`) |
-| `SPEC_METHOD` | `dflash` | `dflash` / `mtp` / `none`. Rollback: `SPEC_METHOD=mtp ./start.sh restart` |
+| `SPEC_METHOD` | `dflash` | `dflash` / `mtp` / `none`. Rollback: `SPEC_METHOD=mtp ./start.sh restart` — needs `MAX_NUM_SEQS` ≤ 12 under CUDA graphs on this image (#88); the launcher refuses higher before stopping anything |
 | `DFLASH_MODEL` | `incoai/GLM-5.3-Flash-DFlash2` | DFlash2 draft Hub repo (~2.3 GiB BF16) |
 | `DFLASH_TOKENS` | `7` | DFlash2 speculative tokens (trained block 8) |
 | `DFLASH_DRAFT_TP` | `2` | shard DFlash2 across TP (C4 keep: 8k 938 / decode 65.1). `1` = rank 0 only. Empty = inherit TP |
 | DFlash2 draft KV | `auto` (bf16) | target stays `fp8`/`fp8_ds_mla`; dense draft has no MLA FP8 backend on SM121 |
 | DFlash2 attention | *(unset)* | SM121 picks FLASH_ATTN for non-causal SWA. Do not pin `TRITON_ATTN` |
-| `ENFORCE_EAGER` | `0` | CUDA graphs; MTP capture `1 2 3 4 6 8 12`, DFlash2 `1 2 4 8 16 24 32` |
+| `ENFORCE_EAGER` | `0` | CUDA graphs; MTP capture `1 2 3 4 6 8 12`, DFlash2 `1 2 4 8 16 24 32`. The MTP list caps `MAX_NUM_SEQS` at 12 on this image (#88); `1` = no graphs, no cap |
 | `EXL3_FUSED_MOE` | `1` | `exl3_moe` per layer; `0` = LinearEXL3 loop |
 | `EXL3_FAT_KERNEL` | `1` | [PR77 E2 fat-expert prefill kernel](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/pull/77) (implies batched+sorted). `0` = legacy fat path |
 | `KV_CACHE_DTYPE` | `fp8` | packed `fp8_ds_mla`; not `nvfp4`, not bf16 |
 | `GPU_MEM_UTIL` | `0.87` | GB10 UMA budget. Latest validated 7168/rightsize pool: **1,243,902 tokens / 1.24×** at 1M |
 | `MAX_MODEL_LEN` | `1000000` | default context. Pool size varies with MNBT, activation/graph reservations and hybrid block geometry |
-| `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq |
+| `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq. With `SPEC_METHOD=mtp` (or `none`) and CUDA graphs: ≤ 12 on this image, the largest MTP capture size (#88) |
 | `MAX_NUM_BATCHED_TOKENS` | `7168` | current maintainer default at `MAX_NUM_SEQS=4`. MNBT 2048 was the clean PR77 A/B configuration and the best measured balance on an independent `MAX_NUM_SEQS=16` geometry. Tune per deployment; change after a repeated same-kit comparison |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (7168) |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
@@ -565,6 +576,8 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `overlay/patch_model_overrides.py` | `"exl3"` in ModelConfig overrides |
 | `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0` |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
+| `tests/test_numeric_config.py` | launcher numeric guard: `GPU_MEM_UTIL` / `MAX_MODEL_LEN` / `MAX_NUM_SEQS` / `MAX_NUM_BATCHED_TOKENS` type + range matrix, canonical form, `MAX_NUM_SEQS` vs the launcher's MTP capture list (#88), guard runs before `restart` stops anything |
+| `tests/test_mtp_capture_guard.py` | launcher (CPU-only, docker/ssh stubbed): `SPEC_METHOD=mtp MAX_NUM_SEQS=16 ./start.sh restart` exits 2 with zero docker/ssh calls and names the vLLM error; `mtp`/12, `dflash`/16, `ENFORCE_EAGER=1`, a caller-supplied capture list pass the gate and reach `stop` on both ranks |
 | `start.sh` / `stop.sh` / `download.sh` | 2-node launch; Hub fetch on the head only |
 | `start-tp4.sh` / `.env.tp4.example` | experimental 4-node TP=4 launch; knobs stay out of `.env` |
 | `files/chat_template.jinja` | GLM-5.3 MM template (`<|image|>` / `<|video|>`); checkpoint jinja is language-only |
