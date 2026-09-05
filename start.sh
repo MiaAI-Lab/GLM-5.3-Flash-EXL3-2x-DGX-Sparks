@@ -84,11 +84,14 @@ _cli_indexer_workspace_set="${GLM53_INDEXER_WORKSPACE+1}"
 _cli_indexer_workspace="${GLM53_INDEXER_WORKSPACE-}"
 _cli_spinwait_ms_set="${GLM53_SPINWAIT_MS+1}"
 _cli_spinwait_ms="${GLM53_SPINWAIT_MS-}"
+_cli_apc_set="${GLM53_APC_RETENTION_INTERVAL+1}"
+_cli_apc="${GLM53_APC_RETENTION_INTERVAL-}"
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
 set +a
 [ -n "${_cli_mtp}" ] && MTP_TOKENS="$_cli_mtp"
+[ -n "${_cli_apc_set}" ] && GLM53_APC_RETENTION_INTERVAL="$_cli_apc"
 [ -n "${_cli_spec}" ] && SPEC_METHOD="$_cli_spec"
 [ -n "${_cli_eager}" ] && ENFORCE_EAGER="$_cli_eager"
 [ -n "${_cli_fused}" ] && EXL3_FUSED_MOE="$_cli_fused"
@@ -261,6 +264,13 @@ GLM53_INDEXER_WORKSPACE="${GLM53_INDEXER_WORKSPACE-stock}"
 # SpinCondition reader busy-loop window. "stock" preserves vLLM's 1 s default;
 # 1..1000 selects milliseconds. The frozen TP=2 sweep selected 16 ms.
 GLM53_SPINWAIT_MS="${GLM53_SPINWAIT_MS-stock}"
+# Sparse prefix-cache snapshot retention (tokens; positive multiple of 3584, <= 1,000,000).
+# Keeps one mamba/drafter state snapshot per interval instead of one per 3584-token
+# block, so two long conversations no longer evict each other from the shared
+# block-id pool. A conversation's own re-turn still hits fully (its replay boundary is
+# kept); a *diverging* prefix (e.g. a subagent) hits only at interval boundaries.
+# Empty/unset = dense (vLLM default; unchanged behaviour). .env.example sets the recommended 14336.
+GLM53_APC_RETENTION_INTERVAL="${GLM53_APC_RETENTION_INTERVAL-}"
 # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
 # exceed that without being a true hang. NCCL watchdog is still 600s.
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
@@ -304,6 +314,28 @@ warn() { printf '\033[1;33m[glm53-exl3]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[glm53-exl3]\033[0m ERROR: %s\n' "$*" >&2; exit 1; }
 
 # GLM53 numeric config guard (begin)
+# --- glm53 apc-retention knob (tested by tests/test_apc_retention_knob.sh) ---
+# 3584 = this kit's hybrid scheduler block (attention block raised to the mamba page; see README).
+glm53_apc_retention_env() {
+    # $1 = knob value ("" = dense). Exports/unsets VLLM_PREFIX_CACHE_RETENTION_INTERVAL. Returns 2 on bad input.
+    local v="$1"
+    if [ -z "$v" ]; then
+        unset VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+        return 0
+    fi
+    case "$v" in
+        *[!0-9]*) echo "GLM53_APC_RETENTION_INTERVAL must be a positive multiple of 3584 (got '$v')" >&2; return 2;;
+    esac
+    if [ "${#v}" -gt 7 ]; then
+        echo "GLM53_APC_RETENTION_INTERVAL must be a positive multiple of 3584 <= 1000000 (got '$1')" >&2; return 2
+    fi
+    v=$((10#$v))
+    if [ "$v" -le 0 ] || [ "$v" -gt 1000000 ] || [ $(( v % 3584 )) -ne 0 ]; then
+        echo "GLM53_APC_RETENTION_INTERVAL must be a positive multiple of 3584 <= 1000000 (got '$1')" >&2; return 2
+    fi
+    export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="$v"
+}
+# --- end glm53 apc-retention knob ---
 _glm53_canonical_positive_int() {
     local name="$1" value="$2" maximum="$3" canonical
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then
@@ -364,6 +396,7 @@ validate_numeric_config() {
     _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-stock}" \
         stock rightsize || return
     _glm53_validate_spinwait_ms || return
+    glm53_apc_retention_env "${GLM53_APC_RETENTION_INTERVAL-}" || return
 }
 # GLM53 numeric config guard (end)
 
@@ -1186,6 +1219,12 @@ launch_cluster() {
         -e DO_NOT_TRACK=1
         -e "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=$CG_ESTIMATE"
     )
+    if [ -n "${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-}" ]; then
+        nccl_common+=(-e "VLLM_PREFIX_CACHE_RETENTION_INTERVAL=$VLLM_PREFIX_CACHE_RETENTION_INTERVAL")
+        log "prefix-cache snapshot retention interval: ${VLLM_PREFIX_CACHE_RETENTION_INTERVAL} tokens (exported to both ranks; read by the head EngineCore)"
+    else
+        log "prefix-cache snapshot retention: dense (VLLM_PREFIX_CACHE_RETENTION_INTERVAL unset)"
+    fi
     local worker_nccl="" e
     for e in "${nccl_common[@]}"; do
         [ "$e" = "-e" ] && continue
