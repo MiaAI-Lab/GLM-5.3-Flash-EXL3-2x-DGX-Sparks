@@ -967,14 +967,25 @@ def test_composed_runtime_paths(
                 list(blocks) for _ in kv_cache_group_ids
             ), 21504
 
-    class DraftValidAtCurrentManager(HitManager):
+    class DraftEagleManager(HitManager):
+        allow_dropped_hit = True
+
         @classmethod
-        def find_longest_cache_hit(cls, max_length, kv_cache_group_ids, **kwargs):
-            length = max_length // ALIGN * ALIGN
-            blocks = [HitBlock() for _ in range(length // DRAFT_BLOCK)]
+        def find_longest_cache_hit(
+            cls, max_length, kv_cache_group_ids, drop_eagle_block, **kwargs
+        ):
+            if drop_eagle_block and (
+                not cls.allow_dropped_hit or max_length < 21568
+            ):
+                return tuple([] for _ in kv_cache_group_ids), 0
+            # A successful dropped lookup and an ordinary undropped lookup both
+            # land on the 21504 target boundary. The coordinator must remember
+            # which one actually established EAGLE semantics across convergence
+            # passes rather than accepting the ordinary tail by shape alone.
+            blocks = [HitBlock() for _ in range(21504 // DRAFT_BLOCK)]
             return tuple(
                 list(blocks) for _ in kv_cache_group_ids
-            ), length
+            ), 21504
 
     SpecGroup = namedtuple("SpecGroup", "spec group_ids manager_cls use_eagle")
     coordinator.attention_groups = [
@@ -1013,7 +1024,7 @@ def test_composed_runtime_paths(
     )
 
     coordinator.attention_groups[-1] = SpecGroup(
-        HitSlidingWindowSpec(), [6], DraftValidAtCurrentManager, False
+        HitSlidingWindowSpec(), [6], DraftEagleManager, False
     )
     blocks, hit, uncached = hit_ns[hit_name](coordinator, [object()] * 400, 21568)
     check(
@@ -1022,8 +1033,11 @@ def test_composed_runtime_paths(
     )
 
     coordinator.attention_groups[-1] = SpecGroup(
-        HitSlidingWindowSpec(), [6], DraftValidAtCurrentManager, True
+        HitSlidingWindowSpec(), [6], DraftEagleManager, True
     )
+    DraftEagleManager.allow_dropped_hit = True
+    # The target shortens max=21568 to 21504; a genuine dropped draft lookup
+    # at that reconciled boundary must survive the second convergence pass.
     blocks, hit, uncached = hit_ns[hit_name](
         coordinator, [object()] * 400, 21568
     )
@@ -1036,6 +1050,39 @@ def test_composed_runtime_paths(
         len(blocks[6]) == 21504 // DRAFT_BLOCK
         and all(not block.is_null for block in blocks[6][-32:]),
         "reused DFlash hit must carry the complete 2048-token visible tail",
+    )
+
+    blocks, hit, uncached = hit_ns[hit_name](
+        coordinator, [object()] * 400, 21504
+    )
+    check(
+        hit == 17920 and uncached == 3584 and blocks[6] == [],
+        "suffix-0 lookup bound cannot prove an EAGLE pop and must clamp: "
+        f"hit={hit} uncached={uncached}",
+    )
+
+    # max=21505 starts one token above the scheduler boundary. Full attention
+    # first converges to 21504, forcing a second outer pass. A failed EAGLE
+    # lookup in the first pass must not suppress the drop in the second pass.
+    blocks, hit, uncached = hit_ns[hit_name](
+        coordinator, [object()] * 400, 21505
+    )
+    check(
+        hit == 17920 and uncached == 3584 and blocks[6] == [],
+        "failed suffix-1 EAGLE lookup must clamp instead of accepting an "
+        f"undropped second-pass tail: hit={hit} uncached={uncached}",
+    )
+
+    # At max=21568 the lookup bound permits the EAGLE unit, but a missing unit
+    # (for example after low-priority draft eviction) must still take fallback.
+    DraftEagleManager.allow_dropped_hit = False
+    blocks, hit, uncached = hit_ns[hit_name](
+        coordinator, [object()] * 400, 21568
+    )
+    check(
+        hit == 17920 and uncached == 3584 and blocks[6] == [],
+        "missing suffix-64 EAGLE unit must clamp despite a complete ordinary "
+        f"tail on a later pass: hit={hit} uncached={uncached}",
     )
 
     test_prior_boundary_cache_call(single_type_text)
@@ -1101,7 +1148,7 @@ def test_composition(
             == (None,) * 6 + (0,),
             f"{label}: resolved vector wrong after composition",
         )
-        check("if _glm53_is_draft_swa_spec(spec):  # [glm53-hybrid-apc]" in text,
+        check("if _glm53_draft_swa:  # [glm53-hybrid-apc]" in text,
               f"{label}: Mia's hybrid-min skip is missing")
         check("swa_ids or set(" in text,
               f"{label}: Mia's eagle_group_ids narrowing is missing")

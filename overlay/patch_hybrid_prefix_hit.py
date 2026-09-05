@@ -47,6 +47,7 @@ P = Path(
 MARK = "# [glm53-hybrid-apc]"
 DFLASH_REPLAY_MARK = "# [glm53-dflash-swa-replay-v1]"
 DFLASH_RECONCILE_MARK = "# [glm53-dflash-swa-replay-v2]"
+DFLASH_EAGLE_VERIFY_MARK = "# [glm53-dflash-eagle-verify-v3]"
 
 BASE_HELPER = '''
 def _glm53_inner_kv_spec(spec):
@@ -129,12 +130,23 @@ MIN_OLD = """                if drop_eagle_block:
                 longest_hit_length = max(longest_hit_length, curr_hit_length)
 """
 
-MIN_NEW = """                if drop_eagle_block:
-                    eagle_verified.add(idx)
+MIN_NEW = """                _glm53_draft_swa = _glm53_is_draft_swa_spec(spec)
+                if drop_eagle_block:
+                    # [glm53-dflash-eagle-verify-v3]
+                    # A failed DFlash lookup is an attempted EAGLE pop, not a
+                    # verified one. The convergence loop may run again after a
+                    # different group shortens the initial candidate; carrying
+                    # a failed verification into that pass would suppress the
+                    # pop and mistake an ordinary 32-block tail for valid
+                    # reconciled-boundary state.
+                    if _glm53_draft_swa and _new_hit_length < curr_hit_length:
+                        eagle_verified.discard(idx)
+                    else:
+                        eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
                     # length shrunk; invalidate previous eagle verifications
                     eagle_verified.clear()
-                if _glm53_is_draft_swa_spec(spec):  # [glm53-hybrid-apc]
+                if _glm53_draft_swa:  # [glm53-hybrid-apc]
                     # Drafter SWA must not min() the hybrid hit. Its EAGLE pop
                     # re-aligns by LCM(window block, MLA page) = 3584. If the
                     # cached window does not cover the MLA/mamba hit, leave
@@ -244,12 +256,12 @@ CONVERGE_RECONCILED = """            if curr_hit_length >= hit_length:
                 # window is materialized at its tail.
                 draft_replay_ready = True
                 draft_groups_seen = 0
-                for (
+                for draft_group_index, (
                     draft_spec,
                     draft_group_ids,
                     _,
                     draft_use_eagle,
-                ) in self.attention_groups:
+                ) in enumerate(self.attention_groups):
                     if not _glm53_is_draft_swa_spec(draft_spec):
                         continue
                     draft_groups_seen += len(draft_group_ids)
@@ -265,6 +277,7 @@ CONVERGE_RECONCILED = """            if curr_hit_length >= hit_length:
                         draft_blocks = hit_blocks_by_group[draft_group_id]
                         if (
                             not draft_use_eagle
+                            or draft_group_index not in eagle_verified
                             or required_tail_blocks <= 0
                             or hit_length_by_group[draft_group_id] != curr_hit_length
                             or draft_blocks is None
@@ -319,6 +332,58 @@ CONVERGE_RECONCILED = """            if curr_hit_length >= hit_length:
                 break
 """
 
+EAGLE_VERIFY_V2 = """                if drop_eagle_block:
+                    eagle_verified.add(idx)
+                elif _new_hit_length < curr_hit_length:
+                    # length shrunk; invalidate previous eagle verifications
+                    eagle_verified.clear()
+                if _glm53_is_draft_swa_spec(spec):  # [glm53-hybrid-apc]
+"""
+
+EAGLE_VERIFY_V3 = """                _glm53_draft_swa = _glm53_is_draft_swa_spec(spec)
+                if drop_eagle_block:
+                    # [glm53-dflash-eagle-verify-v3]
+                    # A failed DFlash lookup is an attempted EAGLE pop, not a
+                    # verified one. The convergence loop may run again after a
+                    # different group shortens the initial candidate; carrying
+                    # a failed verification into that pass would suppress the
+                    # pop and mistake an ordinary 32-block tail for valid
+                    # reconciled-boundary state.
+                    if _glm53_draft_swa and _new_hit_length < curr_hit_length:
+                        eagle_verified.discard(idx)
+                    else:
+                        eagle_verified.add(idx)
+                elif _new_hit_length < curr_hit_length:
+                    # length shrunk; invalidate previous eagle verifications
+                    eagle_verified.clear()
+                if _glm53_draft_swa:  # [glm53-hybrid-apc]
+"""
+
+RECONCILE_LOOP_V2 = """                for (
+                    draft_spec,
+                    draft_group_ids,
+                    _,
+                    draft_use_eagle,
+                ) in self.attention_groups:
+"""
+
+RECONCILE_LOOP_V3 = """                for draft_group_index, (
+                    draft_spec,
+                    draft_group_ids,
+                    _,
+                    draft_use_eagle,
+                ) in enumerate(self.attention_groups):
+"""
+
+RECONCILE_CHECK_V2 = """                            not draft_use_eagle
+                            or required_tail_blocks <= 0
+"""
+
+RECONCILE_CHECK_V3 = """                            not draft_use_eagle
+                            or draft_group_index not in eagle_verified
+                            or required_tail_blocks <= 0
+"""
+
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
     n = text.count(old)
@@ -360,6 +425,19 @@ def main() -> int:
             CONVERGE_NEW,
             CONVERGE_RECONCILED,
             "dflash-reconciled-boundary-reuse",
+        )
+    if DFLASH_EAGLE_VERIFY_MARK not in text:
+        text = replace_once(
+            text, EAGLE_VERIFY_V2, EAGLE_VERIFY_V3, "dflash-eagle-verification"
+        )
+        text = replace_once(
+            text, RECONCILE_LOOP_V2, RECONCILE_LOOP_V3, "dflash-reconcile-index"
+        )
+        text = replace_once(
+            text,
+            RECONCILE_CHECK_V2,
+            RECONCILE_CHECK_V3,
+            "dflash-reconcile-verification",
         )
     # Canonicalize only the two adjacent injected helper boundaries. The two
     # overlays both insert before the upstream validator, so without this the
