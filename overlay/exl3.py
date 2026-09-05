@@ -846,15 +846,23 @@ def apply_exl3_batched_fat(
         torch.index_select(xh, 0, token_idx, out=h)
         ext.had_r_128(h, h13, gate.suh, None, 1.0)
 
-        packed13 = scratch["packed13"]
-        out_tiles = int(gate.trellis.shape[1])
-        packed13[:, :out_tiles].copy_(gate.trellis)
-        packed13[:, out_tiles:].copy_(up.trellis)
         gate_up = scratch["gate_up"][:n_rows]
-        svh13 = scratch["svh13"]
-        svh13[:intermediate].copy_(gate.svh)
-        svh13[intermediate:].copy_(up.svh)
-        if use_kernel:
+        use_pair = use_kernel and hasattr(ext, "exl3_fat_gemm_pair")
+        if not use_pair:
+            packed13 = scratch["packed13"]
+            out_tiles = int(gate.trellis.shape[1])
+            packed13[:, :out_tiles].copy_(gate.trellis)
+            packed13[:, out_tiles:].copy_(up.trellis)
+            svh13 = scratch["svh13"]
+            svh13[:intermediate].copy_(gate.svh)
+            svh13[intermediate:].copy_(up.svh)
+        if use_pair:
+            ext.exl3_fat_gemm_pair(
+                h13, gate.trellis, up.trellis, gate_up,
+                gate.svh, up.svh, gate.K, gate.mcg, gate.mul1,
+            )
+            _EXL3_FAT_DIAG["direct_calls"] += 1
+        elif use_kernel:
             if not hasattr(ext, "exl3_fat_gemm"):
                 raise RuntimeError(
                     "EXL3_FAT_KERNEL=1 requires exllamav3_ext.exl3_fat_gemm"
@@ -869,15 +877,19 @@ def apply_exl3_batched_fat(
             ext.hgemm(h13, w13, gate_up)
             ext.had_r_128(gate_up, gate_up, None, svh13, 1.0)
 
-        gate_out = gate_up[:, :intermediate]
-        up_out = gate_up[:, intermediate:]
-        gate_out.clamp_(max=limit)
-        up_out.clamp_(min=-limit, max=limit)
-        act = scratch["act"][:n_rows]
-        torch.sigmoid(gate_out, out=act)
-        act.mul_(gate_out).mul_(up_out)
         act_h = scratch["act_h"][:n_rows]
-        act_h.copy_(act)
+        if (use_kernel and hasattr(ext, "exl3_fat_swiglu")
+                and 0.0 < limit <= 65504.0):
+            ext.exl3_fat_swiglu(gate_up, act_h, limit)
+        else:
+            gate_out = gate_up[:, :intermediate]
+            up_out = gate_up[:, intermediate:]
+            gate_out.clamp_(max=limit)
+            up_out.clamp_(min=-limit, max=limit)
+            act = scratch["act"][:n_rows]
+            torch.sigmoid(gate_out, out=act)
+            act.mul_(gate_out).mul_(up_out)
+            act_h.copy_(act)
 
         h2 = scratch["h2"][:n_rows]
         ext.had_r_128(act_h, h2, down.suh, None, 1.0)

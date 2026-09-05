@@ -206,7 +206,137 @@ def _check_gpu_gemm() -> None:
     _check_e2_diag(device)
     _check_apply_expert_map(device)
     _check_fused_cudagraph(device)
+    _check_fat_pair(device)
+    _check_fat_swiglu(device)
+    _check_fat_k_tails(device)
 
+
+
+def _check_fat_swiglu(device) -> None:
+    import torch
+    import exllamav3_ext as ext
+
+    if not hasattr(ext, "exl3_fat_swiglu"):
+        return
+    g = torch.Generator(device=device).manual_seed(572)
+    for rows, width in ((0, 4), (1, 12), (63, 128), (129, 1024),
+                        (257, 1536), (2305, 1024), (7168, 1024)):
+        x = torch.randn(rows, width * 2, device=device, generator=g) * 32
+        for limit in (0.5, 7.0, 65504.0):
+            gate = x[:, :width].clamp(max=limit)
+            up = x[:, width:].clamp(min=-limit, max=limit)
+            expected = (torch.sigmoid(gate) * gate * up).half()
+            actual = torch.empty_like(expected)
+            ext.exl3_fat_swiglu(x, actual, limit)
+            torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-3)
+    # Contiguous offset views can still violate vector alignment.
+    good_x = torch.zeros(1, 8, device=device)
+    good_y = torch.empty(1, 4, device=device, dtype=torch.float16)
+    bad_x = torch.zeros(9, device=device)[1:].view(1, 8)
+    bad_y = torch.empty(5, device=device, dtype=torch.float16)[1:].view(1, 4)
+    for x_view, y_view in ((bad_x, good_y), (good_x, bad_y)):
+        try:
+            ext.exl3_fat_swiglu(x_view, y_view, 7.0)
+        except RuntimeError as error:
+            assert "aligned" in str(error)
+        else:
+            raise AssertionError("misaligned SwiGLU view accepted")
+    # Very large limits can amplify FP32 subnormal differences into FP16.
+    # The integration must use the original torch path for these limits.
+    for limit in (0.0, -1.0, 65505.0, 1e38, float('inf'), float('nan')):
+        try:
+            ext.exl3_fat_swiglu(good_x, good_y, limit)
+        except RuntimeError as error:
+            assert "limit" in str(error)
+        else:
+            raise AssertionError("unsupported SwiGLU clamp limit accepted")
+    # Exceptional values retain the reference clamp and multiplication behavior.
+    x = torch.tensor([[float('nan'), float('inf'), -float('inf'), 0,
+                       1, 1, 1, -float('inf')]], device=device)
+    gate, up = x[:, :4].clamp(max=7), x[:, 4:].clamp(-7, 7)
+    expected = (torch.sigmoid(gate) * gate * up).half()
+    actual = torch.empty_like(expected)
+    ext.exl3_fat_swiglu(x, actual, 7)
+    torch.testing.assert_close(actual, expected, equal_nan=True)
+    # Stream and graph compatibility, with ordinary finite inputs.
+    x = torch.randn(145, 256, device=device, generator=g)
+    actual = torch.empty(145, 128, device=device, dtype=torch.float16)
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.stream(stream):
+        ext.exl3_fat_swiglu(x, actual, 7)
+        with torch.cuda.graph(graph, stream=stream):
+            ext.exl3_fat_swiglu(x, actual, 7)
+        graph.replay()
+    torch.cuda.current_stream(device).wait_stream(stream)
+    gate, up = x[:, :128].clamp(max=7), x[:, 128:].clamp(-7, 7)
+    torch.testing.assert_close(actual, (torch.sigmoid(gate) * gate * up).half(),
+                               atol=1e-5, rtol=1e-3)
+    print("exl3 fused float32 SwiGLU to half parity and graph OK", flush=True)
+
+
+def _check_fat_pair(device) -> None:
+    """Pair projection matches explicit concatenation, including unequal widths."""
+    import torch
+    import exllamav3_ext as ext
+
+    if not hasattr(ext, "exl3_fat_gemm_pair"):
+        return
+    g = torch.Generator(device=device).manual_seed(271)
+    for rows, width, left, right in (
+        (0, 128, 128, 256), (1, 16, 128, 256), (65, 48, 256, 128),
+        (63, 128, 128, 256),
+        (64, 256, 256, 128), (65, 256, 128, 256),
+        (128, 384, 256, 384), (129, 4096, 1024, 1024),
+        (257, 1024, 256, 512), (1024, 4096, 1024, 1024),
+    ):
+        a = torch.randn(rows, width, device=device, dtype=torch.float16, generator=g)
+        weights = [torch.randint(-32768, 32767, (width // 16, n // 16, 64),
+                                 device=device, dtype=torch.int16, generator=g)
+                   for n in (left, right)]
+        scales = [torch.randn(n, device=device, dtype=torch.float16, generator=g)
+                  for n in (left, right)]
+        expected = torch.empty(rows, left + right, device=device, dtype=torch.float32)
+        actual = torch.empty_like(expected)
+        ext.exl3_fat_gemm(a, torch.cat(weights, dim=1), expected,
+                          torch.cat(scales), 4, True, False)
+        ext.exl3_fat_gemm_pair(a, *weights, actual, *scales, 4, True, False)
+        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+        assert torch.isfinite(actual).all()
+    print("exl3 pair projection parity OK, including production dimensions", flush=True)
+
+
+def _check_fat_k_tails(device) -> None:
+    """Single/odd K tiles exercise the async pipeline prologue and drain."""
+    import torch
+    import exllamav3_ext as ext
+
+    g = torch.Generator(device=device).manual_seed(712)
+    for rows, width, cols in ((1, 16, 128), (65, 48, 256), (129, 80, 384),
+                              (145, 144, 256), (191, 16, 128)):
+        a = torch.randn(rows, width, device=device, dtype=torch.float16, generator=g)
+        packed = torch.randint(-30000, 30000, (width // 16, cols // 16, 64),
+                               device=device, dtype=torch.int16, generator=g)
+        scale = torch.ones(cols, device=device, dtype=torch.float16)
+        dense = torch.empty(width, cols, device=device, dtype=torch.float16)
+        ext.reconstruct(dense, packed, 4, True, False)
+        expected = a.float() @ dense.float()
+        ext.had_r_128(expected, expected, None, scale, 1.0)
+        direct = torch.empty_like(expected)
+        ext.exl3_fat_gemm(a, packed, direct, scale, 4, True, False)
+        bound = max(1e-3, float(expected.abs().max()) * 1e-4)
+        torch.testing.assert_close(direct, expected, atol=bound, rtol=1e-4)
+        idx = torch.randperm(rows + 13, device=device, generator=g)[:rows].contiguous()
+        weight = torch.randn(rows, device=device, dtype=torch.float16, generator=g)
+        scattered = torch.randn(rows + 13, cols, device=device, generator=g)
+        expected_scatter = scattered.clone()
+        for _ in range(2):
+            expected_scatter.index_add_(0, idx, expected * weight[:, None])
+            ext.exl3_fat_gemm_scatter(a, packed, scattered, scale, idx, weight,
+                                     4, True, False)
+        torch.testing.assert_close(scattered, expected_scatter, atol=bound * 8, rtol=1e-4)
+    print("exl3 single/odd K tile direct and repeated scatter parity OK", flush=True)
 
 
 def _check_fat_kernel(device) -> None:

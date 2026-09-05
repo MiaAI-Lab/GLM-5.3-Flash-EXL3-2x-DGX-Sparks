@@ -13,6 +13,30 @@ def replace_once(text: str, old: str, new: str) -> str:
     return text.replace(old, new, 1)
 
 
+def patch_bindings(text: str) -> str:
+    include = '#include "quant/exl3_fat_gemm.cuh"'
+    if text.count(include) > 1:
+        raise RuntimeError("duplicate fat-GEMM include")
+    if include not in text:
+        text = replace_once(text, '#include "quant/exl3_moe.cuh"',
+                            '#include "quant/exl3_moe.cuh"\n' + include)
+    names = ("exl3_fat_gemm", "exl3_fat_gemm_pair", "exl3_fat_swiglu",
+             "exl3_fat_gemm_scatter")
+    missing = []
+    for name in names:
+        line = f'    m.def("{name}", &{name}, "{name}");'
+        if text.count(line) > 1:
+            raise RuntimeError(f"duplicate binding: {name}")
+        if line not in text:
+            missing.append(line)
+    anchor = '    m.def("exl3_moe", &exl3_moe, "exl3_moe");'
+    if text.count(anchor) != 1:
+        raise RuntimeError("expected exactly one MoE binding anchor")
+    if missing:
+        text = replace_once(text, anchor, anchor + "\n" + "\n".join(missing))
+    return text
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         raise SystemExit("usage: patch_exl3_fat_kernel.py EXLLAMAV3_EXT SOURCE_DIR")
@@ -23,25 +47,13 @@ def main() -> int:
     if not quant.is_dir() or not bindings.is_file():
         raise RuntimeError(f"invalid extension root: {ext_root}")
 
-    for name in ("exl3_fat_gemm.cu", "exl3_fat_gemm.cuh"):
-        source = source_dir / name
+    text = patch_bindings(bindings.read_text())
+    sources = [source_dir / name for name in ("exl3_fat_gemm.cu", "exl3_fat_gemm.cuh")]
+    for source in sources:
         if not source.is_file():
             raise RuntimeError(f"missing additive source: {source}")
-        shutil.copyfile(source, quant / name)
-
-    text = bindings.read_text()
-    text = replace_once(
-        text,
-        '#include "quant/exl3_moe.cuh"',
-        '#include "quant/exl3_moe.cuh"\n#include "quant/exl3_fat_gemm.cuh"',
-    )
-    text = replace_once(
-        text,
-        '    m.def("exl3_moe", &exl3_moe, "exl3_moe");',
-        '    m.def("exl3_moe", &exl3_moe, "exl3_moe");\n'
-        '    m.def("exl3_fat_gemm", &exl3_fat_gemm, "exl3_fat_gemm");\n'
-        '    m.def("exl3_fat_gemm_scatter", &exl3_fat_gemm_scatter, "exl3_fat_gemm_scatter");',
-    )
+    for source in sources:
+        shutil.copyfile(source, quant / source.name)
     bindings.write_text(text)
     return 0
 
