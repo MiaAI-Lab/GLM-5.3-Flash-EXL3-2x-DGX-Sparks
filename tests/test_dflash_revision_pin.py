@@ -168,9 +168,45 @@ def test_revision_guard_accepts_only_lowercase_commit_hashes() -> None:
             assert "must be a lowercase 40-hex commit" in rejected.stderr
 
 
+def test_restart_rejects_tag_before_stop_or_download() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        tmp = Path(raw_tmp)
+        script = _launcher(tmp)
+        calls = tmp / "mutation-calls"
+        fake_bin = tmp / "bin"
+        fake_bin.mkdir()
+        for command in ("docker", "ssh"):
+            stub = fake_bin / command
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                'printf "%s\\n" "$0 $*" >>"$DFLASH_TEST_CALLS"\n'
+                "exit 99\n"
+            )
+            stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+        env = _env(
+            tmp,
+            DFLASH_REVISION="main",
+            DFLASH_TEST_CALLS=str(calls),
+            PATH=f"{fake_bin}:{os.environ['PATH']}",
+        )
+
+        result = subprocess.run(
+            ["bash", str(script), "main", "restart"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        assert result.returncode == 2
+        assert "must be a lowercase 40-hex commit" in result.stderr
+        assert not calls.exists(), "restart reached docker/ssh before validation"
+
+
 if __name__ == "__main__":
     test_resolve_rewrites_stale_main_to_complete_pin()
     test_resolve_rejects_stale_cache_when_pin_is_missing()
     test_download_does_not_accept_an_unrelated_cached_snapshot()
     test_revision_guard_accepts_only_lowercase_commit_hashes()
+    test_restart_rejects_tag_before_stop_or_download()
     print("DFlash immutable revision regression OK")
