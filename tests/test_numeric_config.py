@@ -10,10 +10,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 START = ROOT / "start.sh"
+START_TP4 = ROOT / "start-tp4.sh"
 
 
-def guard_source() -> str:
-    source = START.read_text()
+def guard_source(path: Path = START) -> str:
+    source = path.read_text()
     begin = source.index("# GLM53 numeric config guard (begin)")
     end_marker = "# GLM53 numeric config guard (end)"
     end = source.index(end_marker, begin) + len(end_marker)
@@ -132,9 +133,33 @@ def test_spinwait_numeric_contract() -> None:
 def test_restart_validates_before_stop() -> None:
     source = START.read_text()
     main = source.index("main() {")
+    revision = source.index("start|restart|download) validate_dflash_revision", main)
     validation = source.index("start|restart) validate_numeric_config", main)
     restart = source.index("restart)  stop; start", main)
-    assert validation < restart
+    assert revision < validation < restart
+
+
+def test_tp4_rejects_swa_override() -> None:
+    script = (
+        guard_source(START_TP4)
+        + '\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4; '
+        + 'MAX_NUM_BATCHED_TOKENS=1024; GLM53_INDEXER_WORKSPACE=stock; '
+        + 'GLM53_SPINWAIT_MS=stock; GLM53_APC_RETENTION_INTERVAL_SWA="$1"\n'
+        + 'validate_numeric_config\n'
+    )
+    for value, expected in (("", 0), ("0", 2), ("14336", 2)):
+        result = subprocess.run(
+            ["bash", "-c", script, "test", value],
+            text=True,
+            capture_output=True,
+            check=False,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        assert result.returncode == expected, (value, result.stderr)
+
+    source = START_TP4.read_text()
+    assert '_cli_apc_swa_set="${GLM53_APC_RETENTION_INTERVAL_SWA+1}"' in source
+    assert '[ -n "${_cli_apc_swa_set}" ] && GLM53_APC_RETENTION_INTERVAL_SWA="$_cli_apc_swa"' in source
 
 
 if __name__ == "__main__":
@@ -143,4 +168,5 @@ if __name__ == "__main__":
     test_indexer_workspace_enum()
     test_spinwait_numeric_contract()
     test_restart_validates_before_stop()
+    test_tp4_rejects_swa_override()
     print("numeric config tests: PASS")
