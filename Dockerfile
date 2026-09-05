@@ -449,6 +449,8 @@ COPY tests/test_suppress_stops.py /opt/glm53/test_suppress_stops.py
 COPY overlay/patch_scheduler_decode_floor.py /opt/glm53/patch_scheduler_decode_floor.py
 COPY tests/test_scheduler_decode_floor.py /opt/glm53/test_scheduler_decode_floor.py
 COPY overlay/patch_hybrid_prefix_hit.py /opt/glm53/patch_hybrid_prefix_hit.py
+COPY overlay/patch_apc_fine_grained_hits.py /opt/glm53/patch_apc_fine_grained_hits.py
+COPY tests/test_apc_fine_grained_hits.py /opt/glm53/test_apc_fine_grained_hits.py
 COPY tests/test_hybrid_prefix_hit.py /opt/glm53/test_hybrid_prefix_hit.py
 COPY overlay/patch_xgrammar_termination.py /opt/glm53/patch_xgrammar_termination.py
 COPY tests/test_xgrammar_termination.py /opt/glm53/test_xgrammar_termination.py
@@ -469,6 +471,12 @@ RUN python3 /opt/glm53/patch_glm5_drafter_group.py
 RUN python3 /opt/glm53/patch_suppress_stops_in_reasoning.py
 RUN python3 /opt/glm53/patch_scheduler_decode_floor.py
 RUN python3 /opt/glm53/patch_hybrid_prefix_hit.py
+# Runs BEFORE the patch it validates: the drift and fail-closed legs of the
+# host test need an unpatched partial-hit gate in the target file. At this
+# point patch_hybrid_prefix_hit.py is already applied, which is exactly the
+# composition the test asserts (A4).
+RUN python3 /opt/glm53/test_apc_fine_grained_hits.py
+RUN python3 /opt/glm53/patch_apc_fine_grained_hits.py
 RUN python3 /opt/glm53/patch_xgrammar_termination.py
 RUN python3 /opt/glm53/patch_kpool_tail_slotmap.py
 # Applied unconditionally; the injected sizing reads GLM53_INDEXER_WORKSPACE
