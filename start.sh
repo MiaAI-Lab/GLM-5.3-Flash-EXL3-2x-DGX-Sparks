@@ -1219,12 +1219,8 @@ launch_cluster() {
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
         serve_env+=" -e $v='${!v:-}'"
     done
-    # VLLM_API_KEY is read by the head (rank 0) API server for bearer auth; the
-    # worker runs --headless so it only needs the var for argv-parity, and
-    # start.sh below passes it explicitly on the head. Keep it out of the
-    # generic loop so the key never shows in process listings of either node
-    # beyond the container env (same as the DeepSeek deployment).
-    serve_env+=" -e VLLM_API_KEY='${VLLM_API_KEY:-}'"
+    # The worker is headless and serves no API, so do not propagate the API
+    # credential into its remote docker command or container environment.
 
     log "starting worker on ${WORKER_SSH} (NCCL if=${WORKER_CX7_IF} hca=${WORKER_CX7_IB}) ..."
     worker_ssh "docker run -d --name '$CONTAINER_WORKER' \
@@ -1259,7 +1255,7 @@ launch_cluster() {
         --entrypoint bash '$IMAGE' /start.sh" >/dev/null
 
     log "starting head (vLLM API :${PORT}; NCCL if=${HEAD_CX7_IF} hca=${HEAD_CX7_IB}) ..."
-    docker run -d --name "$CONTAINER_HEAD" \
+    VLLM_API_KEY="$VLLM_API_KEY" docker run -d --name "$CONTAINER_HEAD" \
         --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
         --device /dev/infiniband --cap-add IPC_LOCK \
         --ulimit memlock=-1 --ulimit stack=67108864 \
@@ -1317,7 +1313,7 @@ launch_cluster() {
         -e ABLIT_ALPHA="$ABLIT_ALPHA" \
         -e ABLIT_INCLUDE_MTP="$ABLIT_INCLUDE_MTP" \
         -e MODEL_DIR="$MODEL_DIR" \
-        -e VLLM_API_KEY="$VLLM_API_KEY" \
+        -e VLLM_API_KEY \
         -e EXTRA_ARGS="${EXTRA_ARGS:-}" \
         --entrypoint bash "$IMAGE" /start.sh >/dev/null
 
