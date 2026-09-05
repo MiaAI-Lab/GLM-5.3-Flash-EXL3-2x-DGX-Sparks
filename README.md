@@ -118,7 +118,7 @@ same path as the compact-64 fp8 serve (not NVFP4 KV).
 | Context | **1M** (`MAX_MODEL_LEN=1000000`). Latest validated 7168/rightsize pool: **1,243,902** tokens / **1.24×**. Pool size varies with MNBT, activation/graph reservations and hybrid block geometry |
 | Tools / reasoning | `--tool-call-parser glm47 --enable-auto-tool-choice --reasoning-parser glm45` |
 | Graphs | on (`ENFORCE_EAGER=0`) — MTP capture `1 2 3 4 6 8 12`; DFlash2 capture `1 2 4 8 16 24 32` |
-| Vision | on (`LANGUAGE_MODEL_ONLY=0`) — image + video, `--limit-mm-per-prompt {image:4,video:1}`, `--skip-mm-profiling` |
+| Vision | on (`LANGUAGE_MODEL_ONLY=0`) — image + video, `--limit-mm-per-prompt {image:4,video:1}`, `--skip-mm-profiling` | Stateless chat clients resend every image each turn, so the 5th image of a session trips this limit — see `docs/images-per-request.md`.
 | Ablit | **off** (`ABLIT=0`). Stock `o_proj`. Set `ABLIT=1` to enable; see [Abliteration](#abliteration-ablit1) |
 
 Kernels: `TORCH_CUDA_ARCH_LIST=12.1a`. ExLlamaV3 pin `c5d9c657` (0.0.43) exposes
