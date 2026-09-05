@@ -1,0 +1,21 @@
+recipe integrity OK (46 entries, anchors 0-14, edits 15-45)
+direction files OK (fp32 [4096], unit-norm, sources match)
+layer parsing OK
+orthogonalization math OK (fp32: alpha relation exact, orth preserved)
+bf16 roundtrip OK (post-edit matches (1-alpha)*pre, max err 3.30e-02)
+TP shard equivalence OK (row-space edit, max err 0.00e+00)
+module walk OK (target 15-44, MTP 45, skips, empty-match)
+maybe_apply gating OK (off=no-op, on=edits, empty=loud)
+/tmp/exl3-scratch-review-venv/lib/python3.12/site-packages/torch/_subclasses/functional_tensor.py:368: UserWarning: Failed to initialize NumPy: No module named 'numpy' (Triggered internally at /__w/pytorch/pytorch/torch/csrc/utils/tensor_numpy.cpp:84.)
+  cpu = _conversion_method_template(device=torch.device("cpu"))
+ablit: skipped layers.1.self_attn.o_proj: out_features=2048 != direction dim 4096
+Traceback (most recent call last):
+  File "/tmp/glm53-pr-validation/tests/test_ablit.py", line 421, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/tmp/glm53-pr-validation/tests/test_ablit.py", line 416, in main
+    check_transplant(tmp)
+  File "/tmp/glm53-pr-validation/tests/test_ablit.py", line 317, in check_transplant
+    raw = donor.contiguous().view(torch.uint8).numpy().tobytes()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: Numpy is not available

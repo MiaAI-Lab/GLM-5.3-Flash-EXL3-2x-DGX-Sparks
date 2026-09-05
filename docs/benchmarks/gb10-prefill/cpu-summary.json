@@ -1,0 +1,48 @@
+{
+  "run": 118,
+  "passed": 108,
+  "failures": 0,
+  "errors": 0,
+  "skips": [
+    [
+      "test_exl3_overlay.py",
+      "separate image/GPU self-check"
+    ],
+    [
+      "test_hybrid_prefix_hit.py",
+      "requires the installed pinned vLLM source"
+    ],
+    [
+      "test_indexer_workspace.py::test_live_container_copy_if_enabled",
+      "installed-source or live-server coverage is outside this CPU suite"
+    ],
+    [
+      "test_indexer_workspace.py::test_live_copy_if_present",
+      "installed-source or live-server coverage is outside this CPU suite"
+    ],
+    [
+      "test_kpool_tail_slotmap.py::test_installed_copy_if_present",
+      "installed-source or live-server coverage is outside this CPU suite"
+    ],
+    [
+      "test_mixed_prefill_decode.py",
+      "separate live-API integration test"
+    ],
+    [
+      "test_scheduler_decode_floor.py",
+      "requires the installed pinned vLLM source"
+    ],
+    [
+      "test_spinwait_patch.py::test_live_source_if_enabled",
+      "installed-source or live-server coverage is outside this CPU suite"
+    ],
+    [
+      "test_xgrammar_termination.py::test_installed_copy_if_present",
+      "installed-source or live-server coverage is outside this CPU suite"
+    ],
+    [
+      "test_ablit.py::check_transplant::CUDA subcase",
+      "GPU execution disabled for this CPU suite"
+    ]
+  ]
+}

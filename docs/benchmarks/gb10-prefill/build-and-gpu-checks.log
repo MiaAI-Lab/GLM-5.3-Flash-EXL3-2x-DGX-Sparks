@@ -1,0 +1,239 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 24.57kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/vllm/vllm-openai:glm53-flash-arm64-cu130@sha256:905c02933be6021301db2dc284e24e3727467aa3a0f63b41d609885778a07bce
+#2 DONE 0.6s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [ 1/54] FROM docker.io/vllm/vllm-openai:glm53-flash-arm64-cu130@sha256:905c02933be6021301db2dc284e24e3727467aa3a0f63b41d609885778a07bce
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 431.88kB done
+#5 DONE 0.0s
+
+#6 [35/54] COPY overlay/patch_indexer_logits_lifetime.py /opt/glm53/patch_indexer_logits_lifetime.py
+#6 CACHED
+
+#7 [ 6/54] COPY tests/test_exl3_fat_patch.py /opt/glm53/test_exl3_fat_patch.py
+#7 CACHED
+
+#8 [17/54] COPY overlay/patch_glm5_drafter_group.py /opt/glm53/patch_glm5_drafter_group.py
+#8 CACHED
+
+#9 [41/54] RUN python3 /opt/glm53/patch_model_overrides.py
+#9 CACHED
+
+#10 [19/54] COPY files/chat_template.jinja /opt/glm53/chat_template.jinja
+#10 CACHED
+
+#11 [ 2/54] RUN python3 - <<'PY'
+#11 CACHED
+
+#12 [52/54] RUN python3 /opt/glm53/patch_spinwait.py --preflight
+#12 CACHED
+
+#13 [ 9/54] RUN python3 - <<'PY'
+#13 CACHED
+
+#14 [14/54] COPY overlay/dflash2_speculator.py /opt/glm53/dflash2_speculator.py
+#14 CACHED
+
+#15 [32/54] COPY tests/test_spinwait_patch.py /opt/glm53/test_spinwait_patch.py
+#15 CACHED
+
+#16 [20/54] COPY overlay/patch_glm_video_placeholders.py /opt/glm53/patch_glm_video_placeholders.py
+#16 CACHED
+
+#17 [36/54] COPY tests/test_indexer_logits_lifetime.py /opt/glm53/test_indexer_logits_lifetime.py
+#17 CACHED
+
+#18 [28/54] COPY tests/test_xgrammar_termination.py /opt/glm53/test_xgrammar_termination.py
+#18 CACHED
+
+#19 [13/54] COPY overlay/qwen3_dflash2.py /opt/glm53/qwen3_dflash2.py
+#19 CACHED
+
+#20 [18/54] COPY tests/test_exl3_overlay.py /opt/glm53/test_exl3_overlay.py
+#20 CACHED
+
+#21 [ 4/54] COPY overlay/patch_exl3_ext_aarch64.py /opt/glm53/patch_exl3_ext_aarch64.py
+#21 CACHED
+
+#22 [24/54] COPY tests/test_scheduler_decode_floor.py /opt/glm53/test_scheduler_decode_floor.py
+#22 CACHED
+
+#23 [ 7/54] COPY overlay/exl3_fat_gemm.cu /opt/glm53/exl3-fat-kernel/exl3_fat_gemm.cu
+#23 CACHED
+
+#24 [ 3/54] RUN python3 - <<'PY'
+#24 CACHED
+
+#25 [26/54] COPY tests/test_hybrid_prefix_hit.py /opt/glm53/test_hybrid_prefix_hit.py
+#25 CACHED
+
+#26 [53/54] RUN python3 /opt/glm53/patch_ablit.py
+#26 CACHED
+
+#27 [50/54] RUN python3 /opt/glm53/patch_indexer_workspace.py
+#27 CACHED
+
+#28 [45/54] RUN python3 /opt/glm53/patch_suppress_stops_in_reasoning.py
+#28 CACHED
+
+#29 [46/54] RUN python3 /opt/glm53/patch_scheduler_decode_floor.py
+#29 CACHED
+
+#30 [11/54] COPY overlay/exl3.py /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/exl3.py
+#30 CACHED
+
+#31 [21/54] COPY overlay/patch_suppress_stops_in_reasoning.py /opt/glm53/patch_suppress_stops_in_reasoning.py
+#31 CACHED
+
+#32 [42/54] RUN python3 /opt/glm53/patch_dflash2.py
+#32 CACHED
+
+#33 [22/54] COPY tests/test_suppress_stops.py /opt/glm53/test_suppress_stops.py
+#33 CACHED
+
+#34 [27/54] COPY overlay/patch_xgrammar_termination.py /opt/glm53/patch_xgrammar_termination.py
+#34 CACHED
+
+#35 [38/54] COPY overlay/patch_ablit.py /opt/glm53/patch_ablit.py
+#35 CACHED
+
+#36 [37/54] COPY overlay/ablit_runtime.py /opt/glm53/ablit_runtime.py
+#36 CACHED
+
+#37 [16/54] COPY overlay/patch_glm_eagle3.py /opt/glm53/patch_glm_eagle3.py
+#37 CACHED
+
+#38 [47/54] RUN python3 /opt/glm53/patch_hybrid_prefix_hit.py
+#38 CACHED
+
+#39 [30/54] COPY tests/test_kpool_tail_slotmap.py /opt/glm53/test_kpool_tail_slotmap.py
+#39 CACHED
+
+#40 [29/54] COPY overlay/patch_kpool_tail_slotmap.py /opt/glm53/patch_kpool_tail_slotmap.py
+#40 CACHED
+
+#41 [ 8/54] COPY overlay/exl3_fat_gemm.cuh /opt/glm53/exl3-fat-kernel/exl3_fat_gemm.cuh
+#41 CACHED
+
+#42 [15/54] COPY overlay/patch_dflash2.py /opt/glm53/patch_dflash2.py
+#42 CACHED
+
+#43 [48/54] RUN python3 /opt/glm53/patch_xgrammar_termination.py
+#43 CACHED
+
+#44 [10/54] RUN set -eux;     mkdir -p /tmp/exllamav3;     curl -fsSL "https://github.com/turboderp-org/exllamav3/archive/c5d9c657966ffeeaa9353f0cc899f18629da4a13.tar.gz"       | tar -xz -C /tmp/exllamav3 --strip-components=1;     python3 -c "from pathlib import Path; assert (Path('/tmp/exllamav3')/'exllamav3/modules/quant/exl3.py').is_file()";     python3 /opt/glm53/patch_exl3_ext_aarch64.py /tmp/exllamav3/exllamav3/exllamav3_ext;     python3 /opt/glm53/patch_exl3_fat_kernel.py /tmp/exllamav3/exllamav3/exllamav3_ext /opt/glm53/exl3-fat-kernel;     export CPATH="/usr/local/lib/python3.12/dist-packages/nvidia/cu13/include${CPATH:+:$CPATH}";     export CPLUS_INCLUDE_PATH="/usr/local/lib/python3.12/dist-packages/nvidia/cu13/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}";     export C_INCLUDE_PATH="/usr/local/lib/python3.12/dist-packages/nvidia/cu13/include${C_INCLUDE_PATH:+:$C_INCLUDE_PATH}";     cd /tmp/exllamav3;     TORCH_CUDA_ARCH_LIST=12.1a MAX_JOBS=8       pip install --no-deps --no-build-isolation --no-cache-dir .;     python3 -c "import torch; import exllamav3_ext; assert hasattr(exllamav3_ext, 'exl3_moe'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_gemm'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_gemm_scatter'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_gemm_pair'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_swiglu'), dir(exllamav3_ext); print('exllamav3_ext', exllamav3_ext.__file__, 'exl3_moe=yes fat_gemm=yes')";     rm -rf /tmp/exllamav3 /root/.cache/pip
+#44 CACHED
+
+#45 [39/54] COPY tests/test_ablit.py /opt/glm53/test_ablit.py
+#45 CACHED
+
+#46 [43/54] RUN python3 /opt/glm53/patch_glm_eagle3.py
+#46 CACHED
+
+#47 [44/54] RUN python3 /opt/glm53/patch_glm5_drafter_group.py
+#47 CACHED
+
+#48 [25/54] COPY overlay/patch_hybrid_prefix_hit.py /opt/glm53/patch_hybrid_prefix_hit.py
+#48 CACHED
+
+#49 [12/54] COPY overlay/patch_model_overrides.py /opt/glm53/patch_model_overrides.py
+#49 CACHED
+
+#50 [31/54] COPY overlay/patch_spinwait.py /opt/glm53/patch_spinwait.py
+#50 CACHED
+
+#51 [33/54] COPY overlay/patch_indexer_workspace.py /opt/glm53/patch_indexer_workspace.py
+#51 CACHED
+
+#52 [23/54] COPY overlay/patch_scheduler_decode_floor.py /opt/glm53/patch_scheduler_decode_floor.py
+#52 CACHED
+
+#53 [49/54] RUN python3 /opt/glm53/patch_kpool_tail_slotmap.py
+#53 CACHED
+
+#54 [ 5/54] COPY overlay/patch_exl3_fat_kernel.py /opt/glm53/patch_exl3_fat_kernel.py
+#54 CACHED
+
+#55 [34/54] COPY tests/test_indexer_workspace.py /opt/glm53/test_indexer_workspace.py
+#55 CACHED
+
+#56 [51/54] RUN python3 /opt/glm53/patch_indexer_logits_lifetime.py
+#56 CACHED
+
+#57 [40/54] COPY ablit/LAYER_MAP.json ablit/fetch_transplant.py ablit/refusal_direction_glm53_bf_oproj.pt ablit/refusal_direction_glm53_dealign_late.pt /opt/glm53/ablit/
+#57 CACHED
+
+#58 [54/54] RUN EXL3_SELFCHECK_GPU=0 python3 /opt/glm53/test_exl3_overlay.py     && python3 /opt/glm53/test_exl3_fat_patch.py     && python3 /opt/glm53/test_suppress_stops.py     && python3 /opt/glm53/test_scheduler_decode_floor.py     && python3 /opt/glm53/test_hybrid_prefix_hit.py     && python3 /opt/glm53/test_xgrammar_termination.py     && python3 /opt/glm53/test_kpool_tail_slotmap.py     && python3 /opt/glm53/test_spinwait_patch.py     && python3 /opt/glm53/test_indexer_workspace.py     && python3 /opt/glm53/test_indexer_logits_lifetime.py     && python3 /opt/glm53/test_ablit.py
+#58 CACHED
+
+#59 exporting to image
+#59 exporting layers done
+#59 writing image sha256:42af2117cae31bf3b41820bf28514f67f60d175145d448267fcaa74b99af212e done
+#59 naming to docker.io/library/glm53-exl3-pr-validation:candidate done
+#59 DONE 0.0s
+exl3 registry OK
+exl3 TP shard rules OK (gate/up col, down row)
+exllamav3_ext.exl3_moe present
+exllamav3_ext arch OK /usr/local/lib/python3.12/dist-packages/exllamav3_ext.cpython-312-aarch64-linux-gnu.so arches=['activation.sm_121a.cubin', 'add.sm_121a.cubin', 'all_reduce.sm_121a.cubin', 'all_reduce_cpu.sm_121a.cubin', 'attention.sm_121a.cubin', 'barrier.sm_121a.cubin', 'broadcast.sm_121a.cubin', 'cache.sm_121a.cubin', 'context.sm_121a.cubin', 'coop_autotune.sm_121a.cubin', 'exl3_comp_unit_1.sm_121a.cubin', 'exl3_comp_unit_2.sm_121a.cubin', 'exl3_comp_unit_3.sm_121a.cubin', 'exl3_comp_unit_4.sm_121a.cubin', 'exl3_comp_unit_5.sm_121a.cubin', 'exl3_comp_unit_6.sm_121a.cubin', 'exl3_comp_unit_7.sm_121a.cubin', 'exl3_comp_unit_8.sm_121a.cubin', 'exl3_devctx.sm_121a.cubin', 'exl3_fat_gemm.sm_121a.cubin', 'exl3_gemm.sm_121a.cubin', 'exl3_gemv.sm_121a.cubin', 'exl3_kernel_map.sm_121a.cubin', 'exl3_moe.sm_121a.cubin', 'exl3_moe_inst_0.sm_121a.cubin', 'exl3_moe_inst_0_128.sm_121a.cubin', 'exl3_moe_inst_0_256.sm_121a.cubin', 'exl3_moe_inst_1.sm_121a.cubin', 'exl3_moe_inst_2.sm_121a.cubin', 'exl3_moe_inst_3.sm_121a.cubin', 'exl3_moe_inst_4.sm_121a.cubin', 'exl3_moe_inst_5.sm_121a.cubin', 'exl3_moe_inst_6.sm_121a.cubin', 'exl3_moe_inst_7.sm_121a.cubin', 'exl3_moe_inst_8.sm_121a.cubin', 'gather.sm_121a.cubin', 'gdn.sm_121a.cubin', 'graph.sm_121a.cubin', 'gumbel.sm_121a.cubin', 'hadamard.sm_121a.cubin', 'hgemm.sm_121a.cubin', 'histogram.sm_121a.cubin', 'norm.sm_121a.cubin', 'pack.sm_121a.cubin', 'q_cache.sm_121a.cubin', 'quantize.sm_121a.cubin', 'reconstruct.sm_121a.cubin', 'rep_pen.sm_121a.cubin', 'rope.sm_121a.cubin', 'routing.sm_121a.cubin', 'sampling_basic.sm_121a.cubin', 'sampling_extra.sm_121a.cubin', 'softcap.sm_121a.cubin', 'stloader_cu.sm_121a.cubin', 'util.sm_121a.cubin']
+exl3 E2 diag schema + tier resolution OK
+dflash2 overlay OK
+exl3 GPU GEMM OK LinearEXL3 y=(4, 256) finite mean=-0.4088
+exl3 E2 direct/scatter parity OK rows=145 direct=0.00002 scatter=0.00002 bound=7.20337
+INFO 09-05 11:43:59 [exl3.py:379] exl3 e2 diag schema=1 configured_tier=legacy effective_tier=legacy tier_reason=none_requested shared_suh=1 shared_suh_layers=1/1 sym_exl3_moe=1 sym_fat_gemm=1 sym_fat_gemm_scatter=1 cap=12.1 cap_ok=1 tp_rank=-1 tp_size=1 prefill_layer_calls=0 thin_calls=0 row_tile_calls=0 fallback_calls=kernel=0,batched=0,sorted=0,legacy=0 fallback_reasons=none fat_expert_runs=0 direct_calls=0 scatter_calls=0 fat_layers=0 fat_expert_slots=0 max_rows=0 fused_temps_allocs=0 fused_temps_bytes=0 fat_scratch_allocs=0 fat_scratch_bytes=0 fat_scratch_peak_bytes=0
+INFO 09-05 11:43:59 [exl3.py:1597] EXL3 MCG trellis engaged for routed experts: bits=4 experts_local=3 hidden=256 intermediate_local=256 fused_moe=exl3_moe concurrency=6 (no BF16 expert reconstruct at load)
+exl3 fused vs LinearEXL3 loop OK maxabs=2.25000 bound=201.60000
+INFO 09-05 11:44:00 [exl3.py:1597] EXL3 MCG trellis engaged for routed experts: bits=4 experts_local=3 hidden=256 intermediate_local=256 fused_moe=exl3_moe concurrency=6 (no BF16 expert reconstruct at load)
+exl3 legacy/sorted/batched/kernel fat fallback + row-tile vs loop OK T=160 legacy=0.00000 sorted=0.00000 batched=0.00000 kernel=2.0 tile=5.50000 bound=306.88000
+INFO 09-05 11:44:00 [exl3.py:1597] EXL3 MCG trellis engaged for routed experts: bits=4 experts_local=3 hidden=256 intermediate_local=256 fused_moe=exl3_moe concurrency=6 (no BF16 expert reconstruct at load)
+exl3 mixed thin+fat composition OK maxabs=5.00000 bound=317.12000
+WARNING 09-05 11:44:00 [exl3.py:362] exl3 e2 diag tier changed legacy -> kernel (kernel_ok): schema=1 configured_tier=kernel effective_tier=legacy tier_reason=none_requested shared_suh=1 shared_suh_layers=4/4 sym_exl3_moe=1 sym_fat_gemm=1 sym_fat_gemm_scatter=1 cap=12.1 cap_ok=1 tp_rank=-1 tp_size=1 prefill_layer_calls=7 thin_calls=0 row_tile_calls=1 fallback_calls=kernel=2,batched=2,sorted=1,legacy=1 fallback_reasons=batched_ok=2,kernel_ok=2,legacy_default=1,row_tile_preempts_fat=1,sorted_ok=1 fat_expert_runs=10 direct_calls=3 scatter_calls=3 fat_layers=7 fat_expert_slots=12 max_rows=200 fused_temps_allocs=1 fused_temps_bytes=1572864 fat_scratch_allocs=1 fat_scratch_bytes=2032640 fat_scratch_peak_bytes=2032640
+INFO 09-05 11:44:00 [exl3.py:1597] EXL3 MCG trellis engaged for routed experts: bits=4 experts_local=3 hidden=256 intermediate_local=256 fused_moe=exl3_moe concurrency=6 (no BF16 expert reconstruct at load)
+exl3 E2 diag counters OK: kernel call = prefill_layer_calls 1, fallback kernel=1, direct=2, scatter=2, fat_expert_runs=2, scratch_allocs=1; shared-SUH loss -> sorted+degraded_shared_suh; row tiles preempt
+WARNING 09-05 11:44:00 [exl3.py:362] exl3 e2 diag tier changed kernel -> legacy (none_requested): schema=1 configured_tier=legacy effective_tier=kernel tier_reason=kernel_ok shared_suh=1 shared_suh_layers=5/5 sym_exl3_moe=1 sym_fat_gemm=1 sym_fat_gemm_scatter=1 cap=12.1 cap_ok=1 tp_rank=-1 tp_size=1 prefill_layer_calls=3 thin_calls=0 row_tile_calls=1 fallback_calls=kernel=1,batched=0,sorted=1,legacy=0 fallback_reasons=degraded_shared_suh=1,kernel_ok=1,row_tile_preempts_fat=1 fat_expert_runs=4 direct_calls=2 scatter_calls=2 fat_layers=10 fat_expert_slots=18 max_rows=200 fused_temps_allocs=1 fused_temps_bytes=1572864 fat_scratch_allocs=1 fat_scratch_bytes=2032640 fat_scratch_peak_bytes=2032640
+INFO 09-05 11:44:00 [exl3.py:1597] EXL3 MCG trellis engaged for routed experts: bits=4 experts_local=3 hidden=256 intermediate_local=256 fused_moe=exl3_moe concurrency=6 (no BF16 expert reconstruct at load)
+exl3 apply expert_map -1 + EXL3_FUSED_MOE=0 loop OK
+INFO 09-05 11:44:00 [exl3.py:1597] EXL3 MCG trellis engaged for routed experts: bits=4 experts_local=3 hidden=256 intermediate_local=256 fused_moe=exl3_moe concurrency=6 (no BF16 expert reconstruct at load)
+exl3 fused CUDA graph capture OK maxabs=0.00000
+exl3 pair projection parity OK, including production dimensions
+exl3 fused float32 SwiGLU to half parity and graph OK
+exl3 single/odd K tile direct and repeated scatter parity OK
+glm53 EXL3 overlay verify OK
+Loaded image: glm53-exl3-pr-validation:candidate
+exl3 registry OK
+exl3 TP shard rules OK (gate/up col, down row)
+exllamav3_ext.exl3_moe present
+exllamav3_ext arch OK /usr/local/lib/python3.12/dist-packages/exllamav3_ext.cpython-312-aarch64-linux-gnu.so arches=['activation.sm_121a.cubin', 'add.sm_121a.cubin', 'all_reduce.sm_121a.cubin', 'all_reduce_cpu.sm_121a.cubin', 'attention.sm_121a.cubin', 'barrier.sm_121a.cubin', 'broadcast.sm_121a.cubin', 'cache.sm_121a.cubin', 'context.sm_121a.cubin', 'coop_autotune.sm_121a.cubin', 'exl3_comp_unit_1.sm_121a.cubin', 'exl3_comp_unit_2.sm_121a.cubin', 'exl3_comp_unit_3.sm_121a.cubin', 'exl3_comp_unit_4.sm_121a.cubin', 'exl3_comp_unit_5.sm_121a.cubin', 'exl3_comp_unit_6.sm_121a.cubin', 'exl3_comp_unit_7.sm_121a.cubin', 'exl3_comp_unit_8.sm_121a.cubin', 'exl3_devctx.sm_121a.cubin', 'exl3_fat_gemm.sm_121a.cubin', 'exl3_gemm.sm_121a.cubin', 'exl3_gemv.sm_121a.cubin', 'exl3_kernel_map.sm_121a.cubin', 'exl3_moe.sm_121a.cubin', 'exl3_moe_inst_0.sm_121a.cubin', 'exl3_moe_inst_0_128.sm_121a.cubin', 'exl3_moe_inst_0_256.sm_121a.cubin', 'exl3_moe_inst_1.sm_121a.cubin', 'exl3_moe_inst_2.sm_121a.cubin', 'exl3_moe_inst_3.sm_121a.cubin', 'exl3_moe_inst_4.sm_121a.cubin', 'exl3_moe_inst_5.sm_121a.cubin', 'exl3_moe_inst_6.sm_121a.cubin', 'exl3_moe_inst_7.sm_121a.cubin', 'exl3_moe_inst_8.sm_121a.cubin', 'gather.sm_121a.cubin', 'gdn.sm_121a.cubin', 'graph.sm_121a.cubin', 'gumbel.sm_121a.cubin', 'hadamard.sm_121a.cubin', 'hgemm.sm_121a.cubin', 'histogram.sm_121a.cubin', 'norm.sm_121a.cubin', 'pack.sm_121a.cubin', 'q_cache.sm_121a.cubin', 'quantize.sm_121a.cubin', 'reconstruct.sm_121a.cubin', 'rep_pen.sm_121a.cubin', 'rope.sm_121a.cubin', 'routing.sm_121a.cubin', 'sampling_basic.sm_121a.cubin', 'sampling_extra.sm_121a.cubin', 'softcap.sm_121a.cubin', 'stloader_cu.sm_121a.cubin', 'util.sm_121a.cubin']
+exl3 E2 diag schema + tier resolution OK
+dflash2 overlay OK
+exl3 GPU GEMM OK LinearEXL3 y=(4, 256) finite mean=0.9920
+exl3 E2 direct/scatter parity OK rows=145 direct=0.00002 scatter=0.00002 bound=7.59187
+INFO 09-05 11:45:57 [exl3.py:379] exl3 e2 diag schema=1 configured_tier=legacy effective_tier=legacy tier_reason=none_requested shared_suh=1 shared_suh_layers=1/1 sym_exl3_moe=1 sym_fat_gemm=1 sym_fat_gemm_scatter=1 cap=12.1 cap_ok=1 tp_rank=-1 tp_size=1 prefill_layer_calls=0 thin_calls=0 row_tile_calls=0 fallback_calls=kernel=0,batched=0,sorted=0,legacy=0 fallback_reasons=none fat_expert_runs=0 direct_calls=0 scatter_calls=0 fat_layers=0 fat_expert_slots=0 max_rows=0 fused_temps_allocs=0 fused_temps_bytes=0 fat_scratch_allocs=0 fat_scratch_bytes=0 fat_scratch_peak_bytes=0
+INFO 09-05 11:45:57 [exl3.py:1597] EXL3 MCG trellis engaged for routed experts: bits=4 experts_local=3 hidden=256 intermediate_local=256 fused_moe=exl3_moe concurrency=6 (no BF16 expert reconstruct at load)
+exl3 fused vs LinearEXL3 loop OK maxabs=2.00000 bound=196.64000
+INFO 09-05 11:45:57 [exl3.py:1597] EXL3 MCG trellis engaged for routed experts: bits=4 experts_local=3 hidden=256 intermediate_local=256 fused_moe=exl3_moe concurrency=6 (no BF16 expert reconstruct at load)
+exl3 legacy/sorted/batched/kernel fat fallback + row-tile vs loop OK T=160 legacy=0.00000 sorted=0.00000 batched=0.00000 kernel=1.0 tile=5.25000 bound=361.92000
+INFO 09-05 11:45:57 [exl3.py:1597] EXL3 MCG trellis engaged for routed experts: bits=4 experts_local=3 hidden=256 intermediate_local=256 fused_moe=exl3_moe concurrency=6 (no BF16 expert reconstruct at load)
+exl3 mixed thin+fat composition OK maxabs=7.00000 bound=285.60000
+WARNING 09-05 11:45:58 [exl3.py:362] exl3 e2 diag tier changed legacy -> kernel (kernel_ok): schema=1 configured_tier=kernel effective_tier=legacy tier_reason=none_requested shared_suh=1 shared_suh_layers=4/4 sym_exl3_moe=1 sym_fat_gemm=1 sym_fat_gemm_scatter=1 cap=12.1 cap_ok=1 tp_rank=-1 tp_size=1 prefill_layer_calls=7 thin_calls=0 row_tile_calls=1 fallback_calls=kernel=2,batched=2,sorted=1,legacy=1 fallback_reasons=batched_ok=2,kernel_ok=2,legacy_default=1,row_tile_preempts_fat=1,sorted_ok=1 fat_expert_runs=10 direct_calls=3 scatter_calls=3 fat_layers=7 fat_expert_slots=12 max_rows=200 fused_temps_allocs=1 fused_temps_bytes=1572864 fat_scratch_allocs=1 fat_scratch_bytes=2032640 fat_scratch_peak_bytes=2032640
+INFO 09-05 11:45:58 [exl3.py:1597] EXL3 MCG trellis engaged for routed experts: bits=4 experts_local=3 hidden=256 intermediate_local=256 fused_moe=exl3_moe concurrency=6 (no BF16 expert reconstruct at load)
+exl3 E2 diag counters OK: kernel call = prefill_layer_calls 1, fallback kernel=1, direct=2, scatter=2, fat_expert_runs=2, scratch_allocs=1; shared-SUH loss -> sorted+degraded_shared_suh; row tiles preempt
+WARNING 09-05 11:45:58 [exl3.py:362] exl3 e2 diag tier changed kernel -> legacy (none_requested): schema=1 configured_tier=legacy effective_tier=kernel tier_reason=kernel_ok shared_suh=1 shared_suh_layers=5/5 sym_exl3_moe=1 sym_fat_gemm=1 sym_fat_gemm_scatter=1 cap=12.1 cap_ok=1 tp_rank=-1 tp_size=1 prefill_layer_calls=3 thin_calls=0 row_tile_calls=1 fallback_calls=kernel=1,batched=0,sorted=1,legacy=0 fallback_reasons=degraded_shared_suh=1,kernel_ok=1,row_tile_preempts_fat=1 fat_expert_runs=4 direct_calls=2 scatter_calls=2 fat_layers=10 fat_expert_slots=18 max_rows=200 fused_temps_allocs=1 fused_temps_bytes=1572864 fat_scratch_allocs=1 fat_scratch_bytes=2032640 fat_scratch_peak_bytes=2032640
+INFO 09-05 11:45:58 [exl3.py:1597] EXL3 MCG trellis engaged for routed experts: bits=4 experts_local=3 hidden=256 intermediate_local=256 fused_moe=exl3_moe concurrency=6 (no BF16 expert reconstruct at load)
+exl3 apply expert_map -1 + EXL3_FUSED_MOE=0 loop OK
+INFO 09-05 11:45:58 [exl3.py:1597] EXL3 MCG trellis engaged for routed experts: bits=4 experts_local=3 hidden=256 intermediate_local=256 fused_moe=exl3_moe concurrency=6 (no BF16 expert reconstruct at load)
+exl3 fused CUDA graph capture OK maxabs=0.00000
+exl3 pair projection parity OK, including production dimensions
+exl3 fused float32 SwiGLU to half parity and graph OK
+exl3 single/odd K tile direct and repeated scatter parity OK
+glm53 EXL3 overlay verify OK
