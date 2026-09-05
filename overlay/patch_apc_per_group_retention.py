@@ -80,8 +80,10 @@ DIAG_HIT_MARK = "# [glm53-apc-hit-diag]"
 PRIORITY_MARK = "# [glm53-apc-drafter-priority]"
 BP_PRIORITY_MARK = "# [glm53-apc-drafter-priority]"
 PRIOR_HELPER_MARK = "# [glm53-dflash-prior-helper-v1]"
+PRIOR_HELPER_V2_MARK = "# [glm53-dflash-prior-helper-v2]"
 PRIOR_POLICY_MARK = "# [glm53-dflash-prior-policy-v1]"
 PRIOR_MANAGER_MARK = "# [glm53-dflash-prior-manager-v1]"
+FREE_ORDER_MARK = "# [glm53-apc-free-order-v1]"
 
 # ---------------------------------------------------------------- anchors ----
 
@@ -303,6 +305,42 @@ def _glm53_dflash_prior_mamba_group_ids(  # [glm53-dflash-prior-helper-v1]
 
 '''
 
+DFLASH_PRIOR_HELPER_V2 = '''
+# [glm53-dflash-prior-helper-v1] upgraded by the v2 positive-sparse policy.
+def _glm53_dflash_prior_mamba_group_ids(  # [glm53-dflash-prior-helper-v2]
+    kv_cache_groups,
+    retention_intervals,
+    is_hybrid_coordinator,
+):
+    """Sparse Mamba groups needing one prior state for full DFlash SWA replay."""
+    if not is_hybrid_coordinator:
+        return frozenset()
+    has_dflash_swa = any(
+        type(_glm53_inner_kv_spec(g.kv_cache_spec)).__name__ == "SlidingWindowSpec"
+        for g in kv_cache_groups
+    )
+    if not has_dflash_swa:
+        return frozenset()
+    group_ids = set()
+    for i, group in enumerate(kv_cache_groups):
+        spec = _glm53_inner_kv_spec(group.kv_cache_spec)
+        if type(spec).__name__ != "MambaSpec":
+            continue
+        interval = retention_intervals[i]
+        # None is dense, and an interval at/below the Mamba state block size
+        # also caches every state. Boundary-only (0) and positive intervals
+        # larger than one state block are sparse and need the backed-up replay
+        # boundary retained explicitly.
+        if interval == 0 or (
+            interval is not None
+            and interval > int(getattr(spec, "block_size", 0) or 0)
+        ):
+            group_ids.add(i)
+    return frozenset(group_ids)
+
+
+'''
+
 INIT_OLD = """        self.retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL
         _validate_prefix_cache_retention_interval(
             self.retention_interval, self.scheduler_block_size, kv_cache_config
@@ -412,7 +450,7 @@ DIAG_FREE_OLD = """    def free(self, request_id: str) -> None:
             manager.free(request_id)
 """
 
-DIAG_FREE_NEW = """    def free(self, request_id: str) -> None:
+DIAG_FREE_V1 = """    def free(self, request_id: str) -> None:
         \"\"\"
         Free the blocks for the request.
 
@@ -464,6 +502,17 @@ DIAG_FREE_NEW = """    def free(self, request_id: str) -> None:
             *before,
             *after,
         )
+"""
+
+FREE_METHOD_NEW = """    def free(self, request_id: str) -> None:
+        \"\"\"
+        Free the blocks for the request.
+
+        Args:
+            request_id: The request ID.
+        \"\"\"
+        for i in self._glm53_free_manager_order:  # [glm53-apc-free-order-v1]
+            self.single_type_managers[i].free(request_id)
 """
 
 DIAG_HIT_OLD = """        return cache_hit_blocks, hit_length, num_uncached_common_prefix_tokens
@@ -584,6 +633,44 @@ STM_REACHABLE_NEW = """        reachable_boundaries = [request.num_prompt_tokens
                 reachable_boundaries.append(previous_replay_boundary)
 """
 
+FREE_ORDER_INIT_OLD = """        self.block_pool.low_priority_cache_group_ids = (  # [glm53-apc-drafter-priority]
+            frozenset(_glm53_min_exempt)
+            if _glm53_swa_interval == 0
+            else frozenset()
+        )
+"""
+
+FREE_ORDER_INIT_NEW = """        self.block_pool.low_priority_cache_group_ids = (  # [glm53-apc-drafter-priority]
+            frozenset(_glm53_min_exempt)
+            if _glm53_swa_interval == 0
+            else frozenset()
+        )
+        # [glm53-apc-free-order-v1] BlockPool.free_blocks is called once per
+        # manager. Free low-priority cached drafter blocks first, so later target
+        # unhashed prepends stay globally ahead of them; target cached blocks
+        # still append at the protected LRU tail.
+        self._glm53_free_manager_order = (
+            tuple(sorted(self.block_pool.low_priority_cache_group_ids))
+            + tuple(
+                i
+                for i in range(len(self.single_type_managers))
+                if i not in self.block_pool.low_priority_cache_group_ids
+            )
+        )
+"""
+
+REMOVE_SKIPPED_OLD = """        for manager in self.single_type_managers:
+            manager.remove_skipped_blocks(
+                request_id, processed_computed_tokens, num_prompt_tokens
+            )
+"""
+
+REMOVE_SKIPPED_NEW = """        for i in self._glm53_free_manager_order:  # [glm53-apc-free-order-v1]
+            self.single_type_managers[i].remove_skipped_blocks(
+                request_id, processed_computed_tokens, num_prompt_tokens
+            )
+"""
+
 BP_INIT_OLD = """        self.metrics_collector = metrics_collector
 """
 
@@ -687,17 +774,43 @@ def main() -> int:
         if text.count(needle) != 1:
             raise SystemExit(f"{P}: DFlash helper insert point not unique")
         text = text.replace(needle, DFLASH_PRIOR_HELPER + needle, 1)
+    if PRIOR_HELPER_V2_MARK not in text:
+        text = replace_once(
+            text,
+            DFLASH_PRIOR_HELPER,
+            DFLASH_PRIOR_HELPER_V2,
+            "positive-sparse DFlash prior helper",
+        )
 
-    if DIAG_MARK not in text:
-        text = replace_once(text, DIAG_IMPORT_OLD, DIAG_IMPORT_NEW, "diagnostic import")
-        text = replace_once(text, DIAG_FREE_OLD, DIAG_FREE_NEW, "diagnostic free")
-    if DIAG_HIT_MARK not in text:
-        text = replace_once(text, DIAG_HIT_OLD, DIAG_HIT_NEW, "diagnostic cache hit")
+    # The v1 qualification image carried temporary INFO diagnostics that scanned
+    # the whole physical block pool on every request completion. Preserve those
+    # observations in the qualification artifacts, but remove their runtime
+    # overhead (and the now-unused get_group_id import) from production bytes.
+    if DIAG_MARK in text:
+        text = replace_once(
+            text, DIAG_IMPORT_NEW, DIAG_IMPORT_OLD, "remove diagnostic import"
+        )
+        text = replace_once(text, DIAG_FREE_V1, DIAG_FREE_OLD, "remove diagnostic free")
+    if DIAG_HIT_MARK in text:
+        text = replace_once(
+            text, DIAG_HIT_NEW, DIAG_HIT_OLD, "remove diagnostic cache hit"
+        )
     if PRIORITY_MARK not in text:
         text = replace_once(text, PRIORITY_OLD, PRIORITY_NEW, "drafter priority config")
     if PRIOR_POLICY_MARK not in text:
         text = replace_once(
             text, PRIOR_POLICY_OLD, PRIOR_POLICY_NEW, "dflash prior-boundary policy"
+        )
+    if FREE_ORDER_MARK not in text:
+        text = replace_once(
+            text, FREE_ORDER_INIT_OLD, FREE_ORDER_INIT_NEW, "free-order init"
+        )
+        text = replace_once(text, DIAG_FREE_OLD, FREE_METHOD_NEW, "free-order release")
+        text = replace_once(
+            text,
+            REMOVE_SKIPPED_OLD,
+            REMOVE_SKIPPED_NEW,
+            "free-order skipped-block release",
         )
     if PRIOR_MANAGER_MARK not in single_type_text:
         n = single_type_text.count(STM_REACHABLE_OLD)
@@ -739,7 +852,7 @@ def main() -> int:
     BP.write_text(block_pool_text)
     STM.write_text(single_type_text)
     print(
-        f"patched {P.name} (per-group APC retention + temporary occupancy diagnostics; "
+        f"patched {P.name} (per-group APC retention + DFlash replay/free ordering; "
         "VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA drives the DFlash2 drafter group)"
     )
     return 0

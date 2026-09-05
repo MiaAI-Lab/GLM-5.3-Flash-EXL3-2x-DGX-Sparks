@@ -63,6 +63,10 @@ def main() -> int:
         assert "self.dflash_swa_replay_tokens" in text
         assert "replay clamp hit=%d->%d" in text
         assert "[glm53-dflash-swa-replay-v1]" in text
+        assert "[glm53-dflash-swa-replay-v2]" in text
+        assert "draft_replay_ready" in text
+        assert "reusing reconciled " in text
+        assert "DFlash boundary hit=%d" in text
         assert "swa_ids or set(" in text
         helpers = helper_namespace(text)
         safe_hit = helpers["_glm53_dflash_replay_safe_hit"]

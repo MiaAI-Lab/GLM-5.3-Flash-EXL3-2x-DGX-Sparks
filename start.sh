@@ -60,6 +60,7 @@ fi
 # Caller exports (MTP_TOKENS=2 ./start.sh restart) must win over .env.
 _cli_mtp="${MTP_TOKENS-}"
 _cli_spec="${SPEC_METHOD-}"
+_cli_dflash_draft_tp_set="${DFLASH_DRAFT_TP+1}"
 _cli_dflash_draft_tp="${DFLASH_DRAFT_TP-}"
 _cli_eager="${ENFORCE_EAGER-}"
 _cli_fused="${EXL3_FUSED_MOE-}"
@@ -100,7 +101,7 @@ set +a
 [ -n "${_cli_apc_global_set}" ] && GLM53_APC_RETENTION_INTERVAL="$_cli_apc_global"
 [ -n "${_cli_apc_swa_set}" ] && GLM53_APC_RETENTION_INTERVAL_SWA="$_cli_apc_swa"
 [ -n "${_cli_spec}" ] && SPEC_METHOD="$_cli_spec"
-[ -n "${_cli_dflash_draft_tp}" ] && DFLASH_DRAFT_TP="$_cli_dflash_draft_tp"
+[ -n "${_cli_dflash_draft_tp_set}" ] && DFLASH_DRAFT_TP="$_cli_dflash_draft_tp"
 [ -n "${_cli_eager}" ] && ENFORCE_EAGER="$_cli_eager"
 [ -n "${_cli_fused}" ] && EXL3_FUSED_MOE="$_cli_fused"
 [ -n "${_cli_row_tile}" ] && EXL3_MOE_ROW_TILE="$_cli_row_tile"
@@ -543,13 +544,15 @@ resolve_model_dir() {
 }
 
 ensure_dflash_refs_main() {
-    local ref="$DFLASH_PATH/refs/main" snap
-    [ -f "$ref" ] && [ -n "$(<"$ref")" ] && return 0
-    snap="$(ls -1t "$DFLASH_PATH/snapshots" 2>/dev/null | head -n 1 || true)"
-    [ -n "$snap" ] || die "no snapshots under $DFLASH_PATH — re-run download"
+    local ref="$DFLASH_PATH/refs/main" snap="$DFLASH_REVISION" dir current=""
+    dir="$DFLASH_PATH/snapshots/$snap"
+    [ -f "$dir/config.json" ] && [ -f "$dir/model.safetensors" ] \
+        || die "pinned DFlash2 snapshot $snap is incomplete under $DFLASH_PATH — re-run download"
+    [ -f "$ref" ] && current="$(<"$ref")"
+    [ "$current" = "$snap" ] && return 0
     mkdir -p "$DFLASH_PATH/refs"
     printf '%s' "$snap" >"$ref"
-    log "wrote DFlash2 refs/main -> $snap"
+    log "wrote DFlash2 refs/main -> pinned revision $snap"
 }
 
 resolve_dflash_dir() {
@@ -973,10 +976,10 @@ download_weights() {
 download_dflash() {
     [ "$SPEC_METHOD" = "dflash" ] || return 0
     [ "${SKIP_DOWNLOAD:-0}" = "1" ] && { log "SKIP_DOWNLOAD=1 — skipping DFlash2 download check"; return; }
-    local have
-    have="$(find "$DFLASH_PATH/snapshots" -name 'model.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]' || true)"
-    if [ "${have:-0}" -ge 1 ] && [ "${REFRESH_WEIGHTS:-0}" != "1" ]; then
-        log "DFlash2 already present: $DFLASH_PATH"
+    local pinned_dir="$DFLASH_PATH/snapshots/$DFLASH_REVISION"
+    if [ -f "$pinned_dir/config.json" ] && [ -f "$pinned_dir/model.safetensors" ] \
+        && [ "${REFRESH_WEIGHTS:-0}" != "1" ]; then
+        log "DFlash2 pinned revision already present: $pinned_dir"
         ensure_dflash_refs_main
         return
     fi
@@ -985,9 +988,9 @@ download_dflash() {
     log "downloading ${DFLASH_MODEL} (~2.3 GiB) into ${HF_CACHE_DIR} ..."
     HF_HOME="$HF_CACHE_DIR" "${HF_BIN_CMD[@]}" download "$DFLASH_MODEL" --revision "$DFLASH_REVISION"
     ensure_dflash_refs_main
-    have="$(find "$DFLASH_PATH/snapshots" -name 'model.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]' || true)"
-    [ "${have:-0}" -ge 1 ] || die "DFlash2 download finished without model.safetensors"
-    log "DFlash2 download complete"
+    [ -f "$pinned_dir/config.json" ] && [ -f "$pinned_dir/model.safetensors" ] \
+        || die "DFlash2 download finished without complete pinned revision $DFLASH_REVISION"
+    log "DFlash2 pinned revision download complete: $DFLASH_REVISION"
 }
 
 # Head-only Hub fetch. No docker, no SSH, no worker rsync.

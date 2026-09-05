@@ -46,6 +46,7 @@ P = Path(
 )
 MARK = "# [glm53-hybrid-apc]"
 DFLASH_REPLAY_MARK = "# [glm53-dflash-swa-replay-v1]"
+DFLASH_RECONCILE_MARK = "# [glm53-dflash-swa-replay-v2]"
 
 BASE_HELPER = '''
 def _glm53_inner_kv_spec(spec):
@@ -233,6 +234,91 @@ CONVERGE_NEW = """            if curr_hit_length >= hit_length:
                 break
 """
 
+CONVERGE_RECONCILED = """            if curr_hit_length >= hit_length:
+                # [glm53-dflash-swa-replay-v2] Reuse the current boundary when
+                # every DFlash group actually returned a complete, EAGLE-popped
+                # sliding window at exactly that reconciled target length. This
+                # avoids backing a valid short-suffix hit up by a full scheduler
+                # page. Length equality alone is insufficient: the returned
+                # prefix is mostly null blocks, so verify the complete visible
+                # window is materialized at its tail.
+                draft_replay_ready = True
+                draft_groups_seen = 0
+                for (
+                    draft_spec,
+                    draft_group_ids,
+                    _,
+                    draft_use_eagle,
+                ) in self.attention_groups:
+                    if not _glm53_is_draft_swa_spec(draft_spec):
+                        continue
+                    draft_groups_seen += len(draft_group_ids)
+                    draft_block_size = self.single_type_managers[
+                        draft_group_ids[0]
+                    ].block_size
+                    required_tail_blocks = (
+                        int(getattr(draft_spec, "sliding_window", 0) or 0) - 1
+                        + draft_block_size - 1
+                    ) // draft_block_size
+                    expected_blocks = curr_hit_length // draft_block_size
+                    for draft_group_id in draft_group_ids:
+                        draft_blocks = hit_blocks_by_group[draft_group_id]
+                        if (
+                            not draft_use_eagle
+                            or required_tail_blocks <= 0
+                            or hit_length_by_group[draft_group_id] != curr_hit_length
+                            or draft_blocks is None
+                            or len(draft_blocks) != expected_blocks
+                            or len(draft_blocks) < required_tail_blocks
+                            or any(
+                                block.is_null
+                                for block in draft_blocks[-required_tail_blocks:]
+                            )
+                        ):
+                            draft_replay_ready = False
+                            break
+                    if not draft_replay_ready:
+                        break
+                if draft_groups_seen and draft_replay_ready:
+                    logger.info(
+                        "[glm53-dflash-swa-replay-v2] reusing reconciled "
+                        "DFlash boundary hit=%d fresh=%d required=%d",
+                        curr_hit_length,
+                        max_cache_hit_length + 1 - curr_hit_length,
+                        self.dflash_swa_replay_tokens,
+                    )
+                    break
+                replay_safe_hit = _glm53_dflash_replay_safe_hit(
+                    curr_hit_length,
+                    max_cache_hit_length,
+                    self.dflash_swa_replay_tokens,
+                    self._cache_hit_alignment_tokens,
+                )
+                if replay_safe_hit < curr_hit_length:
+                    logger.info(
+                        "[glm53-dflash-swa-replay-v2] replay clamp hit=%d->%d "
+                        "fresh=%d required=%d alignment=%d",
+                        curr_hit_length,
+                        replay_safe_hit,
+                        max_cache_hit_length + 1 - curr_hit_length,
+                        self.dflash_swa_replay_tokens,
+                        self._cache_hit_alignment_tokens,
+                    )
+                    hit_length = replay_safe_hit
+                    # Cached drafter blocks were looked up at the larger target
+                    # hit and cannot be paired with a backed-up target state.
+                    # Discard them so the fresh replay rebuilds the complete
+                    # DFlash sliding-attention window at the new boundary.
+                    for draft_spec, draft_group_ids, _, _ in self.attention_groups:
+                        if _glm53_is_draft_swa_spec(draft_spec):
+                            for draft_group_id in draft_group_ids:
+                                hit_blocks_by_group[draft_group_id] = None
+                                hit_length_by_group[draft_group_id] = 0
+                    eagle_verified.clear()
+                    continue
+                break
+"""
+
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
     n = text.count(old)
@@ -268,6 +354,13 @@ def main() -> int:
             )
         text = replace_once(text, INIT_OLD, INIT_NEW, "dflash-replay-init")
         text = replace_once(text, CONVERGE_OLD, CONVERGE_NEW, "dflash-replay-clamp")
+    if DFLASH_RECONCILE_MARK not in text:
+        text = replace_once(
+            text,
+            CONVERGE_NEW,
+            CONVERGE_RECONCILED,
+            "dflash-reconciled-boundary-reuse",
+        )
     # Canonicalize only the two adjacent injected helper boundaries. The two
     # overlays both insert before the upstream validator, so without this the
     # application order can differ by one blank line despite identical code.

@@ -61,8 +61,10 @@ MARKER = "# [glm53-apc-per-group]"
 MIA_MARKER = "# [glm53-hybrid-apc]"
 PRIORITY_MARKER = "# [glm53-apc-drafter-priority]"
 PRIOR_HELPER_MARKER = "# [glm53-dflash-prior-helper-v1]"
+PRIOR_HELPER_V2_MARKER = "# [glm53-dflash-prior-helper-v2]"
 PRIOR_POLICY_MARKER = "# [glm53-dflash-prior-policy-v1]"
 PRIOR_MANAGER_MARKER = "# [glm53-dflash-prior-manager-v1]"
+FREE_ORDER_MARKER = "# [glm53-apc-free-order-v1]"
 
 HELPERS = (
     "_glm53_inner_kv_spec",
@@ -384,9 +386,9 @@ def test_dflash_prior_groups(ns):
         "live all-zero layout must retain one prior checkpoint in four Mamba groups",
     )
     check(
-        fn(groups, (None, None, 0, None, 0, None, 0), True)
-        == frozenset({2, 4}),
-        "only Mamba groups whose interval is zero qualify",
+        fn(groups, (None, None, 0, 14336, 3584, None, 0), True)
+        == frozenset({2, 3}),
+        "boundary-only and positive-sparse Mamba groups qualify; dense groups do not",
     )
     check(fn(groups, (0,) * 7, False) == frozenset(), "base coordinator -> none")
     without_dflash = groups[:-1]
@@ -517,8 +519,8 @@ def test_call_sites(pristine: str, text: str):
     print("  call sites + boot log line OK")
 
 
-def test_drafter_priority(block_pool_text: str):
-    """Execute the injected free_blocks method against a small fake queue."""
+def test_drafter_priority(block_pool_text: str, coordinator_text: str):
+    """Exercise one-batch policy and real per-manager free call ordering."""
     tree = ast.parse(block_pool_text)
     block_pool_class = next(
         node
@@ -587,7 +589,71 @@ def test_drafter_priority(block_pool_text: str):
         inherited.free_block_queue.items == ["existing", ordinary_draft],
         "without explicit SWA=0, drafter blocks must retain ordinary LRU priority",
     )
-    print("  drafter-only eviction priority + mixed-block protection OK")
+
+    # Coordinator.free invokes BlockPool.free_blocks once per manager. The
+    # low-priority drafter must be called first: otherwise its later prepend
+    # overtakes target unhashed blocks that were already placed at the front.
+    multi_pool = types.SimpleNamespace(
+        enable_caching=True,
+        low_priority_cache_group_ids=frozenset({6}),
+        cached_block_hashes_by_block={},
+        free_block_queue=FakeQueue(),
+        blocks=[],
+    )
+    multi_pool.get_num_free_blocks = lambda: len(multi_pool.free_block_queue.items)
+    multi_pool.free_blocks = types.MethodType(ns["free_blocks"], multi_pool)
+    target_unhashed = FakeBlock(10, None)
+    draft_cached = FakeBlock(11, (6, "draft"))
+    multi_pool.blocks = [target_unhashed, draft_cached]
+
+    class ReleaseManager:
+        def __init__(self, block=None):
+            self.block = block
+            self.req_to_blocks = {"r": [] if block is None else [block]}
+
+        def free(self, request_id):
+            blocks = self.req_to_blocks.pop(request_id)
+            if blocks:
+                multi_pool.free_blocks(blocks)
+
+    managers = [ReleaseManager(target_unhashed)]
+    managers.extend(ReleaseManager() for _ in range(5))
+    managers.append(ReleaseManager(draft_cached))
+    free_name, free_module = _method_from_source(
+        coordinator_text, "KVCacheCoordinator", "free"
+    )
+
+    class FakeLogger:
+        def info(self, *args):
+            pass
+
+    free_ns = {
+        "KVCacheBlock": FakeBlock,
+        "logger": FakeLogger(),
+    }
+    exec(compile(free_module, "<glm53-coordinator-free>", "exec"), free_ns)  # noqa: S102
+    coordinator = types.SimpleNamespace(
+        block_pool=multi_pool,
+        single_type_managers=managers,
+        _glm53_free_manager_order=(6, 0, 1, 2, 3, 4, 5),
+    )
+    free_ns[free_name](coordinator, "r")
+    check(
+        multi_pool.free_block_queue.items
+        == [target_unhashed, draft_cached, "existing"],
+        "multi-call order must keep target unhashed globally ahead of cached drafter",
+    )
+    check(
+        all("r" not in manager.req_to_blocks for manager in managers),
+        "coordinator free must release every manager exactly once",
+    )
+    check(
+        "[glm53-apc-retention-diag]" not in coordinator_text
+        and "[glm53-apc-hit-diag]" not in coordinator_text
+        and "get_group_id," not in coordinator_text,
+        "temporary qualification diagnostics must be absent from composed runtime",
+    )
+    print("  drafter priority + global per-manager free ordering OK")
 
 
 def test_prior_boundary_cache_call(single_type_text: str):
@@ -686,8 +752,11 @@ def test_composed_runtime_paths(
     for marker in (
         "# [glm53-hybrid-apc]",
         "# [glm53-dflash-swa-replay-v1]",
+        "# [glm53-dflash-swa-replay-v2]",
         PRIOR_HELPER_MARKER,
+        PRIOR_HELPER_V2_MARKER,
         PRIOR_POLICY_MARKER,
+        FREE_ORDER_MARKER,
     ):
         check(marker in coordinator_text, f"composed coordinator missing {marker}")
     check(
@@ -828,6 +897,10 @@ def test_composed_runtime_paths(
         "runtime init must derive DFlash's 2048-token SWA replay window",
     )
     check(
+        coordinator._glm53_free_manager_order == (6, 0, 1, 2, 3, 4, 5),
+        "runtime init must release low-priority drafter manager before target managers",
+    )
+    check(
         {
             i
             for i, manager in enumerate(coordinator.single_type_managers)
@@ -864,7 +937,7 @@ def test_composed_runtime_paths(
     HitMambaSpec.__name__ = "MambaSpec"
 
     class HitSlidingWindowSpec:
-        pass
+        sliding_window = DRAFT_WINDOW
 
     HitSlidingWindowSpec.__name__ = "SlidingWindowSpec"
 
@@ -877,25 +950,37 @@ def test_composed_runtime_paths(
             blocks = [[object()] * (length // ALIGN) for _ in kv_cache_group_ids]
             return tuple(blocks), length
 
-    class DraftMissAtPriorManager(HitManager):
+    class HitBlock:
+        def __init__(self, is_null=False):
+            self.is_null = is_null
+
+    class DraftInvalidAtCurrentManager(HitManager):
         @classmethod
         def find_longest_cache_hit(cls, max_length, kv_cache_group_ids, **kwargs):
-            # The latest 21504 boundary is cached, but the backed 17920 DFlash
-            # boundary is absent. The coordinator must not retain the stale
-            # later-boundary block list after target reconciliation.
+            # Length alone claims the latest boundary, but the visible tail is
+            # incomplete. The coordinator must clamp and discard these blocks.
             if max_length < 21504:
                 return tuple([] for _ in kv_cache_group_ids), 0
-            return super().find_longest_cache_hit(
-                max_length=max_length,
-                kv_cache_group_ids=kv_cache_group_ids,
-                **kwargs,
-            )
+            blocks = [HitBlock() for _ in range(21504 // DRAFT_BLOCK)]
+            blocks[-1] = HitBlock(is_null=True)
+            return tuple(
+                list(blocks) for _ in kv_cache_group_ids
+            ), 21504
+
+    class DraftValidAtCurrentManager(HitManager):
+        @classmethod
+        def find_longest_cache_hit(cls, max_length, kv_cache_group_ids, **kwargs):
+            length = max_length // ALIGN * ALIGN
+            blocks = [HitBlock() for _ in range(length // DRAFT_BLOCK)]
+            return tuple(
+                list(blocks) for _ in kv_cache_group_ids
+            ), length
 
     SpecGroup = namedtuple("SpecGroup", "spec group_ids manager_cls use_eagle")
     coordinator.attention_groups = [
         SpecGroup(FullAttentionSpec(), [0], HitManager, False),
         SpecGroup(HitMambaSpec(), [2, 3, 4, 5], HitManager, False),
-        SpecGroup(HitSlidingWindowSpec(), [6], DraftMissAtPriorManager, True),
+        SpecGroup(HitSlidingWindowSpec(), [6], DraftInvalidAtCurrentManager, True),
     ]
     coordinator.dflash_swa_replay_tokens = DRAFT_WINDOW
     coordinator.hash_block_size = 64
@@ -923,12 +1008,38 @@ def test_composed_runtime_paths(
     check(len(blocks) == 7 and len(blocks[0]) == 5, "hit path must return 7 groups")
     check(
         blocks[6] == [],
-        "backed-up target hit must discard stale later-boundary DFlash blocks, "
+        "backed-up target hit must discard incomplete later-boundary DFlash blocks, "
         f"got {len(blocks[6])}",
     )
 
+    coordinator.attention_groups[-1] = SpecGroup(
+        HitSlidingWindowSpec(), [6], DraftValidAtCurrentManager, False
+    )
+    blocks, hit, uncached = hit_ns[hit_name](coordinator, [object()] * 400, 21568)
+    check(
+        hit == 17920 and uncached == 3584,
+        "a complete draft tail without EAGLE-pop semantics must still clamp",
+    )
+
+    coordinator.attention_groups[-1] = SpecGroup(
+        HitSlidingWindowSpec(), [6], DraftValidAtCurrentManager, True
+    )
+    blocks, hit, uncached = hit_ns[hit_name](
+        coordinator, [object()] * 400, 21568
+    )
+    check(
+        hit == 21504,
+        f"complete reconciled DFlash boundary must avoid 3584-token clamp, got {hit}",
+    )
+    check(uncached == 0, f"complete current-boundary hit must not report gap, got {uncached}")
+    check(
+        len(blocks[6]) == 21504 // DRAFT_BLOCK
+        and all(not block.is_null for block in blocks[6][-32:]),
+        "reused DFlash hit must carry the complete 2048-token visible tail",
+    )
+
     test_prior_boundary_cache_call(single_type_text)
-    test_drafter_priority(block_pool_text)
+    test_drafter_priority(block_pool_text, coordinator_text)
     print("  exact composed init/cache/hit/free execution OK")
 
 
@@ -1104,7 +1215,7 @@ def main() -> int:
         test_dflash_prior_groups(ns)
         test_env(ns)
         test_validator(ns)
-        test_drafter_priority(bp_text)
+        test_drafter_priority(bp_text, text)
         test_prior_boundary_cache_call(stm_text)
         test_composition(pristine_src, bp_src, stm_src, tmp)
 
