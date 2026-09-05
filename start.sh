@@ -381,7 +381,15 @@ worker_ssh() { ssh -T -o BatchMode=yes -o ConnectTimeout=15 "$WORKER_SSH" "$@"; 
 usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 count_shards() {
-    find "$1/snapshots" -name '*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]' || true
+    local repo_path="$1" ref
+    ref="$(cat "$repo_path/refs/main" 2>/dev/null || true)"
+    [ -n "$ref" ] || ref="$(ls -1t "$repo_path/snapshots" 2>/dev/null | head -n 1 || true)"
+    if [ -z "$ref" ]; then
+        printf '0'
+        return
+    fi
+    find "$repo_path/snapshots/$ref" -maxdepth 1 -type f -name '*.safetensors' 2>/dev/null \
+        | wc -l | tr -d '[:space:]' || true
 }
 
 ensure_refs_main() {
