@@ -1,12 +1,12 @@
 | `EXL3_FAT_KERNEL` | `1` | [PR77 E2 fat-expert prefill kernel](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/pull/77) (implies batched+sorted). `0` = legacy fat path |
-| `EXL3_FAT_GROUPED` | `1` | E3 grouped fat-expert tier (`overlay/exl3_fat_moe.cu`): one gather + gate/up + down launch per layer from device-side tables, no host sync. **+37–45% cold prefill** measured (see *Cold prefill (E3)*). Default on since 2026-09-07 with the launcher defaults 900k / util 0.85 / rightsize / cap 32. Needs an image with the E3 kernels (fails closed at load otherwise). `0` = E2 kernel path (then set `MAX_MODEL_LEN=1000000`, cap 256 is picked automatically). 1M does not fit with E3 at util ≤ 0.87 on this kit (560 MiB scratch charged to the KV budget) |
+| `EXL3_FAT_GROUPED` | `1` | E3 grouped fat-expert tier (`overlay/exl3_fat_moe.cu`): one gather + gate/up + down launch per layer from device-side tables, no host sync. **+37–45% cold prefill** measured (see *Cold prefill (E3)*). Default on since 2026-09-07 with the launcher defaults 850k / util 0.85 / rightsize / cap 32. Needs an image with the E3 kernels (fails closed at load otherwise). `0` = E2 kernel path (then set `MAX_MODEL_LEN=1000000`, cap 256 is picked automatically). 1M does not fit with E3 at util ≤ 0.87 on this kit (560 MiB scratch charged to the KV budget) |
 | `EXL3_TEMP_ROWS_FUSED` | `32` with E3, `256` with E2 (launcher picks by `EXL3_FAT_GROUPED` unless set) | fused `exl3_moe` rows per expert; experts above it are "fat". Keep ≥ `MAX_NUM_SEQS × (DFLASH_TOKENS+1)` so decode stays one graph-safe launch. E2 wants 256 (its per-expert loop is host-bound) |
 | `KV_CACHE_DTYPE` | `fp8` | packed `fp8_ds_mla`; not `nvfp4`, not bf16 |
 | `GPU_MEM_UTIL` | `0.85` | GB10 UMA budget (default lowered from 0.87 on 2026-09-07: each 0.01 is 1.2 GiB of host headroom, and long prefills need it — see *Cold prefill (E3)*). E3 at 900k / 0.85: pool ~1.05M tokens / 1.17× (0.87: 16.2 GiB / 1,051,648 tokens). Pre-E3 receipts at 1M / 0.87: 1,754,237 tokens / 18.67 GiB (MNBT 2048); 1,243,902 tokens / 1.24× (7168, rightsize, E2) |
-| `MAX_MODEL_LEN` | `900000` | default context since 2026-09-07 (E3 default; 1M fits again with `EXL3_FAT_GROUPED=0`). 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool. At MNBT 7168 one 1M request needs **14.52 GiB** KV (10.98 GiB at 500k; ~7.4 GiB fixed + 7.1 GiB per 1M); the E3 recipe runs 500k |
+| `MAX_MODEL_LEN` | `850000` | default context since 2026-09-07 (E3 default; 1M fits again with `EXL3_FAT_GROUPED=0`). 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool. At MNBT 7168 one 1M request needs **14.52 GiB** KV (10.98 GiB at 500k; ~7.4 GiB fixed + 7.1 GiB per 1M); the E3 recipe runs 500k |
 **Default from this checkout:** E2 fat kernel on (`EXL3_FAT_KERNEL=1`) and `MAX_NUM_BATCHED_TOKENS=7168`; the E3 grouped tier is the launcher default (`EXL3_FAT_GROUPED=1`, see *Cold prefill (E3)*). The table above is the pre-E2 C4 keep at 2048; the current E2 cold-prefill baseline is the linked PR77 table; E2 at 7168 is ~1,150–1,185 tok/s cold, E3 ~1,580–1,640.
 | Spec | **DFlash2 k=7** (`incoai/GLM-5.3-Flash-DFlash2`); draft KV `auto`/bf16, draft TP=2, FLASH_ATTN. Rollback `SPEC_METHOD=mtp` |
-| Context | **900k** default since 2026-09-07 (E3; `EXL3_FAT_GROUPED=0` fits 1M again). Pre-E3 1M receipts: live pool **1,754,237** tokens (1.75×) / 690 GPU blocks / 18.67 GiB at MNBT 2048; latest validated 7168/rightsize E2 pool at 1M **1,243,902** tokens / **1.24×**. Pool size varies with MNBT, activation/graph reservations and hybrid block geometry. Padded slot-share is why 1M allocates; the old 900k cap was 1.95× on this same pool. Do not drop to 256k to “free” slots (hybrid mamba + DFlash window block-id demand is mostly length-independent) |
+| Context | **850k** default since 2026-09-07 (E3; `EXL3_FAT_GROUPED=0` fits 1M again). KV pool at the default is **~1M tokens** (measured 1,023,626-1,084,615 across boots; pool size varies ±0.4 GiB between identical boots). Pre-E3 1M receipts: live pool **1,754,237** tokens (1.75×) / 690 GPU blocks / 18.67 GiB at MNBT 2048; latest validated 7168/rightsize E2 pool at 1M **1,243,902** tokens / **1.24×**. Pool size varies with MNBT, activation/graph reservations and hybrid block geometry. Padded slot-share is why 1M allocates; the old 900k cap was 1.95× on this same pool. Do not drop to 256k to “free” slots (hybrid mamba + DFlash window block-id demand is mostly length-independent) |
 <h1 align="center">GLM-5.3 Flash EXL3 for 2x DGX Sparks</h1>
 
 <p align="center">
@@ -40,7 +40,23 @@ inside the draft block on this image and collapses later-position accept).
 `EXL3_FAT_GROUPED=1` (launcher default since 2026-09-07) replaces the E2 per-expert host loop for "fat" experts with three
 GPU-driven launches per MoE layer (gather, gate/up + SwiGLU, down + scatter) built from
 device-side segment tables — no per-expert launches, no weight repacking, no host sync
-(`overlay/exl3_fat_moe.cu`, Fable's design, E2 rounding boundaries restored). Measured
+(`overlay/exl3_fat_moe.cu`, Fable's design, E2 rounding boundaries restored).
+
+**Latest run — 2026-09-07, measured with [sparkDash](https://github.com/MiaAI-Lab/sparkDash).**
+Shipped E3 image `glm53-flash-sm121:e3-20260907` at `MAX_MODEL_LEN=900000`, `GPU_MEM_UTIL=0.86`,
+`GLM53_INDEXER_WORKSPACE=rightsize`, `EXL3_TEMP_ROWS_FUSED=32`, MNBT 7168, `MAX_NUM_SEQS=4`,
+DFlash2 k=7 draft TP=2, C4, thinking off.
+
+| Prompt | Prompt tok | TTFT | Prefill tok/s |
+|---|---:|---:|---:|
+| ~8k | 8,221 | 5.51 s | **1,492.1** |
+| ~16k | 16,411 | 10.56 s | **1,553.7** |
+| ~32k | 32,797 | 22.96 s | **1,428.2** |
+| ~64k | 65,566 | 41.31 s | **1,587.0** |
+| ~128k | 131,101 | 83.95 s | **1,561.7** |
+| ~256k | 262,173 | 172.84 s | **1,516.8** |
+
+**A/B receipt vs E2 (2026-09-06 overnight run).** Measured
 on this kit: **MAX_MODEL_LEN=500000**, `GPU_MEM_UTIL=0.84`, `GLM53_INDEXER_WORKSPACE=rightsize`,
 `EXL3_TEMP_ROWS_FUSED=32`, MNBT 7168, DFlash2 k=7 draft TP=2, C4, thinking off, unique cold
 prompts (0 prefix hits). Prefill tok/s = prompt tokens / TTFT (client side).
@@ -62,7 +78,7 @@ run-to-run spread). Isolated layer bench: 7168-token MoE layer 77–91 ms (E2) �
 numerically indistinguishable from E2 vs the LinearEXL3 reference. Full receipts, gates and
 the memory caveat: `logs/overnight-20260906T164059Z/report.md`.
 
-**Context and headroom:** the shipped default is now **900k / util 0.85 / rightsize** (boots with ~0.5 GiB of KV margin on the head; a 256k prefill ran at 900k / 0.87 with driver retries but no failure). E3 keeps a 560 MiB fat-row scratch that vLLM's profile run charges to
+**Context and headroom:** the shipped default is now **850k / util 0.85 / rightsize** (boots with ~0.5 GiB of KV margin on the head; a 256k prefill ran at 900k / 0.87 with driver retries but no failure). E3 keeps a 560 MiB fat-row scratch that vLLM's profile run charges to
 the KV budget, so at 1M / util 0.87 the pool no longer fits one 1M request on this kit
 (needs 14.52 GiB). 500k needs 10.98 GiB and boots reliably at 0.84 (1.2× at 500k). Prompts
 ≥ ~100k are near the head's host-memory limit at any setting (a 256k prefill at util 0.87
@@ -335,7 +351,7 @@ Live occupancy, temp **0**, thinking **off**, unique pads, `max_tokens=8`:
 | ~300k ×1 streamed | **200** | **26.0%** | **356 s** TTFT (~840 tok/s) | 299,213 prompt tokens, gen `OK`; MNBT=1024 remeasure **323 s** / ~928 tok/s; production MNBT=2048 **319 s** / **941** tok/s |
 
 Live **3×256k** held (the original failure). Prefills still serialize under skip; two 256k contexts were in KV at once at 29.5%. One 256k sat ~25%. Hybrid occupancy is a large length-independent floor (mamba + DFlash window) plus MLA pages that scale: 36k → 16%, 256k → ~25%, 300k → 26%.
-Default is **900k** (E3; was 1M). Do **not** drop `MAX_MODEL_LEN` to 256k to “free” slots —
+Default is **850k** (E3; was 1M). Do **not** drop `MAX_MODEL_LEN` to 256k to “free” slots —
 logged tokens ≈ concurrency × that cap, and the hybrid floor then shrinks the
 pool.
 
