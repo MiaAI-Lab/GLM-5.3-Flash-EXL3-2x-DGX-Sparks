@@ -63,6 +63,16 @@ def _run_preamble(env_file: str, caller: dict[str, str], probe: str) -> str:
     return result.stdout.strip()
 
 
+def test_mixed_prefill_chunk_inline_override_wins() -> None:
+    probe = ('\nprintf "GLM53_MIXED_PREFILL_CHUNK=%s\\n" '
+             '"${GLM53_MIXED_PREFILL_CHUNK:-unset}"\n')
+    assert _run_preamble(
+        "GLM53_MIXED_PREFILL_CHUNK=2\n",
+        {"GLM53_MIXED_PREFILL_CHUNK": "skip"},
+        probe,
+    ) == "GLM53_MIXED_PREFILL_CHUNK=skip"
+
+
 def test_indexer_workspace_caller_capture_is_setness_aware() -> None:
     """An explicitly EMPTY caller value must not be swallowed by ``.env``.
 
@@ -106,6 +116,7 @@ def test_spinwait_caller_capture_is_setness_aware() -> None:
 
 if __name__ == "__main__":
     test_max_num_seqs_inline_override_wins()
+    test_mixed_prefill_chunk_inline_override_wins()
     test_indexer_workspace_caller_capture_is_setness_aware()
     test_spinwait_caller_capture_is_setness_aware()
     print("start.sh caller override regression OK")
