@@ -1,0 +1,37 @@
+# E3 grouped fat-expert CANDIDATE image, layered on the verified baseline image.
+#
+# Experimental. Adds the additive `exl3_fat_moe_ext` module (built from
+# overlay/exl3_fat_moe.cu inside a copy of the installed exllamav3_ext source
+# tree, WITHOUT --use_fast_math), the updated exl3.py overlay (EXL3_FAT_GROUPED,
+# default off) and its self-check. exllamav3_ext itself is not recompiled; the
+# full-rebuild path (patch_exl3_fat_kernel.py + Dockerfile) is ported but not
+# exercised by this image.
+#
+# Build (repo root of the experiment worktree):
+#   docker build -f Dockerfile.e3-layer --build-arg BASE=glm53-baseline:overnight-20260906 \
+#     --build-arg GLM53_RECIPE_STAMP=$(...) -t glm53-e3-candidate:<tag> .
+ARG BASE=glm53-baseline:overnight-20260906
+FROM ${BASE}
+
+COPY overlay/exl3_fat_moe.cu /opt/glm53/exl3-fat-kernel/exl3_fat_moe.cu
+COPY overlay/exl3_fat_moe.cuh /opt/glm53/exl3-fat-kernel/exl3_fat_moe.cuh
+COPY overlay/build_exl3_fat_moe_ext.py /opt/glm53/build_exl3_fat_moe_ext.py
+COPY overlay/patch_exl3_fat_kernel.py /opt/glm53/patch_exl3_fat_kernel.py
+
+# Single translation unit; keep the compile light on a UMA host.
+ENV MAX_JOBS=2
+RUN python3 /opt/glm53/build_exl3_fat_moe_ext.py \
+        --src /opt/glm53/exl3-fat-kernel --out /tmp/e3build \
+        --install /usr/local/lib/python3.12/dist-packages \
+    && python3 -c "import torch, exl3_fat_moe_ext as m; print('exl3_fat_moe_ext OK tile_gu', m.exl3_fat_moe_tile_rows_gateup(), 'tile_dn', m.exl3_fat_moe_tile_rows_down())" \
+    && rm -rf /tmp/e3build
+
+COPY overlay/exl3.py /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/exl3.py
+COPY tests/test_exl3_overlay.py /opt/glm53/test_exl3_overlay.py
+
+# Static self-check (no GPU at build time). The GPU self-check runs at launch
+# (start.sh overlay verify) and in scripts/e3_gpu_check.sh.
+RUN EXL3_SELFCHECK_GPU=0 python3 /opt/glm53/test_exl3_overlay.py
+
+ARG GLM53_RECIPE_STAMP=unknown
+LABEL glm53.recipe.stamp=${GLM53_RECIPE_STAMP} glm53.e3.candidate=1
