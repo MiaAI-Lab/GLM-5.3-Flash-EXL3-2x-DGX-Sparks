@@ -517,6 +517,35 @@ The Hub `generation_config.json` stamps `temperature=1.0` / `top_p=0.95` unless
 the request overrides. The launcher sets
 `--chat-template /opt/glm53/chat_template.jinja` (checkpoint jinja is language-only).
 
+### Client request defaults
+
+The launcher tunes the server; these are the request-side knobs the chat
+template reads. None of them need a restart, and none are enforced by
+`.env` — a route that drifts here is invisible from the server side.
+
+| Field | Send | Why |
+|---|---|---|
+| `reasoning_effort` | `high` for reasoning work | Unset = **Max** (`files/chat_template.jinja:7`); `low` is the model card's lightest simple-Q&A mode. Keep it constant per route — see below |
+| `max_tokens` | ≥ `32768` with thinking on | Max-effort reasoning runs well past 8k output tokens. Too small a cap truncates mid-thought and the reply comes back with empty `content` |
+| `chat_template_kwargs.clear_thinking` | `true` for multi-turn agents | Replaces earlier turns' reasoning with `<think></think>` (`chat_template.jinja:154`), keeping the current tool-call chain. Cuts context, not answer quality |
+| `top_p` / `temperature` | leave unset | `generation_config.json` already supplies `0.95` / `1.0`; the boot log prints the override line. Sending `top_p=1.0` explicitly overrides that and is worse |
+
+Read the reply from **`reasoning`**, not `reasoning_content`. The response
+models carry `reasoning` only (`ChatMessage`, `DeltaMessage`); vLLM accepts the
+deprecated name on *input* and renames it, but never emits it. A client reading
+`reasoning_content` gets nothing and the thinking looks like it leaked into
+`content` — it did not:
+
+```console
+$ curl -s $BASE/v1/chat/completions -d '{...,"reasoning_effort":"low"}' | jq '.choices[0].message | keys'
+["annotations","audio","content","function_call","reasoning","refusal","role"]
+```
+
+**Do not vary `reasoning_effort` per request within a conversation.** The effort
+word lands at char 39 of the prompt, so changing it is a full prefix-cache miss
+on an otherwise-warm conversation, not a partial one.
+`tests/test_chat_template.py` pins that shape.
+
 Needs: Docker (no sudo) on both nodes, passwordless SSH head → worker,
 `hf` / `huggingface-cli` + `curl` + `rsync` on the head, ~180 GiB free per
 node for the first download. The GHCR image is public; login is only needed
