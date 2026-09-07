@@ -1,3 +1,12 @@
+| `EXL3_FAT_KERNEL` | `1` | [PR77 E2 fat-expert prefill kernel](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/pull/77) (implies batched+sorted). `0` = legacy fat path |
+| `EXL3_FAT_GROUPED` | `1` | E3 grouped fat-expert tier (`overlay/exl3_fat_moe.cu`): one gather + gate/up + down launch per layer from device-side tables, no host sync. **+37–45% cold prefill** measured (see *Cold prefill (E3)*). Default on since 2026-09-07 with the launcher defaults 900k / util 0.85 / rightsize / cap 32. Needs an image with the E3 kernels (fails closed at load otherwise). `0` = E2 kernel path (then set `MAX_MODEL_LEN=1000000`, cap 256 is picked automatically). 1M does not fit with E3 at util ≤ 0.87 on this kit (560 MiB scratch charged to the KV budget) |
+| `EXL3_TEMP_ROWS_FUSED` | `32` with E3, `256` with E2 (launcher picks by `EXL3_FAT_GROUPED` unless set) | fused `exl3_moe` rows per expert; experts above it are "fat". Keep ≥ `MAX_NUM_SEQS × (DFLASH_TOKENS+1)` so decode stays one graph-safe launch. E2 wants 256 (its per-expert loop is host-bound) |
+| `KV_CACHE_DTYPE` | `fp8` | packed `fp8_ds_mla`; not `nvfp4`, not bf16 |
+| `GPU_MEM_UTIL` | `0.85` | GB10 UMA budget (default lowered from 0.87 on 2026-09-07: each 0.01 is 1.2 GiB of host headroom, and long prefills need it — see *Cold prefill (E3)*). E3 at 900k / 0.85: pool ~1.05M tokens / 1.17× (0.87: 16.2 GiB / 1,051,648 tokens). Pre-E3 receipts at 1M / 0.87: 1,754,237 tokens / 18.67 GiB (MNBT 2048); 1,243,902 tokens / 1.24× (7168, rightsize, E2) |
+| `MAX_MODEL_LEN` | `900000` | default context since 2026-09-07 (E3 default; 1M fits again with `EXL3_FAT_GROUPED=0`). 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool. At MNBT 7168 one 1M request needs **14.52 GiB** KV (10.98 GiB at 500k; ~7.4 GiB fixed + 7.1 GiB per 1M); the E3 recipe runs 500k |
+**Default from this checkout:** E2 fat kernel on (`EXL3_FAT_KERNEL=1`) and `MAX_NUM_BATCHED_TOKENS=7168`; the E3 grouped tier is the launcher default (`EXL3_FAT_GROUPED=1`, see *Cold prefill (E3)*). The table above is the pre-E2 C4 keep at 2048; the current E2 cold-prefill baseline is the linked PR77 table; E2 at 7168 is ~1,150–1,185 tok/s cold, E3 ~1,580–1,640.
+| Spec | **DFlash2 k=7** (`incoai/GLM-5.3-Flash-DFlash2`); draft KV `auto`/bf16, draft TP=2, FLASH_ATTN. Rollback `SPEC_METHOD=mtp` |
+| Context | **900k** default since 2026-09-07 (E3; `EXL3_FAT_GROUPED=0` fits 1M again). Pre-E3 1M receipts: live pool **1,754,237** tokens (1.75×) / 690 GPU blocks / 18.67 GiB at MNBT 2048; latest validated 7168/rightsize E2 pool at 1M **1,243,902** tokens / **1.24×**. Pool size varies with MNBT, activation/graph reservations and hybrid block geometry. Padded slot-share is why 1M allocates; the old 900k cap was 1.95× on this same pool. Do not drop to 256k to “free” slots (hybrid mamba + DFlash window block-id demand is mostly length-independent) |
 <h1 align="center">GLM-5.3 Flash EXL3 for 2x DGX Sparks</h1>
 
 <p align="center">
@@ -69,7 +78,7 @@ Official numbers: sparkDash Decode bench, DFlash2 k=7, **Structured** (count 1�
 | **×2** | 6.62 s | 51.7 | 103.3 |
 | **×4** | 6.30 s | 37.1 | 146.5 |
 
-Serve recipe is `--max-model-len 1000000` with KV pool **1,754,237** tokens (1.75× a full 1M request) at util 0.87. These runs are warm / empty KV — they do not need a filled 1M cache.
+That 2026-08-28 decode serve used `--max-model-len 1000000` with a **1,754,237-token** KV pool. These runs are warm / empty KV — they do not need a filled 1M cache.
 
 Lab `tests/bench_decode.py` on the same protocol (median of 5 × 400, 2026-08-30 C4, `DFLASH_DRAFT_TP=2`): Structured **65.1** tok/s (0.959 accept / 6.71 per step); Prose (hash-map) **27.1** (0.341 / 2.39). Prior TP=1 lab: 61.7 / 26.9. Long context / mixed (~60–100k KV) 24–27. MTP k=2 baseline ~24.6.
 
@@ -86,6 +95,30 @@ python3 tests/bench_decode.py --phase structured --structured --runs 5 --max-tok
 # prose (hash-map explanation)
 python3 tests/bench_decode.py --phase prose --runs 5 --max-tokens 400 --skip-coherence --out /tmp/glm53-prose.json
 ```
+
+## E2 fat-expert prefill — [PR77](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/pull/77) (2026-09-01)
+
+PR77 adds purpose-built direct/scatter CUDA kernels for the routed “fat”
+experts and lifts fully uncached long-context prefill by about **20–21%**.
+The controlled promotion ran E2 on → legacy off → E2 on at MNBT 2048, with
+five unique-salt cold samples per rung per boot:
+
+| Fully uncached rung | Legacy mean tok/s | PR77 pooled mean tok/s | Gain |
+|---|---:|---:|---:|
+| ~8K | 941.04 | 1132.32 | **+20.33%** |
+| ~100K | 1023.20 | 1241.71 | **+21.36%** |
+| ~300K | 995.05 | 1201.02 | **+20.70%** |
+
+All 45 observations passed the cold gate, with complete separation at every
+rung. A second 2× DGX Spark deployment reproduced **+21.0% at 100K** and
+**+20.4% at 300K**. These repeated results establish E2 as the production
+prefill path; the decode path is unchanged. They replace earlier preliminary
+figures that included APC hits.
+
+On the independent `MAX_NUM_SEQS=16` geometry, MNBT 2048 delivered the best
+measured balance of prefill throughput and KV capacity. MNBT 7168 remains the
+current maintainer default for `MAX_NUM_SEQS=4`, pending a repeated same-kit
+comparison.
 
 ## Quality (KLD)
 
@@ -120,11 +153,9 @@ same path as the compact-64 fp8 serve (not NVFP4 KV).
 | Worker | `WORKER_USER@WORKER_IP` (this kit: `zurih@10.0.0.2`), `--headless`, `glm53-exl3-worker` |
 | Fabric | CX7 QSFP: `enp1s0f1np1`/`rocep1s0f1` ↔ `enp1s0f0np0`/`rocep1s0f0`. Image NCCL (`USE_HOST_NCCL=0`) |
 | Attention | `FLASHINFER_MLA_SPARSE_SM120` (NoPE MLA padded into GLM_NSA 576-wide) |
-| KV | `--kv-cache-dtype fp8` → packed **`fp8_ds_mla`** (target). Draft DFlash2 KV is `auto`/bf16. Live pool **1,754,237** tokens / **1.75×** at 1M / 690 GPU blocks / 18.67 GiB. `--enable-prefix-caching` (block-aligned hits; see Prefix caching) |
+| KV | `--kv-cache-dtype fp8` → packed **`fp8_ds_mla`** (target). Draft DFlash2 KV is `auto`/bf16. Latest validated 7168/rightsize pool: **1,243,902** tokens / **1.24×** at 1M. `--enable-prefix-caching` (block-aligned hits; see Prefix caching) |
 | Experts | packed trellis + suh + svh + mcg, codebook MCG, **one fused `exllamav3_ext.exl3_moe` launch per layer** |
 | Dense / shared / attn / embed / lm_head | native (unquantized) |
-| Spec | **DFlash2 k=7** (`incoai/GLM-5.3-Flash-DFlash2`); draft KV `auto`/bf16, draft TP=1, FLASH_ATTN. Rollback `SPEC_METHOD=mtp` |
-| Context | **900k** default since 2026-09-07 (E3; `EXL3_FAT_GROUPED=0` fits 1M again). Pre-E3 1M receipt: live pool **1,754,237** tokens (1.75×) / 690 GPU blocks / 18.67 GiB. Padded slot-share is why 1M allocates; the old 900k cap was 1.95× on this same pool. Do not drop to 256k to “free” slots (hybrid mamba + DFlash window block-id demand is mostly length-independent) |
 | Tools / reasoning | `--tool-call-parser glm47 --enable-auto-tool-choice --reasoning-parser glm45` |
 | Graphs | on (`ENFORCE_EAGER=0`) — MTP capture `1 2 3 4 6 8 12`; DFlash2 capture `1 2 4 8 16 24 32` |
 | Vision | on (`LANGUAGE_MODEL_ONLY=0`) — image + video, `--limit-mm-per-prompt {image:4,video:1}`, `--skip-mm-profiling` |
@@ -254,8 +285,8 @@ also disables GB10 `persistent_topk` so long-history decode uses
 
 `--kv-cache-dtype fp8` is required. The SM12x sparse-MLA kernel only accepts packed
 `fp8_ds_mla`. **bf16 KV has no sparse kernel** on this arch. Metrics report
-`cache_dtype=fp8`; that is the **target** path. The logged **1,754,237** tokens
-are hybrid BlockPool accounting, not 1.75M tokens of uniform fp8 tensors.
+`cache_dtype=fp8`; that is the **target** path. The 2026-08-29
+**1,754,237-token** receipt is hybrid BlockPool accounting, not uniform fp8 tensors.
 
 | Piece | Dtype / layout | Notes |
 |---|---|---|
@@ -265,8 +296,8 @@ are hybrid BlockPool accounting, not 1.75M tokens of uniform fp8 tensors.
 | DFlash2 draft (5 SWA layers) | **`auto`/bf16**, 2048 B/token this boot | no MLA FP8 backend on SM121 |
 
 With DFlash2 + vision + util **0.87**, the pool is leftover UMA after weights and
-CUDA graphs. Live boot (confirm `padded slot-share` and `Maximum concurrency`
-in the log):
+CUDA graphs. The 2026-08-29 boot below records the padded-slot-share allocator
+state:
 
 | | |
 |---|---|
@@ -276,6 +307,9 @@ in the log):
 | Available KV memory | **18.67 GiB** |
 | `kv_cache_max_concurrency` | 1.949… |
 | Boot line | `padded slot-share block=64 mla_page=2351104 (was block=16); draft_bytes/token=2048` |
+
+Latest validated boot (2026-09-01, MNBT 7168, `MAX_NUM_SEQS=4`, E2 and
+indexer rightsizing on): **1,243,902 KV tokens / 1.24× at 1M**.
 
 DFlash2 cannot exact-fit the 656 B MLA page, so the five SWA layers **padded
 slot-share** the MLA tensors: manager `block_size=64` (indexer kernel size; not
@@ -329,7 +363,7 @@ does **not** let that group shrink the MLA+mamba hit. Mamba stays in the min
 (skipping a mamba miss is a correctness hole). Do not raise
 `--max-num-batched-tokens` to “fix” APC.
 
-**Live receipts** (thinking off, temp 0, unique pads), 1M serve, **`MAX_NUM_BATCHED_TOKENS=2048`** (P1 keep; 3584/4096 reverted), **`DFLASH_DRAFT_TP=2`**. Idle 8k/16k/100k are the 2026-08-30 C4 keep A/B. 12k/256k/300k and the concurrent follow-ups are the prior TP=1 production ladder (chunk size does not change those hit counts). The MNBT=1024 baseline is `docs/cold-prefill.md`. Details: `docs/improve-prefill.md`.
+**Historical pre-E2 receipts** (thinking off, temp 0, unique pads), 1M serve, **`MAX_NUM_BATCHED_TOKENS=2048`** (P1 keep; 3584/4096 reverted), **`DFLASH_DRAFT_TP=2`**. Idle 8k/16k/100k are the 2026-08-30 C4 keep A/B. 12k/256k/300k and the concurrent follow-ups are the prior TP=1 production ladder (chunk size does not change those hit counts). The MNBT=1024 baseline is `docs/cold-prefill.md`. Details: `docs/improve-prefill.md`.
 
 | Turn | Hits | Compute | Prompt tok | TTFT | Prefill tok/s |
 |---|---:|---:|---:|---:|---:|
@@ -346,16 +380,15 @@ does **not** let that group shrink the MLA+mamba hit. Mamba stays in the min
 
 An ~8k follow-up still reuses **7168 / 8004 ≈ 90%** of the prompt, not 46%. MNBT=2048 vs the 1024 ladder (draft TP=1): ~8k 10.36 s / 772 → 8.93 s / 895; ~100k 105.6 s / 947 → 102.5 s / 975; ~256k 273 s / 936 → **263 s / 973**; ~300k 323 s / 928 → **319 s / 941**. C4 keep (`DFLASH_DRAFT_TP=2`): ~8k **8.53 s / 938**; ~16k **16.45 s / 972**; ~100k **100.3 s / 997**. Coarser decode interleave (2k-token chunks vs 1k).
 
-**Default from this checkout:** E2 fat kernel on (`EXL3_FAT_KERNEL=1`) and `MAX_NUM_BATCHED_TOKENS=7168`; the E3 grouped tier is the launcher default (`EXL3_FAT_GROUPED=1`, see *Cold prefill (E3)*). The table above is the pre-E2 C4 keep at 2048; E2 at 7168 is ~1,150–1,185 tok/s cold, E3 ~1,580–1,640.
 Hits work **below** UserHIJ’s 14,336-token floor (that floor is 896-chunk ×
 2048-align LCM on a different geometry; this kit’s 3584 is 4×896). Isolation
 held (`STILL_READY_S` / `STILL_C0`…`C3`). Idle chats are not reserved; after
 the pool drains, a later turn of an old window prefills again. Concurrent
 colds still serialize under `GLM53_MIXED_PREFILL_CHUNK=skip` (`Deferred`).
 
-This 1M boot: **1,670,157** tokens / **1.67×** / 638 GPU blocks (padded
-slot-share still applied). The 900k process measured 1,754,237 / 690 blocks
-on the same recipe; the delta is leftover UMA, not a slot-share collapse.
+A later pre-E2 1M boot measured **1,670,157** tokens / **1.67×** / 638 GPU
+blocks (padded slot-share still applied). The 900k process measured 1,754,237 /
+690 blocks on the same recipe; the delta is leftover UMA, not a slot-share collapse.
 
 Re-measure (see also `tests/bench_prefix_cache.py`):
 
@@ -532,14 +565,8 @@ that are now documented/enforced:
 | DFlash2 attention | *(unset)* | SM121 picks FLASH_ATTN for non-causal SWA. Do not pin `TRITON_ATTN` |
 | `ENFORCE_EAGER` | `0` | CUDA graphs; MTP capture `1 2 3 4 6 8 12`, DFlash2 `1 2 4 8 16 24 32` |
 | `EXL3_FUSED_MOE` | `1` | `exl3_moe` per layer; `0` = LinearEXL3 loop |
-| `EXL3_FAT_KERNEL` | `1` | E2 fat-expert prefill kernel (implies batched+sorted). `0` = legacy fat path |
-| `EXL3_FAT_GROUPED` | `1` | E3 grouped fat-expert tier (`overlay/exl3_fat_moe.cu`): one gather + gate/up + down launch per layer from device-side tables, no host sync. **+37–45% cold prefill** measured (see *Cold prefill (E3)*). Default on since 2026-09-07 with the launcher defaults 900k / util 0.85 / rightsize / cap 32. Needs an image with the E3 kernels (fails closed at load otherwise). `0` = E2 kernel path (then set `MAX_MODEL_LEN=1000000`, cap 256 is picked automatically). 1M does not fit with E3 at util ≤ 0.87 on this kit (560 MiB scratch charged to the KV budget) |
-| `EXL3_TEMP_ROWS_FUSED` | `32` with E3, `256` with E2 (launcher picks by `EXL3_FAT_GROUPED` unless set) | fused `exl3_moe` rows per expert; experts above it are "fat". Keep ≥ `MAX_NUM_SEQS × (DFLASH_TOKENS+1)` so decode stays one graph-safe launch. E2 wants 256 (its per-expert loop is host-bound) |
-| `KV_CACHE_DTYPE` | `fp8` | packed `fp8_ds_mla`; not `nvfp4`, not bf16 |
-| `GPU_MEM_UTIL` | `0.85` | GB10 UMA budget (default lowered from 0.87 on 2026-09-07: each 0.01 is 1.2 GiB of host headroom, and long prefills need it — see *Cold prefill (E3)*). E3 at 900k / 0.85: pool ~1.05M tokens / 1.17× (0.87: 16.2 GiB / 1,051,648 tokens). Pre-E3 receipt at 1M / 0.87: 1,754,237 tokens / 18.67 GiB |
-| `MAX_MODEL_LEN` | `900000` | default context since 2026-09-07 (E3 default; 1M fits again with `EXL3_FAT_GROUPED=0`). 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool. At MNBT 7168 one 1M request needs **14.52 GiB** KV (10.98 GiB at 500k; ~7.4 GiB fixed + 7.1 GiB per 1M); the E3 recipe runs 500k |
 | `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq |
-| `MAX_NUM_BATCHED_TOKENS` | `7168` | prefill chunk (E2 keep 2026-09-01). 2048/3548 were similar or slower; 8192 oversubscribes GB10 indexer topk |
+| `MAX_NUM_BATCHED_TOKENS` | `7168` | current maintainer default at `MAX_NUM_SEQS=4`. MNBT 2048 was the clean PR77 A/B configuration and the best measured balance on an independent `MAX_NUM_SEQS=16` geometry. Tune per deployment; change after a repeated same-kit comparison |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (7168) |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
 | `GLM53_INDEXER_WORKSPACE` | `rightsize` (default since 2026-09-07; was `stock`) | sparse-indexer prefill gather workspace. `stock` = `max_model_len * 40` entries (**5036.40 MB** locked at 1M — measured, `VLLM_DEBUG_WORKSPACE=1`). `rightsize` = the legal per-step maximum `min(MAX_NUM_SEQS, MNBT) * cdiv(MAX_MODEL_LEN + k, index_kpool)` = 126 MB at `MAX_NUM_SEQS=4` / 504 MB at 16, so **~+26–28% KV**. Opt-in; see [docs/DESIGN-indexer-workspace.md](docs/DESIGN-indexer-workspace.md) |
