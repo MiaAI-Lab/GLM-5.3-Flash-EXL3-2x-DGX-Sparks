@@ -13,7 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_json_command_substitutions_skip_sitecustomize() -> None:
     source = (ROOT / "start.sh").read_text()
     marker = '$(python3 -S -c \'import json,os'
-    assert source.count(marker) == 2
+    # 2 speculative-config builders + 2 kv-offload connector-JSON builders
+    # (one per rank inner script each).
+    assert source.count(marker) == 4
 
 
 def test_import_time_overlay_never_writes_stdout() -> None:

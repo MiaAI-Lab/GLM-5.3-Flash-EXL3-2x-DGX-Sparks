@@ -796,7 +796,12 @@ def test_recipe_wiring_if_present() -> None:
     ) in launcher
     assert '_glm53_validate_enum GLM53_INDEXER_WORKSPACE' in launcher
     assert '-e "GLM53_INDEXER_WORKSPACE=$GLM53_INDEXER_WORKSPACE"' in launcher
-    assert launcher.count("python3 /opt/glm53/patch_indexer_workspace.py") == 2
+    # Both ranks apply the one pinned list (GLM53_OVERLAY_ORDER) that
+    # write_inner_scripts emits into the head and worker inner scripts.
+    order = launcher[launcher.index("GLM53_OVERLAY_ORDER=(") : launcher.index(")", launcher.index("GLM53_OVERLAY_ORDER=("))]
+    assert "\n    patch_indexer_workspace.py\n" in order
+    assert 'emit_overlay_block >> "$HEAD_SCRIPT"' in launcher
+    assert 'emit_overlay_block >> "$WORKER_SCRIPT"' in launcher
     assert "COPY overlay/patch_indexer_workspace.py" in image
     assert "COPY tests/test_indexer_workspace.py" in image
     assert "RUN python3 /opt/glm53/patch_indexer_workspace.py" in image
