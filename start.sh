@@ -180,8 +180,13 @@ DFLASH_TOKENS="${DFLASH_TOKENS:-7}"
 # Do not pin attention_backend: SM121 already prefers FLASH_ATTN for
 # non-causal dense SWA. TRITON_ATTN was an SM120 mask-fix this image lacks.
 DFLASH_DRAFT_TP="${DFLASH_DRAFT_TP-2}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-1000000}"
-GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.87}"
+# 900k with the E3 grouped tier (default since 2026-09-07). One request needs ~7.4 GiB
+# + 7.1 GiB per 1M tokens of KV at MNBT 7168; E3 keeps a 560 MiB fat-row scratch that
+# vLLM charges to the KV budget, so 1M no longer fits at util <= 0.87 on this kit.
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-900000}"
+# 0.85 leaves ~2.4 GiB more host headroom than 0.87 (long prefills need it; a 256k
+# prefill at 0.87 with zero MemAvailable crashed a head on 2026-09-06).
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
 # 8192 chunk × long history oversubscribes GB10 persistent_topk smem (300k crash).
 # E2 one-shot 2026-09-01: 7168 keep (100k ~1148 / 300k ~1107); 2048/3548 similar or slower.
@@ -227,8 +232,19 @@ EXL3_FUSED_MOE="${EXL3_FUSED_MOE:-1}"
 # 1 = GPU row tiles for fat experts (prefill). 0 = LinearEXL3 fallback.
 # Tile (P2a) and TEMP_ROWS=1024 (P2b) both lost at MNBT=1024 — leave 128.
 EXL3_MOE_ROW_TILE="${EXL3_MOE_ROW_TILE:-0}"
-# Fused exl3_moe temp rows/expert. 1024 was slower than 128+fallback (P2b).
-EXL3_TEMP_ROWS_FUSED="${EXL3_TEMP_ROWS_FUSED:-128}"
+# E3 grouped fat-expert kernels (default ON since 2026-09-07: +37-45% cold prefill):
+# one gather + gate/up + down launch per layer for every fat expert from device-side
+# tables, no host sync. Needs the exl3_fat_moe kernels in the image (fails closed at
+# load otherwise; start.sh rebuilds when the recipe stamp drifts). 0 = the E2 kernel path.
+EXL3_FAT_GROUPED="${EXL3_FAT_GROUPED:-1}"
+# Fused exl3_moe temp rows/expert; experts above it are "fat". E3 wants 32 (>= MAX_NUM_SEQS
+# x (DFLASH_TOKENS+1) so decode stays one graph-safe launch); E2 wants 256 (its per-expert
+# loop is host-bound). 1024 was slower than 128+fallback (P2b). Explicit value always wins.
+if [ "${EXL3_FAT_GROUPED}" != "0" ]; then
+    EXL3_TEMP_ROWS_FUSED="${EXL3_TEMP_ROWS_FUSED:-32}"
+else
+    EXL3_TEMP_ROWS_FUSED="${EXL3_TEMP_ROWS_FUSED:-256}"
+fi
 # Sorted routing tier; higher tiers imply it even when this is 0.
 EXL3_FAT_SORTED="${EXL3_FAT_SORTED:-0}"
 # E1 batched tier: persistent scratch + combined gate/up; implies SORTED=1.
@@ -237,13 +253,6 @@ EXL3_FAT_BATCHED="${EXL3_FAT_BATCHED:-0}"
 # Needs the patched extension — start.sh rebuilds when the recipe stamp drifts.
 # Set all three flags to 0 for the legacy fat-expert path.
 EXL3_FAT_KERNEL="${EXL3_FAT_KERNEL:-1}"
-# E3 grouped fat-expert kernels (EXPERIMENTAL, default off): one gather +
-# gate/up + down launch per layer for every fat expert from device-side
-# segment tables, no host sync. Needs the exl3_fat_moe kernels in the image
-# (fails closed at load otherwise). Pair with an explicit EXL3_TEMP_ROWS_FUSED
-# (the cap is NOT changed implicitly); keep it >= MAX_NUM_SEQS x (DFLASH_TOKENS+1)
-# so decode stays a single graph-safe launch. 0 = the E2 kernel path.
-EXL3_FAT_GROUPED="${EXL3_FAT_GROUPED:-0}"
 
 # --- abliteration (ablit/) --------------------------------------------------
 # Load-time o_proj orthogonalization (overlay/ablit_runtime.py). Published
@@ -265,10 +274,11 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
 # Sparse-indexer prefill gather workspace (overlay/patch_indexer_workspace.py).
 # stock = max_model_len * 40 entries (5036.40 MB locked at 1M, measured);
-# rightsize = the legal per-step maximum, ~+26% KV. Default applies only
-# when UNSET: an explicitly empty value is an operator error and
-# validate_numeric_config rejects it rather than guessing a serving mode.
-GLM53_INDEXER_WORKSPACE="${GLM53_INDEXER_WORKSPACE-stock}"
+# rightsize = the legal per-step maximum, ~+26% KV (default since 2026-09-07:
+# the E3 recipe needs that KV back). Default applies only when UNSET: an
+# explicitly empty value is an operator error and validate_numeric_config
+# rejects it rather than guessing a serving mode.
+GLM53_INDEXER_WORKSPACE="${GLM53_INDEXER_WORKSPACE-rightsize}"
 # SpinCondition reader busy-loop window. "stock" preserves vLLM's 1 s default;
 # 1..1000 selects milliseconds. The frozen TP=2 sweep selected 16 ms.
 GLM53_SPINWAIT_MS="${GLM53_SPINWAIT_MS-stock}"
@@ -372,7 +382,7 @@ validate_numeric_config() {
     _glm53_canonical_positive_int MAX_MODEL_LEN "$MAX_MODEL_LEN" 1000000 || return
     _glm53_canonical_positive_int MAX_NUM_SEQS "$MAX_NUM_SEQS" 4096 || return
     _glm53_canonical_positive_int MAX_NUM_BATCHED_TOKENS "$MAX_NUM_BATCHED_TOKENS" 8388608 || return
-    _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-stock}" \
+    _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-rightsize}" \
         stock rightsize || return
     _glm53_validate_spinwait_ms || return
 }

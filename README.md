@@ -26,6 +26,39 @@ stays packed **`fp8_ds_mla`**. Speculator is **DFlash2 k=7**
 draft attention is **FLASH_ATTN** (do not pin `TRITON_ATTN` — that mask is causal
 inside the draft block on this image and collapses later-position accept).
 
+## Cold prefill (E3 grouped MoE, this kit, 2026-09-07)
+
+`EXL3_FAT_GROUPED=1` (launcher default since 2026-09-07) replaces the E2 per-expert host loop for "fat" experts with three
+GPU-driven launches per MoE layer (gather, gate/up + SwiGLU, down + scatter) built from
+device-side segment tables — no per-expert launches, no weight repacking, no host sync
+(`overlay/exl3_fat_moe.cu`, Fable's design, E2 rounding boundaries restored). Measured
+on this kit: **MAX_MODEL_LEN=500000**, `GPU_MEM_UTIL=0.84`, `GLM53_INDEXER_WORKSPACE=rightsize`,
+`EXL3_TEMP_ROWS_FUSED=32`, MNBT 7168, DFlash2 k=7 draft TP=2, C4, thinking off, unique cold
+prompts (0 prefix hits). Prefill tok/s = prompt tokens / TTFT (client side).
+
+| Prompt | Prompt tok | TTFT | Prefill tok/s | E2 before (tok/s) | Gain |
+|---|---:|---:|---:|---:|---:|
+| ~8k (first request after boot) | 8,221 | 8.23 s | 999 | 1,112 warm / 418 first | one-time allocation; warm ~1,500 |
+| ~16k | 16,417 | 10.41 s | **1,578** | 1,155 | **+37%** |
+| ~32k | 32,798 | 20.20 s | **1,624** | ~1,160 | **+40%** |
+| ~64k | 65,565 | 40.06 s | **1,637** | ~1,170 | **+40%** |
+| ~128k | 131,101 | 80.46 s | **1,629** | 1,148–1,183 (100k) | **+38–42%** |
+| ~256k | 262,173 | 166.4 s | **1,576** | 1,087 | **+45%** |
+
+E2 column: the 2026-09-01 E2 receipts (`logs/pr77-build-kernel-20260901`) and the matched
+E2 baselines of the 2026-09-06 overnight run (`logs/overnight-20260906T164059Z/exp500k`,
+A/B/A at 500k: 8k 1,112 / 16k 1,154 / 100k 1,183, repeats within 0.5%); 32k/64k interpolated.
+Decode is unchanged (E3 never runs on decode-sized steps; structured / prose / code within
+run-to-run spread). Isolated layer bench: 7168-token MoE layer 77–91 ms (E2) → 31 ms (E3),
+numerically indistinguishable from E2 vs the LinearEXL3 reference. Full receipts, gates and
+the memory caveat: `logs/overnight-20260906T164059Z/report.md`.
+
+**Context and headroom:** the shipped default is now **900k / util 0.85 / rightsize** (boots with ~0.5 GiB of KV margin on the head; a 256k prefill ran at 900k / 0.87 with driver retries but no failure). E3 keeps a 560 MiB fat-row scratch that vLLM's profile run charges to
+the KV budget, so at 1M / util 0.87 the pool no longer fits one 1M request on this kit
+(needs 14.52 GiB). 500k needs 10.98 GiB and boots reliably at 0.84 (1.2× at 500k). Prompts
+≥ ~100k are near the head's host-memory limit at any setting (a 256k prefill at util 0.87
+with zero MemAvailable crashed the head on 2026-09-06); the 256k row above ran at 0.84.
+
 ## Decode (this kit, 2026-08-28)
 
 Official numbers: sparkDash Decode bench, DFlash2 k=7, **Structured** (count 1→200) and **Code** (`clamp_00`…`clamp_49`) — same high-accept regime. Temp **0**, thinking **off**, 400 tokens, CUDA graphs, fused EXL3 MoE. Prompt types, not grammar / schema. Stream tok/s is per request; aggregate is all streams.
@@ -91,7 +124,7 @@ same path as the compact-64 fp8 serve (not NVFP4 KV).
 | Experts | packed trellis + suh + svh + mcg, codebook MCG, **one fused `exllamav3_ext.exl3_moe` launch per layer** |
 | Dense / shared / attn / embed / lm_head | native (unquantized) |
 | Spec | **DFlash2 k=7** (`incoai/GLM-5.3-Flash-DFlash2`); draft KV `auto`/bf16, draft TP=1, FLASH_ATTN. Rollback `SPEC_METHOD=mtp` |
-| Context | **1M** (`MAX_MODEL_LEN=1000000`). Live pool **1,754,237** tokens (1.75×) / 690 GPU blocks / 18.67 GiB. Padded slot-share is why 1M allocates; the old 900k cap was 1.95× on this same pool. Do not drop to 256k to “free” slots (hybrid mamba + DFlash window block-id demand is mostly length-independent) |
+| Context | **900k** default since 2026-09-07 (E3; `EXL3_FAT_GROUPED=0` fits 1M again). Pre-E3 1M receipt: live pool **1,754,237** tokens (1.75×) / 690 GPU blocks / 18.67 GiB. Padded slot-share is why 1M allocates; the old 900k cap was 1.95× on this same pool. Do not drop to 256k to “free” slots (hybrid mamba + DFlash window block-id demand is mostly length-independent) |
 | Tools / reasoning | `--tool-call-parser glm47 --enable-auto-tool-choice --reasoning-parser glm45` |
 | Graphs | on (`ENFORCE_EAGER=0`) — MTP capture `1 2 3 4 6 8 12`; DFlash2 capture `1 2 4 8 16 24 32` |
 | Vision | on (`LANGUAGE_MODEL_ONLY=0`) — image + video, `--limit-mm-per-prompt {image:4,video:1}`, `--skip-mm-profiling` |
@@ -268,7 +301,7 @@ Live occupancy, temp **0**, thinking **off**, unique pads, `max_tokens=8`:
 | ~300k ×1 streamed | **200** | **26.0%** | **356 s** TTFT (~840 tok/s) | 299,213 prompt tokens, gen `OK`; MNBT=1024 remeasure **323 s** / ~928 tok/s; production MNBT=2048 **319 s** / **941** tok/s |
 
 Live **3×256k** held (the original failure). Prefills still serialize under skip; two 256k contexts were in KV at once at 29.5%. One 256k sat ~25%. Hybrid occupancy is a large length-independent floor (mamba + DFlash window) plus MLA pages that scale: 36k → 16%, 256k → ~25%, 300k → 26%.
-Default is **1M**. Do **not** drop `MAX_MODEL_LEN` to 256k to “free” slots —
+Default is **900k** (E3; was 1M). Do **not** drop `MAX_MODEL_LEN` to 256k to “free” slots —
 logged tokens ≈ concurrency × that cap, and the hybrid floor then shrinks the
 pool.
 
@@ -313,7 +346,7 @@ does **not** let that group shrink the MLA+mamba hit. Mamba stays in the min
 
 An ~8k follow-up still reuses **7168 / 8004 ≈ 90%** of the prompt, not 46%. MNBT=2048 vs the 1024 ladder (draft TP=1): ~8k 10.36 s / 772 → 8.93 s / 895; ~100k 105.6 s / 947 → 102.5 s / 975; ~256k 273 s / 936 → **263 s / 973**; ~300k 323 s / 928 → **319 s / 941**. C4 keep (`DFLASH_DRAFT_TP=2`): ~8k **8.53 s / 938**; ~16k **16.45 s / 972**; ~100k **100.3 s / 997**. Coarser decode interleave (2k-token chunks vs 1k).
 
-**Default from this checkout:** E2 fat kernel on (`EXL3_FAT_KERNEL=1`) and `MAX_NUM_BATCHED_TOKENS=7168`. The table above is the pre-E2 C4 keep at 2048.
+**Default from this checkout:** E2 fat kernel on (`EXL3_FAT_KERNEL=1`) and `MAX_NUM_BATCHED_TOKENS=7168`; the E3 grouped tier is the launcher default (`EXL3_FAT_GROUPED=1`, see *Cold prefill (E3)*). The table above is the pre-E2 C4 keep at 2048; E2 at 7168 is ~1,150–1,185 tok/s cold, E3 ~1,580–1,640.
 Hits work **below** UserHIJ’s 14,336-token floor (that floor is 896-chunk ×
 2048-align LCM on a different geometry; this kit’s 3584 is 4×896). Isolation
 held (`STILL_READY_S` / `STILL_C0`…`C3`). Idle chats are not reserved; after
@@ -500,14 +533,16 @@ that are now documented/enforced:
 | `ENFORCE_EAGER` | `0` | CUDA graphs; MTP capture `1 2 3 4 6 8 12`, DFlash2 `1 2 4 8 16 24 32` |
 | `EXL3_FUSED_MOE` | `1` | `exl3_moe` per layer; `0` = LinearEXL3 loop |
 | `EXL3_FAT_KERNEL` | `1` | E2 fat-expert prefill kernel (implies batched+sorted). `0` = legacy fat path |
+| `EXL3_FAT_GROUPED` | `1` | E3 grouped fat-expert tier (`overlay/exl3_fat_moe.cu`): one gather + gate/up + down launch per layer from device-side tables, no host sync. **+37–45% cold prefill** measured (see *Cold prefill (E3)*). Default on since 2026-09-07 with the launcher defaults 900k / util 0.85 / rightsize / cap 32. Needs an image with the E3 kernels (fails closed at load otherwise). `0` = E2 kernel path (then set `MAX_MODEL_LEN=1000000`, cap 256 is picked automatically). 1M does not fit with E3 at util ≤ 0.87 on this kit (560 MiB scratch charged to the KV budget) |
+| `EXL3_TEMP_ROWS_FUSED` | `32` with E3, `256` with E2 (launcher picks by `EXL3_FAT_GROUPED` unless set) | fused `exl3_moe` rows per expert; experts above it are "fat". Keep ≥ `MAX_NUM_SEQS × (DFLASH_TOKENS+1)` so decode stays one graph-safe launch. E2 wants 256 (its per-expert loop is host-bound) |
 | `KV_CACHE_DTYPE` | `fp8` | packed `fp8_ds_mla`; not `nvfp4`, not bf16 |
-| `GPU_MEM_UTIL` | `0.87` | GB10 UMA budget (DFlash2 + vision; live pool **1,754,237** tokens / **1.75×** at 1M / 690 blocks / 18.67 GiB) |
-| `MAX_MODEL_LEN` | `1000000` | default context. 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool |
+| `GPU_MEM_UTIL` | `0.85` | GB10 UMA budget (default lowered from 0.87 on 2026-09-07: each 0.01 is 1.2 GiB of host headroom, and long prefills need it — see *Cold prefill (E3)*). E3 at 900k / 0.85: pool ~1.05M tokens / 1.17× (0.87: 16.2 GiB / 1,051,648 tokens). Pre-E3 receipt at 1M / 0.87: 1,754,237 tokens / 18.67 GiB |
+| `MAX_MODEL_LEN` | `900000` | default context since 2026-09-07 (E3 default; 1M fits again with `EXL3_FAT_GROUPED=0`). 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool. At MNBT 7168 one 1M request needs **14.52 GiB** KV (10.98 GiB at 500k; ~7.4 GiB fixed + 7.1 GiB per 1M); the E3 recipe runs 500k |
 | `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq |
 | `MAX_NUM_BATCHED_TOKENS` | `7168` | prefill chunk (E2 keep 2026-09-01). 2048/3548 were similar or slower; 8192 oversubscribes GB10 indexer topk |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (7168) |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
-| `GLM53_INDEXER_WORKSPACE` | `stock` | sparse-indexer prefill gather workspace. `stock` = `max_model_len * 40` entries (**5036.40 MB** locked at 1M — measured, `VLLM_DEBUG_WORKSPACE=1`). `rightsize` = the legal per-step maximum `min(MAX_NUM_SEQS, MNBT) * cdiv(MAX_MODEL_LEN + k, index_kpool)` = 126 MB at `MAX_NUM_SEQS=4` / 504 MB at 16, so **~+26–28% KV**. Opt-in; see [docs/DESIGN-indexer-workspace.md](docs/DESIGN-indexer-workspace.md) |
+| `GLM53_INDEXER_WORKSPACE` | `rightsize` (default since 2026-09-07; was `stock`) | sparse-indexer prefill gather workspace. `stock` = `max_model_len * 40` entries (**5036.40 MB** locked at 1M — measured, `VLLM_DEBUG_WORKSPACE=1`). `rightsize` = the legal per-step maximum `min(MAX_NUM_SEQS, MNBT) * cdiv(MAX_MODEL_LEN + k, index_kpool)` = 126 MB at `MAX_NUM_SEQS=4` / 504 MB at 16, so **~+26–28% KV**. Opt-in; see [docs/DESIGN-indexer-workspace.md](docs/DESIGN-indexer-workspace.md) |
 | `GLM53_SPINWAIT_MS` | `stock` | SpinCondition reader busy-loop window. `stock` preserves vLLM's 1 s default; `1..1000` selects milliseconds. A frozen TP=2 sweep selected `16` (+0.95% median decode vs stock, 85.3% less active EngineCore CPU) |
 | `GLM53_BOOT_SHAPE_WARMUP` | `1` | after `/health`, burn DFlash2 BLOCK / sampler / kpool shapes (nonfatal) |
 | `TRITON_HOST_CACHE` / `TILELANG_HOST_CACHE` | `$CACHE_ROOT/triton` / `tilelang` | persist JIT caches across container recreate |
@@ -534,9 +569,11 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `Dockerfile` | NoPE sparse-MLA patches + EXL3 install (`sm_121a`) + self-check |
 | `overlay/exl3.py` | `Exl3Config` / packed load / TP shard / fused `exl3_moe` apply / E2 fat kernel |
 | `overlay/exl3_fat_gemm.cu` | additive `exl3_fat_gemm` / `_scatter` compiled into `exllamav3_ext` |
+| `overlay/exl3_fat_moe.cu` / `.cuh` | E3 grouped fat-expert kernels (gather / gate-up+SwiGLU / down+scatter); compiled into `exllamav3_ext` by the full build, or as the additive `exl3_fat_moe_ext` module by `Dockerfile.e3-layer` + `overlay/build_exl3_fat_moe_ext.py` |
+| `tests/bench_e3_microbench.py` | CUDA-event MoE-layer timing E2 vs E3 + production-geometry parity (isolated, serving stopped) |
 | `overlay/patch_exl3_ext_aarch64.py` | stub AVX CPU allreduce so the ext builds on GB10 |
 | `overlay/patch_model_overrides.py` | `"exl3"` in ModelConfig overrides |
-| `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0` |
+| `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0`, E2 diag schema, E3 grouped tables/parity/graph-replay/fallback checks |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
 | `start.sh` / `stop.sh` / `download.sh` | 2-node launch; Hub fetch on the head only |
 | `start-tp4.sh` / `.env.tp4.example` | experimental 4-node TP=4 launch; knobs stay out of `.env` |

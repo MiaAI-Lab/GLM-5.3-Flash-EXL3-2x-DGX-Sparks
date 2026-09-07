@@ -353,16 +353,20 @@ void fm_gateup_kernel(
                     u.y = fminf(fmaxf(u.y, -act_limit), act_limit);
                     u.z = fminf(fmaxf(u.z, -act_limit), act_limit);
                     u.w = fminf(fmaxf(u.w, -act_limit), act_limit);
-                    // E2 boundaries, in order: torch.sigmoid (1/(1+expf(-g)),
-                    // full-precision exp/div: this file must NOT be built with
-                    // --use_fast_math) * g * u in fp32; act_h.copy_() rounds to
+                    // E2 boundaries, in order: torch.sigmoid (1/(1+exp(-g)) at
+                    // full precision) * g * u in fp32; act_h.copy_() rounds to
                     // fp16; had_hf_r_128_inner<pre_scale> multiplies by
                     // down.suh in fp16; fp32 Hadamard; fp16 store.
+                    // exllamav3 builds with --use_fast_math (expf -> __expf,
+                    // approximate division); the double-precision exp and the
+                    // IEEE-rounded __fdiv_rn are immune to that flag, so the
+                    // result is the same whether this file is compiled inside
+                    // exllamav3_ext or as the standalone module.
                     float4 act;
-                    act.x = (1.0f / (1.0f + expf(-g.x))) * g.x * u.x;
-                    act.y = (1.0f / (1.0f + expf(-g.y))) * g.y * u.y;
-                    act.z = (1.0f / (1.0f + expf(-g.z))) * g.z * u.z;
-                    act.w = (1.0f / (1.0f + expf(-g.w))) * g.w * u.w;
+                    act.x = __fdiv_rn(1.0f, 1.0f + (float) exp(-(double) g.x)) * g.x * u.x;
+                    act.y = __fdiv_rn(1.0f, 1.0f + (float) exp(-(double) g.y)) * g.y * u.y;
+                    act.z = __fdiv_rn(1.0f, 1.0f + (float) exp(-(double) g.z)) * g.z * u.z;
+                    act.w = __fdiv_rn(1.0f, 1.0f + (float) exp(-(double) g.w)) * g.w * u.w;
                     half4 ha(__floats2half2_rn(act.x, act.y), __floats2half2_rn(act.z, act.w));
                     half4 hs = *reinterpret_cast<const half4*>(suh_d + lane * 4);
                     ha.x = __hmul2(ha.x, hs.x);
