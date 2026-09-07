@@ -135,7 +135,8 @@ def stream_bench(max_tokens: int = 200, prompt: str | None = None) -> dict:
         http = resp.status
         buf = b""
         while True:
-            piece = resp.read(256)
+            # read(n) can wait across HTTP chunks and bias first-token timing.
+            piece = resp.read1(256)
             if not piece:
                 break
             buf += piece
@@ -187,11 +188,13 @@ def stream_bench(max_tokens: int = 200, prompt: str | None = None) -> dict:
         "wall_s": t1 - t0,
         "decode_s": decode_s,
         "tok_s": tps,
+        "delivered_tok_s": completion_tokens / (t1 - t0) if completion_tokens else None,
         "completion_tokens": completion_tokens,
         "prompt_tokens": prompt_tokens,
         "finish_reason": finish,
         "nan": nan,
         "text_head": text[:400],
+        "text": text,
         "text_len": len(text),
         "usage": usage,
     }
