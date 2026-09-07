@@ -688,7 +688,11 @@ Image-build runs `EXL3_SELFCHECK_GPU=0`. `./start.sh` runs the GPU self-check
 
 ## License
 
-This repository (serve scripts, overlay, docs) is **MIT**. The EXL3/TR3
+This repository (serve scripts, overlay, docs) is **[AGPL-3.0](LICENSE)**.
+If you run a modified version as a network service, the AGPL requires you to
+offer its source to users of that service. Contributions made before
+2026-09-07 were licensed MIT; that notice is retained in
+[`LICENSE.MIT`](LICENSE.MIT). The EXL3/TR3
 checkpoint stays [ShapleyMCG License 1.0](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw/blob/main/LICENSE)
 (unmodified upstream LICENSE; also on
 [brandonmusic/GLM-5.3-Flash-tr3-4bpw](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw)).
