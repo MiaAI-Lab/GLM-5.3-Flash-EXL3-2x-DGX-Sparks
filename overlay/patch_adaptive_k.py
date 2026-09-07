@@ -30,7 +30,11 @@ verify steps stay at the full length. Requests padded with -1 placeholders on
 their first decode step (C>1) are not distinguished; MIN_STEPS covers that.
 
 Patches (idempotent, fail closed on drifted anchors, marker comment):
-  vllm/v1/core/sched/scheduler.py           observe + trim (batch minimum)
+  vllm/v1/core/sched/scheduler.py           observe (update_from_output); choose the per-step draft
+                                            slot count in schedule() (num_spec_tokens_to_schedule,
+                                            which the AsyncScheduler uses to size its placeholders —
+                                            the path this kit runs); trim in update_draft_token_ids
+                                            for the synchronous path
   vllm/v1/worker/gpu/cudagraph_utils.py     extra uniform decode graph lengths
 """
 from __future__ import annotations
@@ -163,6 +167,32 @@ class _Glm53AdaptiveK:  # [glm53-adaptive-k]
         for r, _ in reqs:
             if len(r.spec_token_ids) > n:
                 r.spec_token_ids = r.spec_token_ids[:n]
+        self._count(n, live_ids)
+
+    def batch_k(self, k: int, reqs, live_ids) -> int:
+        """Schedule-time hook (async scheduler): the number of draft slots every
+        request gets on the next step. Minimum over the scheduled decode
+        requests; any structured-output or not-yet-observed request pins the
+        batch at k."""
+        if self.steps % 50 == 0:
+            self._reload()
+        if not self.enabled or k <= 0:
+            self.steps += 1
+            return k
+        ns = []
+        for r in reqs:
+            if r is None or getattr(r, "is_prefill_chunk", False):
+                continue
+            n_i = self.choose(r.request_id, k, bool(getattr(r, "use_structured_output", False)))
+            if n_i is None:
+                ns = None
+                break
+            ns.append(n_i)
+        n = k if not ns else min(ns)
+        self._count(n, live_ids)
+        return n
+
+    def _count(self, n: int, live_ids) -> None:
         self.hist[n] = self.hist.get(n, 0) + 1
         self.steps += 1
         if self.hist_every > 0 and self.steps % self.hist_every == 0:
@@ -239,6 +269,27 @@ UPD_NEW = """    def update_draft_token_ids(self, draft_token_ids: DraftTokenIds
             _GLM53_ADAPTIVE_K.apply(_ak_reqs, self.requests)
 """
 
+SCHED_K_OLD = """        # Dynamic speculative decoding: compute optimal K
+        num_spec_tokens_to_schedule = self.num_spec_tokens
+        if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
+            num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
+                len(num_scheduled_tokens)
+            ]
+"""
+SCHED_K_NEW = """        # Dynamic speculative decoding: compute optimal K
+        num_spec_tokens_to_schedule = self.num_spec_tokens
+        if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
+            num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
+                len(num_scheduled_tokens)
+            ]
+        if _GLM53_ADAPTIVE_K.boot_enabled and self.dynamic_sd_lookup is None and num_scheduled_tokens:  # [glm53-adaptive-k]
+            num_spec_tokens_to_schedule = _GLM53_ADAPTIVE_K.batch_k(
+                num_spec_tokens_to_schedule,
+                [self.requests.get(_rid) for _rid in num_scheduled_tokens],
+                self.requests,
+            )
+"""
+
 CG_HELPER = '''
 def _glm53_adaptive_k_query_lens(lens, decode_query_len):  # [glm53-adaptive-k]
     """Extra uniform decode graph lengths for the adaptive verification prefix."""
@@ -288,6 +339,7 @@ def patch_scheduler() -> None:
     text = text.replace(needle, SCHED_HELPER + needle, 1)
     text = replace_once(SCHED, text, OBS_OLD, OBS_NEW, "observe")
     text = replace_once(SCHED, text, UPD_OLD, UPD_NEW, "update_draft_token_ids")
+    text = replace_once(SCHED, text, SCHED_K_OLD, SCHED_K_NEW, "num_spec_tokens_to_schedule")
     SCHED.write_text(text)
     print(f"patched {SCHED.name} (GLM53_ADAPTIVE_K={os.environ.get('GLM53_ADAPTIVE_K', 'off')})")
 

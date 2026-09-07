@@ -123,6 +123,24 @@ def policy_tests(helper_src: str) -> None:
         p.apply([(r, False)], {"a": r})
         assert len(r.spec_token_ids) == 3, r.spec_token_ids
 
+    # schedule-time hook (async scheduler path)
+    class _SReq:
+        def __init__(self, rid, structured=False, prefill=False):
+            self.request_id = rid; self.use_structured_output = structured; self.is_prefill_chunk = prefill
+    p = make({"GLM53_ADAPTIVE_K": "ema", "GLM53_ADAPTIVE_K_HIST": "0"})
+    a, b, s, pf = _SReq("a"), _SReq("b"), _SReq("s", structured=True), _SReq("p", prefill=True)
+    live = {"a": a, "b": b, "s": s, "p": pf}
+    assert p.batch_k(7, [a], live) == 7, "unobserved request pins full length"
+    for _ in range(15):
+        p.observe("a", 7, 1); p.observe("b", 7, 7)
+    assert p.batch_k(7, [a], live) == 2
+    assert p.batch_k(7, [b], live) == 7
+    assert p.batch_k(7, [a, b], live) == 2, "batch minimum"
+    assert p.batch_k(7, [a, s], live) == 7, "structured pins full length"
+    assert p.batch_k(7, [a, pf], live) == 2, "prefill chunks are ignored"
+    assert p.batch_k(7, [a, None], live) == 2
+    assert p.hist.get(2, 0) >= 3
+
     # batch minimum across two requests
     p = make({"GLM53_ADAPTIVE_K": "ema", "GLM53_ADAPTIVE_K_HIST": "0"})
     a, b = _Req("a"), _Req("b")
