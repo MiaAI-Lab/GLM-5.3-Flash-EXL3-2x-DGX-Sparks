@@ -183,7 +183,7 @@ DFLASH_DRAFT_TP="${DFLASH_DRAFT_TP-2}"
 # 900k with the E3 grouped tier (default since 2026-09-07). One request needs ~7.4 GiB
 # + 7.1 GiB per 1M tokens of KV at MNBT 7168; E3 keeps a 560 MiB fat-row scratch that
 # vLLM charges to the KV budget, so 1M no longer fits at util <= 0.87 on this kit.
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-900000}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-850000}"
 # 0.85 leaves ~2.4 GiB more host headroom than 0.87 (long prefills need it; a 256k
 # prefill at 0.87 with zero MemAvailable crashed a head on 2026-09-06).
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
