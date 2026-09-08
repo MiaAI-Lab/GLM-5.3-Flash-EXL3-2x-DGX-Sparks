@@ -58,6 +58,8 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
     printf '\033[1;36m[glm53-exl3]\033[0m wrote .env from .env.example — edit HEAD_IP / WORKER_IP if needed\n'
 fi
 # Caller exports (MTP_TOKENS=2 ./start.sh restart) must win over .env.
+_cli_model_preset_set="${GLM53_MODEL_PRESET+1}"
+_cli_model_preset="${GLM53_MODEL_PRESET-}"
 _cli_mtp="${MTP_TOKENS-}"
 _cli_spec="${SPEC_METHOD-}"
 _cli_eager="${ENFORCE_EAGER-}"
@@ -90,6 +92,7 @@ set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
 set +a
+[ -n "${_cli_model_preset_set}" ] && GLM53_MODEL_PRESET="$_cli_model_preset"
 [ -n "${_cli_mtp}" ] && MTP_TOKENS="$_cli_mtp"
 [ -n "${_cli_spec}" ] && SPEC_METHOD="$_cli_spec"
 [ -n "${_cli_eager}" ] && ENFORCE_EAGER="$_cli_eager"
@@ -123,6 +126,25 @@ MODEL_CACHE_NAME="${MODEL_CACHE_NAME:-models--${MODEL//\//--}}"
 MODEL_FALLBACK_CACHE_NAME="${MODEL_FALLBACK_CACHE_NAME:-models--${MODEL_FALLBACK//\//--}}"
 # Hub commit on the Mia-AiLab mirror (the 5ab363a8-byte-identical upload).
 MODEL_REVISION="${MODEL_REVISION:-25a44fdbf16862a46b7cc9921142c6c81350af2f}"
+MODEL_SNAPSHOT=""
+MODEL_FALLBACK_SNAPSHOT=""
+GLM53_MODEL_PRESET="${GLM53_MODEL_PRESET:-}"
+case "$GLM53_MODEL_PRESET" in
+    "") ;;
+    abliterated)
+        MODEL="bullerwins/GLM-5.3-Flash-exl3-4bpw-ablit"
+        MODEL_FALLBACK="$MODEL"
+        MODEL_REVISION="14858211ed81d7fa773f8a0db02f38f36d230252"
+        MODEL_SNAPSHOT="$MODEL_REVISION"
+        MODEL_FALLBACK_SNAPSHOT="$MODEL_SNAPSHOT"
+        MODEL_CACHE_NAME="models--bullerwins--GLM-5.3-Flash-exl3-4bpw-ablit"
+        MODEL_FALLBACK_CACHE_NAME="$MODEL_CACHE_NAME"
+        ;;
+    *)
+        printf 'FATAL: unknown GLM53_MODEL_PRESET: %s\n' "$GLM53_MODEL_PRESET" >&2
+        exit 2
+        ;;
+esac
 IMAGE="${IMAGE:-ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-GLM-5.3-Flash-EXL3}"
 GHCR_USER="${GHCR_USER:-MiaAI-Lab}"
@@ -257,14 +279,17 @@ EXL3_FAT_KERNEL="${EXL3_FAT_KERNEL:-1}"
 # --- abliteration (ablit/) --------------------------------------------------
 # Load-time o_proj orthogonalization (overlay/ablit_runtime.py). Published
 # recipe: layers 15-45 edited with the dealign direction, 0-14 stay stock
-# safety anchors, MTP block included. 0 = stock weights. Applied identically
-# on both TP ranks; the DFlash2 drafter is never touched.
+# safety anchors, MTP block included. 0 leaves checkpoint weights unchanged.
+# Applied identically on both TP ranks; the DFlash2 drafter is never touched.
 ABLIT="${ABLIT:-0}"
 ABLIT_METHOD="${ABLIT_METHOD:-auto}"           # auto | transplant | proj
 ABLIT_DIRECTION="${ABLIT_DIRECTION:-dealign}"  # dealign | bf_oproj | /path/dir.pt
 ABLIT_LAYERS="${ABLIT_LAYERS:-15-45}"          # inclusive; 45 = checkpoint MTP block
 ABLIT_ALPHA="${ABLIT_ALPHA:-3.0}"              # 1.0 = plain projection, >1 over-projects
 ABLIT_INCLUDE_MTP="${ABLIT_INCLUDE_MTP:-1}"
+if [ "$GLM53_MODEL_PRESET" = "abliterated" ]; then
+    ABLIT=0
+fi
 
 READY_TIMEOUT="${READY_TIMEOUT:-3600}"
 # 1 = suppress client stop strings until </think> (DSpark #42 class).
@@ -405,6 +430,26 @@ count_shards() {
     find "$1/snapshots" -name '*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]' || true
 }
 
+count_model_shards() {
+    local repo="$1" snapshot="${2:-}"
+    if [ -n "$snapshot" ]; then
+        find "$repo/snapshots/$snapshot" -maxdepth 1 -name '*.safetensors' 2>/dev/null \
+            | wc -l | tr -d '[:space:]' || true
+    else
+        count_shards "$repo"
+    fi
+}
+
+model_tree_complete() {
+    local repo="$1" snapshot="${2:-}" have
+    have="$(count_model_shards "$repo" "$snapshot")"
+    [ "${have:-0}" -ge "$EXPECTED_SHARDS" ] || return 1
+    [ -z "$snapshot" ] || {
+        [ -f "$repo/snapshots/$snapshot/config.json" ] \
+            && [ -f "$repo/snapshots/$snapshot/model.safetensors.index.json" ]
+    }
+}
+
 ensure_refs_main() {
     local ref="$MODEL_PATH/refs/main" snap
     [ -f "$ref" ] && [ -n "$(<"$ref")" ] && return 0
@@ -417,8 +462,14 @@ ensure_refs_main() {
 
 resolve_model_dir() {
     local ref="$MODEL_PATH/refs/main" hash dir
-    ensure_refs_main
-    hash="$(<"$ref")"
+    if [ -n "$MODEL_SNAPSHOT" ]; then
+        model_tree_complete "$MODEL_PATH" "$MODEL_SNAPSHOT" \
+            || die "pinned model snapshot is incomplete: $MODEL_PATH/snapshots/$MODEL_SNAPSHOT"
+        hash="$MODEL_SNAPSHOT"
+    else
+        ensure_refs_main
+        hash="$(<"$ref")"
+    fi
     dir="$MODEL_PATH/snapshots/$hash"
     [ -f "$dir/config.json" ] || die "config.json missing in $dir — re-run with REFRESH_WEIGHTS=1"
     printf '/root/.cache/huggingface/hub/%s/snapshots/%s' "$MODEL_CACHE_NAME" "$hash"
@@ -770,18 +821,19 @@ ensure_image() {
 # brandonmusic cache folder without a second 164 GiB pull.
 adopt_complete_weights() {
     local have
-    have="$(count_shards "$MODEL_PATH")"
-    if [ "${have:-0}" -ge "$EXPECTED_SHARDS" ]; then
-        ensure_refs_main
+    have="$(count_model_shards "$MODEL_PATH" "$MODEL_SNAPSHOT")"
+    if model_tree_complete "$MODEL_PATH" "$MODEL_SNAPSHOT"; then
+        [ -n "$MODEL_SNAPSHOT" ] || ensure_refs_main
         log "weights already present: $MODEL_PATH ($have shards)"
         return 0
     fi
-    have="$(count_shards "$FALLBACK_MODEL_PATH")"
-    if [ "${have:-0}" -ge "$EXPECTED_SHARDS" ]; then
+    have="$(count_model_shards "$FALLBACK_MODEL_PATH" "$MODEL_FALLBACK_SNAPSHOT")"
+    if model_tree_complete "$FALLBACK_MODEL_PATH" "$MODEL_FALLBACK_SNAPSHOT"; then
         log "primary cache incomplete — using fallback ${MODEL_FALLBACK} at $FALLBACK_MODEL_PATH ($have shards)"
         MODEL_PATH="$FALLBACK_MODEL_PATH"
         MODEL_CACHE_NAME="$MODEL_FALLBACK_CACHE_NAME"
-        ensure_refs_main
+        MODEL_SNAPSHOT="$MODEL_FALLBACK_SNAPSHOT"
+        [ -n "$MODEL_SNAPSHOT" ] || ensure_refs_main
         return 0
     fi
     return 1
@@ -848,7 +900,7 @@ download_weights() {
             || die "download of ${MODEL} and ${MODEL_FALLBACK} both failed"
     fi
     adopt_complete_weights \
-        || die "download finished with $(count_shards "$MODEL_PATH") / $EXPECTED_SHARDS shards"
+        || die "download finished with $(count_model_shards "$MODEL_PATH" "$MODEL_SNAPSHOT") / $EXPECTED_SHARDS shards in the selected snapshot"
 }
 
 download_dflash() {
@@ -885,7 +937,7 @@ download_only() {
     download_weights
     download_dflash
 
-    have="$(count_shards "$MODEL_PATH")"
+    have="$(count_model_shards "$MODEL_PATH" "$MODEL_SNAPSHOT")"
     log "======================================================================"
     log "head HF cache : ${HF_CACHE_DIR}"
     log "  target      : ${MODEL}  (${have} / ${EXPECTED_SHARDS} shards)"
@@ -901,16 +953,20 @@ download_only() {
 }
 
 # ------------------------------ weight sync --------------------------------
-# Keyed on the snapshot commit (refs/main, with the same repair fallback as
-# ensure_refs_main), not on MODEL_REVISION: the marker lives inside each
-# synced repo folder, so a MODEL / revision switch re-syncs automatically.
+# Keyed on the selected snapshot commit. Presets with an exact snapshot do not
+# trust refs/main; regular launches keep the existing refs/main repair path.
 # Without it, every ./start.sh pays a full size+mtime re-verification walk
 # over ~164 GiB / 120 shards on both ends for zero bytes of difference
 # (issue #22, item 2). FORCE_SYNC=1 bypasses the marker; deleting the
 # marker file on the worker has the same effect.
 sync_repo_marker_rev() {
-    local src="$1"
-    local rev
+    local src="$1" selected="${2:-}" rev
+    if [ -n "$selected" ]; then
+        model_tree_complete "$src" "$selected" \
+            || die "selected snapshot is incomplete: $src/snapshots/$selected"
+        printf '%s' "$selected"
+        return
+    fi
     rev="$(cat "$src/refs/main" 2>/dev/null || true)"
     [ -n "$rev" ] || rev="$(ls -1t "$src/snapshots" 2>/dev/null | head -n 1 || true)"
     [ -n "$rev" ] || rev="unknown"
@@ -918,10 +974,10 @@ sync_repo_marker_rev() {
 }
 
 sync_repo_to_worker() {
-    local src="$1" cache_name="$2" label="$3"
+    local src="$1" cache_name="$2" label="$3" selected="${4:-}"
     local marker rev
     marker="${WORKER_CACHE_DIR}/hub/${cache_name}/.glm53-exl3-synced"
-    rev="$(sync_repo_marker_rev "$src")"
+    rev="$(sync_repo_marker_rev "$src" "$selected")"
     if [ "${FORCE_SYNC:-0}" != "1" ] \
        && [ "$(worker_ssh "cat '$marker' 2>/dev/null" || true)" = "$rev" ]; then
         log "worker ${cache_name} already at ${rev} — rsync skipped (FORCE_SYNC=1 to force)"
@@ -934,14 +990,32 @@ sync_repo_to_worker() {
     worker_ssh "printf '%s' '$rev' > '$marker'"
 }
 
+verify_worker_model_snapshot() {
+    [ -n "$MODEL_SNAPSHOT" ] || return 0
+    local dir="${WORKER_CACHE_DIR}/hub/${MODEL_CACHE_NAME}/snapshots/${MODEL_SNAPSHOT}"
+    worker_ssh "test -f '$dir/config.json' \
+        && test -f '$dir/model.safetensors.index.json' \
+        && [ \"\$(find '$dir' -maxdepth 1 -name '*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]')\" -ge '$EXPECTED_SHARDS' ]" \
+        || die "pinned model snapshot is incomplete on worker: $dir"
+}
+
 sync_weights() {
-    [ "${SKIP_SYNC:-0}" = "1" ] && { log "SKIP_SYNC=1 — not syncing to worker"; return; }
     [ -d "$MODEL_PATH" ] || die "weights missing at $MODEL_PATH — run without SKIP_DOWNLOAD first"
-    sync_repo_to_worker "$MODEL_PATH" "$MODEL_CACHE_NAME" "weights"
+    if [ -n "$MODEL_SNAPSHOT" ]; then
+        model_tree_complete "$MODEL_PATH" "$MODEL_SNAPSHOT" \
+            || die "pinned model snapshot is incomplete: $MODEL_PATH/snapshots/$MODEL_SNAPSHOT"
+    fi
+    if [ "${SKIP_SYNC:-0}" = "1" ]; then
+        verify_worker_model_snapshot
+        log "SKIP_SYNC=1 — not syncing to worker"
+        return
+    fi
+    sync_repo_to_worker "$MODEL_PATH" "$MODEL_CACHE_NAME" "weights" "$MODEL_SNAPSHOT"
     if [ "$SPEC_METHOD" = "dflash" ]; then
         [ -d "$DFLASH_PATH" ] || die "DFlash2 weights missing at $DFLASH_PATH"
         sync_repo_to_worker "$DFLASH_PATH" "$DFLASH_CACHE_NAME" "DFlash2 draft"
     fi
+    verify_worker_model_snapshot
     log "worker weights in sync"
 }
 
@@ -1038,7 +1112,7 @@ fi
 if [ "${ABLIT:-0}" = "1" ]; then
     say "ablit: o_proj orthogonalization ON (method=${ABLIT_METHOD:-auto} direction=${ABLIT_DIRECTION:-dealign} layers=${ABLIT_LAYERS:-15-45} alpha=${ABLIT_ALPHA:-3.0})"
 else
-    say "ablit: off — stock o_proj weights"
+    say "runtime ablit: off; checkpoint o_proj unchanged"
 fi
 say "launching: vllm serve ${MODEL_DIR} ${ARGS[*]}"
 exec vllm serve "${MODEL_DIR}" "${ARGS[@]}"
@@ -1134,7 +1208,7 @@ fi
 if [ "${ABLIT:-0}" = "1" ]; then
     say "ablit: o_proj orthogonalization ON (method=${ABLIT_METHOD:-auto} direction=${ABLIT_DIRECTION:-dealign} layers=${ABLIT_LAYERS:-15-45} alpha=${ABLIT_ALPHA:-3.0})"
 else
-    say "ablit: off — stock o_proj weights"
+    say "runtime ablit: off; checkpoint o_proj unchanged"
 fi
 say "joining TP2 at ${HEAD_IP}:${MASTER_PORT} as rank 1"
 exec vllm serve "${MODEL_DIR}" "${ARGS[@]}"
@@ -1434,7 +1508,7 @@ on_ready() {
     local spec="MTP k=${MTP_TOKENS}"
     [ "$SPEC_METHOD" = "dflash" ] && spec="DFlash2 k=${DFLASH_TOKENS} (${DFLASH_MODEL})"
     [ "$SPEC_METHOD" = "none" ] && spec=off
-    local ablit="off (stock weights)"
+    local ablit="off (checkpoint weights unchanged)"
     [ "$ABLIT" = "1" ] && ablit="ON method=${ABLIT_METHOD} direction=${ABLIT_DIRECTION} layers=${ABLIT_LAYERS} alpha=${ABLIT_ALPHA}"
     log "  features   : tools=glm47+auto, reasoning=glm45, spec=${spec}, vision=${vision}, ablit=${ablit}"
     local auth_line="none (VLLM_API_KEY empty)"
