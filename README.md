@@ -96,6 +96,25 @@ That 2026-08-28 decode serve used `--max-model-len 1000000` with a **1,754,237-t
 | **×1** | **268 ms** | **32.1** | **32.1** |
 | **×2** | 399 ms | 22.1 | 41.2 |
 
+### Faster prose decode (opt-in, 2026-09-08)
+
+Two decode speed-ups ship in the overlay, both **off by default** (`docs/overnight-decode-results-2026-09-08.md`, receipts in `logs/overnight-decode-20260907T224521Z/`):
+
+- **Adaptive verification length** (`GLM53_ADAPTIVE_K=ema`): the DFlash2 drafter still proposes 7 tokens, but the scheduler verifies only a per-step prefix (2, 4 or 7) chosen from a running average of how many drafts have been surviving, batch-uniform so every decode step keeps its FULL CUDA graph. Lossless at temperature 0. Measured vs stock k=7 (8 runs/prompt, 131k and 850k): Silk Road essay +21 %, sky/sunset +13 %, hash-map +10 %, code +5–15 %, counting unchanged.
+- **FP8 weight-only dense projections** (`GLM53_DENSE_FP8=dense,kda`): KDA and dense-MLP projections quantised per output channel to FP8 at load and run through the Marlin kernel, ~11 ms less per step on everything (+10 % on counting, prose +12–19 % alone, **+37 % on hard prose stacked with adaptive-k**). PROVISIONAL: it changes target numerics by FP8 rounding (KL proxy vs stock 0.002–0.013 nats/position, argmax agreement 94–100 %; no full KLD panel yet).
+
+Turn on (no rebuild; the patches apply at container start on both nodes):
+
+```bash
+# .env
+GLM53_ADAPTIVE_K=ema
+GLM53_ADAPTIVE_K_SET=2,4,7
+GLM53_DENSE_FP8=dense,kda            # drop this line to keep BF16 dense weights (lossless config)
+EXTRA_ARGS="--cudagraph-capture-sizes 1 2 3 4 5 6 8 9 10 12 15 16 20 24 32 --kv-cache-memory-bytes 16106127360"
+```
+
+then `./start.sh restart`. The capture-size list is required for adaptive-k (multiples of 3, 5 and 8 up to 4 requests; the stock `1 2 4 8 16 24 32` misses the 3- and 5-token shapes). The KV cap keeps the pool at the stock 15 GiB so FP8's freed GPU memory becomes host headroom instead of a bigger pool (without it the head dropped to ~1.5 GiB MemAvailable at 850k). Verify after boot: `docker logs glm53-exl3-head | grep -a "adaptive-k\|dense fp8"` should show `uniform decode graph query lens: [3, 5, 8]` and `dense fp8 groups: dense,kda`, and with `ABLIT=1` the line `ABLIT_METHOD=auto -> transplant` (a missing `ablit/transplant/` silently falls back to the projection edit, which garbles sampled output). A running server can be retuned without a reboot through `~/.cache/vllm-glm53-flash/glm53_adaptive_k.json` (`{"mode":"ema","set":"2,4,7","margin":1.0}`; `{"mode":"off"}` restores k=7). Live sparkDash prose numbers with both on are in the table above.
+
 Lab `tests/bench_decode.py` on the same protocol (median of 5 × 400, 2026-08-30 C4, `DFLASH_DRAFT_TP=2`): Structured **65.1** tok/s (0.959 accept / 6.71 per step); Prose (hash-map) **27.1** (0.341 / 2.39). Prior TP=1 lab: 61.7 / 26.9. Long context / mixed (~60–100k KV) 24–27. MTP k=2 baseline ~24.6.
 
 Structured per-pos (lab median): **0.98 / 0.98 / 0.94 / 0.94 / 0.91 / 0.83 / 0.83**.
@@ -596,6 +615,9 @@ that are now documented/enforced:
 | `PORT` | `8888` | OpenAI API on the head |
 | `VLLM_API_KEY` | *(unset)* | opt-in Bearer token for `/v1`. Empty = open API. `/health` stays keyless |
 | `ABLIT` | `0` (off) | opt-in. `1` = apply o_proj edit at load (both ranks). Unset = stock weights |
+| `GLM53_ADAPTIVE_K` | `off` | `ema` = adaptive verification length (prose +13–21 %); needs the capture-size list in `EXTRA_ARGS`. See *Faster prose decode* |
+| `GLM53_ADAPTIVE_K_SET` | `2,4,7` | candidate draft lengths; graphs are captured for each length + 1 |
+| `GLM53_DENSE_FP8` | `off` | `dense,kda` = FP8 weight-only (Marlin) dense projections, ~-11 ms/step; PROVISIONAL numerics. Groups: `shared,dense,kda,mla` |
 | `ABLIT_METHOD` | `auto` | `auto` = transplant when `ablit/transplant/` is populated, else `proj` |
 | `ABLIT_LAYERS` | `15-45` | inclusive range; `45` is the checkpoint MTP block |
 | `ABLIT_DIRECTION` | `dealign` | proj-only: `dealign` \| `bf_oproj` \| path to a custom `.pt` |
