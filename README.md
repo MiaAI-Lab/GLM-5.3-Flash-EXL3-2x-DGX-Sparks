@@ -88,8 +88,8 @@ Official numbers: sparkDash Decode bench, DFlash2 k=7, **Structured** (count 1�
 That 2026-08-28 decode serve used `--max-model-len 1000000` with a **1,754,237-token** KV pool. These runs are warm / empty KV — they do not need a filled 1M cache.
 
 **Prose** (sparkDash Decode bench, prose prompt type, 2026-09-08) on the adaptive-verification + FP8-dense serve
-(`GLM53_ADAPTIVE_K=ema`, `GLM53_DENSE_FP8=dense,kda`, 850k context, KV pool capped at 15 GiB — see
-`docs/overnight-decode-results-2026-09-08.md`; the stock k=7 / BF16 serve measured ~18–27 tok/s per stream on the lab prose prompts):
+(`GLM53_ADAPTIVE_K=ema`, `GLM53_DENSE_FP8=dense,kda`, 850k context, KV pool capped at 15 GiB — turned on
+as below; the stock k=7 / BF16 serve measured ~18–27 tok/s per stream on the lab prose prompts):
 
 | Concurrency | TTFT | Stream tok/s | Aggregate tok/s |
 |---|---:|---:|---:|
@@ -98,7 +98,7 @@ That 2026-08-28 decode serve used `--max-model-len 1000000` with a **1,754,237-t
 
 ### Faster prose decode (opt-in, 2026-09-08)
 
-Two decode speed-ups ship in the overlay, both **off by default** (`docs/overnight-decode-results-2026-09-08.md`, receipts in `logs/overnight-decode-20260907T224521Z/`):
+Two decode speed-ups ship in the overlay, both **off by default** (matched A/B/A at 131k and 850k, 8 runs per prompt, bootstrap 95 % CI; receipts in `logs/overnight-decode-20260907T224521Z/`):
 
 - **Adaptive verification length** (`GLM53_ADAPTIVE_K=ema`): the DFlash2 drafter still proposes 7 tokens, but the scheduler verifies only a per-step prefix (2, 4 or 7) chosen from a running average of how many drafts have been surviving, batch-uniform so every decode step keeps its FULL CUDA graph. Lossless at temperature 0. Measured vs stock k=7 (8 runs/prompt, 131k and 850k): Silk Road essay +21 %, sky/sunset +13 %, hash-map +10 %, code +5–15 %, counting unchanged.
 - **FP8 weight-only dense projections** (`GLM53_DENSE_FP8=dense,kda`): KDA and dense-MLP projections quantised per output channel to FP8 at load and run through the Marlin kernel, ~11 ms less per step on everything (+10 % on counting, prose +12–19 % alone, **+37 % on hard prose stacked with adaptive-k**). PROVISIONAL: it changes target numerics by FP8 rounding (KL proxy vs stock 0.002–0.013 nats/position, argmax agreement 94–100 %; no full KLD panel yet).
