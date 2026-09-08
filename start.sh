@@ -74,6 +74,9 @@ _cli_util="${GPU_MEM_UTIL-}"
 _cli_lm="${LANGUAGE_MODEL_ONLY-}"
 _cli_max_num_seqs="${MAX_NUM_SEQS-}"
 _cli_max_model_len="${MAX_MODEL_LEN-}"
+_cli_adaptive_k="${GLM53_ADAPTIVE_K-}"
+_cli_adaptive_k_set="${GLM53_ADAPTIVE_K_SET-}"
+_cli_dense_fp8="${GLM53_DENSE_FP8-}"
 _cli_ablit="${ABLIT-}"
 _cli_ablit_method="${ABLIT_METHOD-}"
 _cli_ablit_direction="${ABLIT_DIRECTION-}"
@@ -106,6 +109,9 @@ set +a
 [ -n "${_cli_lm}" ] && LANGUAGE_MODEL_ONLY="$_cli_lm"
 [ -n "${_cli_max_num_seqs}" ] && MAX_NUM_SEQS="$_cli_max_num_seqs"
 [ -n "${_cli_max_model_len}" ] && MAX_MODEL_LEN="$_cli_max_model_len"
+[ -n "${_cli_adaptive_k}" ] && GLM53_ADAPTIVE_K="$_cli_adaptive_k"
+[ -n "${_cli_adaptive_k_set}" ] && GLM53_ADAPTIVE_K_SET="$_cli_adaptive_k_set"
+[ -n "${_cli_dense_fp8}" ] && GLM53_DENSE_FP8="$_cli_dense_fp8"
 [ -n "${_cli_ablit}" ] && ABLIT="$_cli_ablit"
 [ -n "${_cli_ablit_method}" ] && ABLIT_METHOD="$_cli_ablit_method"
 [ -n "${_cli_ablit_direction}" ] && ABLIT_DIRECTION="$_cli_ablit_direction"
@@ -201,6 +207,9 @@ APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
+ADAPTIVE_K_PATCH_HOST="${ADAPTIVE_K_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_adaptive_k.py}"
+DENSE_FP8_PATCH_HOST="${DENSE_FP8_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_dense_fp8.py}"
+EXL3_OVERLAY_HOST="${EXL3_OVERLAY_HOST:-$SCRIPT_DIR/overlay/exl3.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
@@ -272,6 +281,17 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # Mixed-step prefill policy when a peer is already decoding (issue #6).
 # skip = do not mix; N>0 = cap tokens; 0 = off.
 GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
+# Adaptive verification length (overlay/patch_adaptive_k.py). off = stock k=7 every step.
+GLM53_ADAPTIVE_K="${GLM53_ADAPTIVE_K:-off}"
+GLM53_ADAPTIVE_K_SET="${GLM53_ADAPTIVE_K_SET:-2,4,7}"
+GLM53_ADAPTIVE_K_ALPHA="${GLM53_ADAPTIVE_K_ALPHA:-0.25}"
+GLM53_ADAPTIVE_K_MARGIN="${GLM53_ADAPTIVE_K_MARGIN:-1.0}"
+GLM53_ADAPTIVE_K_MIN_STEPS="${GLM53_ADAPTIVE_K_MIN_STEPS:-4}"
+GLM53_ADAPTIVE_K_SATURATE="${GLM53_ADAPTIVE_K_SATURATE:-max}"
+GLM53_ADAPTIVE_K_HIST="${GLM53_ADAPTIVE_K_HIST:-200}"
+# Dense projections FP8 weight-only via Marlin (overlay/patch_dense_fp8.py). off = BF16 as shipped.
+# PROVISIONAL (changes target numerics; needs a KLD panel). Groups: shared,dense,kda,mla.
+GLM53_DENSE_FP8="${GLM53_DENSE_FP8:-off}"
 # Sparse-indexer prefill gather workspace (overlay/patch_indexer_workspace.py).
 # stock = max_model_len * 40 entries (5036.40 MB locked at 1M, measured);
 # rightsize = the legal per-step maximum, ~+26% KV (default since 2026-09-07:
@@ -523,6 +543,9 @@ preflight() {
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "$XGRAMMAR_PATCH_HOST missing"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "$KPOOL_TAIL_PATCH_HOST missing"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "$SPINWAIT_PATCH_HOST missing"
+    [ -f "$ADAPTIVE_K_PATCH_HOST" ] || die "$ADAPTIVE_K_PATCH_HOST missing"
+    [ -f "$DENSE_FP8_PATCH_HOST" ] || die "$DENSE_FP8_PATCH_HOST missing"
+    [ -f "$EXL3_OVERLAY_HOST" ] || die "$EXL3_OVERLAY_HOST missing"
     [ -f "$SCRIPT_DIR/overlay/patch_ablit.py" ] || die "$SCRIPT_DIR/overlay/patch_ablit.py missing"
     [ -f "$SCRIPT_DIR/overlay/ablit_runtime.py" ] || die "$SCRIPT_DIR/overlay/ablit_runtime.py missing"
     [ -f "$SCRIPT_DIR/ablit/LAYER_MAP.json" ] || die "$SCRIPT_DIR/ablit/LAYER_MAP.json missing"
@@ -1029,6 +1052,12 @@ fi
 if [ -f /opt/glm53/patch_spinwait.py ]; then
     python3 /opt/glm53/patch_spinwait.py
 fi
+if [ -f /opt/glm53/patch_adaptive_k.py ]; then
+    python3 /opt/glm53/patch_adaptive_k.py
+fi
+if [ -f /opt/glm53/patch_dense_fp8.py ]; then
+    python3 /opt/glm53/patch_dense_fp8.py
+fi
 if [ -f /opt/glm53/patch_indexer_workspace.py ]; then
     python3 /opt/glm53/patch_indexer_workspace.py
 fi
@@ -1125,6 +1154,12 @@ fi
 if [ -f /opt/glm53/patch_spinwait.py ]; then
     python3 /opt/glm53/patch_spinwait.py
 fi
+if [ -f /opt/glm53/patch_adaptive_k.py ]; then
+    python3 /opt/glm53/patch_adaptive_k.py
+fi
+if [ -f /opt/glm53/patch_dense_fp8.py ]; then
+    python3 /opt/glm53/patch_dense_fp8.py
+fi
 if [ -f /opt/glm53/patch_indexer_workspace.py ]; then
     python3 /opt/glm53/patch_indexer_workspace.py
 fi
@@ -1168,6 +1203,11 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "missing $SPINWAIT_PATCH_HOST"
     scp -q -o BatchMode=yes "$SPINWAIT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_spinwait.py"
+    [ -f "$ADAPTIVE_K_PATCH_HOST" ] || die "missing $ADAPTIVE_K_PATCH_HOST"
+    scp -q -o BatchMode=yes "$ADAPTIVE_K_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_adaptive_k.py"
+    [ -f "$DENSE_FP8_PATCH_HOST" ] || die "missing $DENSE_FP8_PATCH_HOST"
+    scp -q -o BatchMode=yes "$DENSE_FP8_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_dense_fp8.py"
+    scp -q -o BatchMode=yes "$EXL3_OVERLAY_HOST" "${WORKER_SSH}:/tmp/glm53-exl3.py"
 
     worker_ssh "rm -rf /tmp/glm53-ablit"
     scp -q -r -o BatchMode=yes "$SCRIPT_DIR/ablit" "${WORKER_SSH}:/tmp/glm53-ablit"
@@ -1237,7 +1277,9 @@ launch_cluster() {
              DFLASH_DRAFT_TP \
              LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING \
              LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE EXL3_MOE_ROW_TILE EXL3_TEMP_ROWS_FUSED EXL3_FAT_SORTED EXL3_FAT_BATCHED EXL3_FAT_KERNEL EXL3_FAT_GROUPED MODEL_DIR EXTRA_ARGS \
-             ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
+             ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP \
+             GLM53_ADAPTIVE_K GLM53_ADAPTIVE_K_SET GLM53_ADAPTIVE_K_ALPHA GLM53_ADAPTIVE_K_MARGIN \
+             GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST GLM53_DENSE_FP8; do
         serve_env+=" -e $v='${!v:-}'"
     done
     # VLLM_API_KEY is read by the head (rank 0) API server for bearer auth; the
@@ -1266,6 +1308,9 @@ launch_cluster() {
         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
         -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
+        -v '/tmp/patch_adaptive_k.py:/opt/glm53/patch_adaptive_k.py:ro' \
+        -v '/tmp/patch_dense_fp8.py:/opt/glm53/patch_dense_fp8.py:ro' \
+        -v '/tmp/glm53-exl3.py:/opt/glm53/exl3.py:ro' \
         -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
         -v '/tmp/glm53-ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro' \
         -v '/tmp/patch_ablit.py:/opt/glm53/patch_ablit.py:ro' \
@@ -1298,6 +1343,9 @@ launch_cluster() {
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
         -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
+        -v "$ADAPTIVE_K_PATCH_HOST:/opt/glm53/patch_adaptive_k.py:ro" \
+        -v "$DENSE_FP8_PATCH_HOST:/opt/glm53/patch_dense_fp8.py:ro" \
+        -v "$EXL3_OVERLAY_HOST:/opt/glm53/exl3.py:ro" \
         -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
         -v "$SCRIPT_DIR/overlay/ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro" \
         -v "$SCRIPT_DIR/overlay/patch_ablit.py:/opt/glm53/patch_ablit.py:ro" \
@@ -1338,6 +1386,14 @@ launch_cluster() {
         -e ABLIT_LAYERS="$ABLIT_LAYERS" \
         -e ABLIT_ALPHA="$ABLIT_ALPHA" \
         -e ABLIT_INCLUDE_MTP="$ABLIT_INCLUDE_MTP" \
+        -e GLM53_ADAPTIVE_K="$GLM53_ADAPTIVE_K" \
+        -e GLM53_ADAPTIVE_K_SET="$GLM53_ADAPTIVE_K_SET" \
+        -e GLM53_ADAPTIVE_K_ALPHA="$GLM53_ADAPTIVE_K_ALPHA" \
+        -e GLM53_ADAPTIVE_K_MARGIN="$GLM53_ADAPTIVE_K_MARGIN" \
+        -e GLM53_ADAPTIVE_K_MIN_STEPS="$GLM53_ADAPTIVE_K_MIN_STEPS" \
+        -e GLM53_ADAPTIVE_K_SATURATE="$GLM53_ADAPTIVE_K_SATURATE" \
+        -e GLM53_ADAPTIVE_K_HIST="$GLM53_ADAPTIVE_K_HIST" \
+        -e GLM53_DENSE_FP8="$GLM53_DENSE_FP8" \
         -e MODEL_DIR="$MODEL_DIR" \
         -e VLLM_API_KEY="$VLLM_API_KEY" \
         -e EXTRA_ARGS="${EXTRA_ARGS:-}" \

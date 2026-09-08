@@ -87,6 +87,15 @@ Official numbers: sparkDash Decode bench, DFlash2 k=7, **Structured** (count 1�
 
 That 2026-08-28 decode serve used `--max-model-len 1000000` with a **1,754,237-token** KV pool. These runs are warm / empty KV — they do not need a filled 1M cache.
 
+**Prose** (sparkDash Decode bench, prose prompt type, 2026-09-08) on the adaptive-verification + FP8-dense serve
+(`GLM53_ADAPTIVE_K=ema`, `GLM53_DENSE_FP8=dense,kda`, 850k context, KV pool capped at 15 GiB — see
+`docs/overnight-decode-results-2026-09-08.md`; the stock k=7 / BF16 serve measured ~18–27 tok/s per stream on the lab prose prompts):
+
+| Concurrency | TTFT | Stream tok/s | Aggregate tok/s |
+|---|---:|---:|---:|
+| **×1** | **268 ms** | **32.1** | **32.1** |
+| **×2** | 399 ms | 22.1 | 41.2 |
+
 Lab `tests/bench_decode.py` on the same protocol (median of 5 × 400, 2026-08-30 C4, `DFLASH_DRAFT_TP=2`): Structured **65.1** tok/s (0.959 accept / 6.71 per step); Prose (hash-map) **27.1** (0.341 / 2.39). Prior TP=1 lab: 61.7 / 26.9. Long context / mixed (~60–100k KV) 24–27. MTP k=2 baseline ~24.6.
 
 Structured per-pos (lab median): **0.98 / 0.98 / 0.94 / 0.94 / 0.91 / 0.83 / 0.83**.
@@ -688,7 +697,11 @@ Image-build runs `EXL3_SELFCHECK_GPU=0`. `./start.sh` runs the GPU self-check
 
 ## License
 
-This repository (serve scripts, overlay, docs) is **MIT**. The EXL3/TR3
+This repository (serve scripts, overlay, docs) is **[AGPL-3.0](LICENSE)**.
+If you run a modified version as a network service, the AGPL requires you to
+offer its source to users of that service. Contributions made before
+2026-09-07 were licensed MIT; that notice is retained in
+[`LICENSE.MIT`](LICENSE.MIT). The EXL3/TR3
 checkpoint stays [ShapleyMCG License 1.0](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw/blob/main/LICENSE)
 (unmodified upstream LICENSE; also on
 [brandonmusic/GLM-5.3-Flash-tr3-4bpw](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw)).
