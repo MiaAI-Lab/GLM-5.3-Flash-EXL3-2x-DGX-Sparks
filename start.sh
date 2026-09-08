@@ -591,14 +591,23 @@ login_ghcr_if_token_worker() {
     echo "$GHCR_TOKEN" | worker_ssh "docker login ghcr.io -u '$GHCR_USER' --password-stdin" >/dev/null
 }
 
-# RepoDigest is stable across overlay2 vs containerd. Those snapshotters
-# disagree on .Id (config digest vs index digest), so start.sh used to
-# ship even after the worker had already pulled the same GHCR tag (issue #8).
-# Local builds have no RepoDigest — use RootFS layer diffs, then .Id.
-_IMAGE_KEY_FMT='{{if .RepoDigests}}{{index .RepoDigests 0}}{{else if .RootFS.Layers}}{{join .RootFS.Layers ","}}{{else}}{{.Id}}{{end}}'
+# Identity for "does the worker already have the head's image?". No single
+# field survives every path: overlay2 and containerd disagree on .Id (config
+# digest vs index digest, issue #8), and docker save | docker load drops
+# RepoDigests, so a shipped image never matched the GHCR tag it came from and
+# we re-shipped the whole image on every run. RootFS.Layers (diff IDs) is
+# identical on both sides in both cases — fold it into a short digest (the
+# full layer list does not belong in a log line) and keep RepoDigest/.Id only
+# as fallbacks for the rare inspect that reports no layers.
+_IMAGE_KEY_FMT='{{if .RootFS.Layers}}layers {{join .RootFS.Layers ","}}{{else if .RepoDigests}}other {{index .RepoDigests 0}}{{else}}other {{.Id}}{{end}}'
 
 parse_image_key() {
-    tr -d '\r' | sed -n 's/^GLM53KEY //p' | tail -n 1
+    local raw
+    raw="$(tr -d '\r' | sed -n 's/^GLM53KEY //p' | tail -n 1)"
+    case "$raw" in
+        "layers "*) printf 'layers:%s' "$(printf '%s' "${raw#layers }" | sha256sum | cut -c1-16)" ;;
+        "other "*)  printf '%s' "${raw#other }" ;;
+    esac
 }
 
 local_image_key() {
@@ -705,17 +714,18 @@ ensure_image() {
     fi
     local skip_pull="${SKIP_PULL:-0}"
     [ "${PULL:-0}" = "1" ] && skip_pull=0
-    local wanted_stamp have_stamp
+    local wanted_stamp have_stamp have_short
     wanted_stamp="$(overlay_recipe_hash)"
     have_stamp=""
     [ "$head_ok" = "1" ] && have_stamp="$(image_recipe_stamp)"
+    have_short="${have_stamp:0:12}"
     if [ "${BUILD:-0}" != "1" ] && [ "${SKIP_BUILD:-0}" != "1" ]; then
         if [ "$head_ok" = "0" ] || [ "$have_stamp" != "$wanted_stamp" ]; then
-            log "image recipe ${have_stamp:-none} != repo ${wanted_stamp:0:12} — rebuilding (SKIP_BUILD=1 keeps GHCR)"
+            log "image recipe ${have_short:-none} != repo ${wanted_stamp:0:12} — rebuilding (SKIP_BUILD=1 keeps GHCR)"
             BUILD=1
         fi
     elif [ "${SKIP_BUILD:-0}" = "1" ] && [ "$have_stamp" != "$wanted_stamp" ]; then
-        warn "SKIP_BUILD=1 — not rebuilding; stamp ${have_stamp:-none} != repo ${wanted_stamp:0:12}"
+        warn "SKIP_BUILD=1 — not rebuilding; stamp ${have_short:-none} != repo ${wanted_stamp:0:12}"
     fi
     if [ "${BUILD:-0}" = "1" ]; then
         build_image
