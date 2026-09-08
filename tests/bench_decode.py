@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import math
 import re
 import sys
@@ -34,10 +35,14 @@ SPEC_RE = re.compile(
 
 def _post(path: str, body: dict, timeout: float = 600.0, stream: bool = False):
     data = json.dumps(body).encode()
+    headers = {"Content-Type": "application/json"}
+    _k = os.environ.get("VLLM_API_KEY", "").strip()
+    if _k:
+        headers["Authorization"] = "Bearer " + _k
     req = urllib.request.Request(
         BASE + path,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     return urllib.request.urlopen(req, timeout=timeout)
