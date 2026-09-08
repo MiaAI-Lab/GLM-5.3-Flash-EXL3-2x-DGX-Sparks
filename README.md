@@ -176,9 +176,10 @@ Kernels: `TORCH_CUDA_ARCH_LIST=12.1a`. ExLlamaV3 pin `c5d9c657` (0.0.43) exposes
 
 ## Abliteration (`ABLIT=1`)
 
-**Off by default.** Unset or `ABLIT=0` serves stock `o_proj`. `ABLIT=1` is
-opt-in refusal-direction ablation at weight-load on top of the EXL3 checkpoint
-— nothing on disk is rewritten.
+**Off by default.** With the default checkpoint, unset or `ABLIT=0` serves
+stock `o_proj`. The flag only controls the load-time edit; it does not identify
+whether a selected checkpoint was edited before download. `ABLIT=1` applies
+refusal-direction ablation at weight load. Nothing on disk is rewritten.
 
 Artifacts live in `ablit/` (from
 [drowzeys/keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock](https://huggingface.co/drowzeys/keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock),
@@ -220,17 +221,48 @@ CUDA-graph capture. The DFlash2 drafter is never touched (for the checkpoint's
 own MTP block, `ABLIT_INCLUDE_MTP=1` transplants its o_proj too — the
 publisher found a stock MTP draft head keeps proposing refusals).
 
-Disable with `ABLIT=0` (or unset) — hook is a no-op, stock weights. No
-rebuild: artifacts + hook are bind-mounted into both containers every start.
+Disable with `ABLIT=0` or leave it unset. The hook then leaves the selected
+checkpoint unchanged. No rebuild is needed; the launcher bind-mounts the
+artifacts and hook into both containers on every start.
 
 | Knob | Default | What |
 |---|---|---|
-| `ABLIT` | `0` (off) | `1` = apply the o_proj edit at load (both ranks). Default and unset = stock weights |
+| `ABLIT` | `0` (off) | `1` = apply the o_proj edit at load on both ranks. `0` leaves the selected checkpoint unchanged |
 | `ABLIT_METHOD` | `auto` | `auto` = transplant when `ablit/transplant/` is populated, else `proj` \| `transplant` \| `proj` |
 | `ABLIT_LAYERS` | `15-45` | inclusive range; `45` is the checkpoint MTP block |
 | `ABLIT_ALPHA` | `3.0` | proj-only: projection scale (`1.0` = plain projection) |
 | `ABLIT_DIRECTION` | `dealign` | proj-only: `dealign` \| `bf_oproj` \| path to a custom direction `.pt` |
 | `ABLIT_INCLUDE_MTP` | `1` | also edit the MTP block's o_proj when it loads (`SPEC_METHOD=mtp`) |
+
+### Prebuilt abliterated checkpoint
+
+To use the published EXL3 checkpoint instead of editing weights at load time:
+
+```bash
+./start-abliterated.sh download
+./start-abliterated.sh restart
+```
+
+The preset selects
+[`bullerwins/GLM-5.3-Flash-exl3-4bpw-ablit`](https://huggingface.co/bullerwins/GLM-5.3-Flash-exl3-4bpw-ablit)
+at commit `14858211ed81d7fa773f8a0db02f38f36d230252`. It sets the fallback to
+the same repository, so an incomplete download fails instead of starting the
+original model. It also forces `ABLIT=0`; these weights already contain the
+Keys transplant at layers 15-43 and MTP layer 45, while layer 44 remains from
+the EXL3 parent. Applying the runtime edit again would produce a different
+model.
+
+The preset does not rewrite `.env`. DFlash2, vision, context, API naming, and
+other serve settings still come from the regular launcher. Run
+`./start.sh restart` to return to the model configured in `.env`.
+
+A matched TP=2 deployment passed all 10 functional checks. These included a
+synthetic-image request, 9,128-token retrieval, three concurrent requests,
+streaming, tools, and active DFlash drafting. The donor's Refusal32 script
+reported 32/32 bypass, 0 refuse, and 0 garble in one greedy thinking-off run.
+The model card records the method, integrity checks, and measured quality
+tradeoffs. Teacher KLD was higher than the original model, so this is an
+alternative checkpoint, not a quality-equivalent replacement.
 
 Caveats: the KLD quality panel above was measured **without** ablit; expect
 behavioral drift and re-run `tests/bench_decode.py` after enabling (DFlash2
@@ -586,7 +618,7 @@ that are now documented/enforced:
 | `GHCR_TOKEN` / `GHCR_USER` | *(unset)* | optional login if anonymous GHCR pull is rate-limited |
 | `PORT` | `8888` | OpenAI API on the head |
 | `VLLM_API_KEY` | *(unset)* | opt-in Bearer token for `/v1`. Empty = open API. `/health` stays keyless |
-| `ABLIT` | `0` (off) | opt-in. `1` = apply o_proj edit at load (both ranks). Unset = stock weights |
+| `ABLIT` | `0` (off) | opt-in. `1` = apply o_proj edit at load on both ranks. Unset leaves checkpoint weights unchanged |
 | `ABLIT_METHOD` | `auto` | `auto` = transplant when `ablit/transplant/` is populated, else `proj` |
 | `ABLIT_LAYERS` | `15-45` | inclusive range; `45` is the checkpoint MTP block |
 | `ABLIT_DIRECTION` | `dealign` | proj-only: `dealign` \| `bf_oproj` \| path to a custom `.pt` |
@@ -649,6 +681,7 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0`, E2 diag schema, E3 grouped tables/parity/graph-replay/fallback checks |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
 | `start.sh` / `stop.sh` / `download.sh` | 2-node launch; Hub fetch on the head only |
+| `start-abliterated.sh` | pinned, fail-closed preset for the pre-edited EXL3 checkpoint |
 | `start-tp4.sh` / `.env.tp4.example` | experimental 4-node TP=4 launch; knobs stay out of `.env` |
 | `files/chat_template.jinja` | GLM-5.3 MM template (`<|image|>` / `<|video|>`); checkpoint jinja is language-only |
 | `overlay/qwen3_dflash2.py` | DFlash2 draft (grouped conv + candidate selector) |
@@ -696,7 +729,8 @@ offer its source to users of that service. Contributions made before
 checkpoint stays [ShapleyMCG License 1.0](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw/blob/main/LICENSE)
 (unmodified upstream LICENSE; also on
 [brandonmusic/GLM-5.3-Flash-tr3-4bpw](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw)).
-DFlash2 stays [CC BY-NC-ND 4.0](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2).
+The [prebuilt derivative](https://huggingface.co/bullerwins/GLM-5.3-Flash-exl3-4bpw-ablit)
+retains that license and the parent's third-party notices. DFlash2 stays [CC BY-NC-ND 4.0](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2).
 
 ## Credits
 
@@ -711,5 +745,8 @@ DFlash2 stays [CC BY-NC-ND 4.0](https://huggingface.co/incoai/GLM-5.3-Flash-DFla
   (CC BY-NC-ND 4.0, research/eval)
 - **KLD panel:** [malaiwah](https://huggingface.co/malaiwah) —
   [discussion #1](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw/discussions/1#6a9144846b0bdba943bfe86f)
+- **Prebuilt EXL3 derivative:** [bullerwins](https://huggingface.co/bullerwins) published
+  [GLM-5.3-Flash-exl3-4bpw-ablit](https://huggingface.co/bullerwins/GLM-5.3-Flash-exl3-4bpw-ablit),
+  using the [Keys L15-43/MTP-L45 transplant](https://huggingface.co/drowzeys/keys-GLM-5.3-Flash-NVFP4-ablit-l15-43-mtp-l45)
 - **Abliteration recipe / direction artifacts:** [drowzeys](https://huggingface.co/drowzeys) —
   [keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock](https://huggingface.co/drowzeys/keys-GLM-5.3-Flash-NVFP4-ablit-l15-45-anchorstock)
