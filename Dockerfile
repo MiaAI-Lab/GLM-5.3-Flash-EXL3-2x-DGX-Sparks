@@ -437,6 +437,7 @@ RUN set -eux; \
 # rebuild exllamav3_ext. Exl3Config.override_quantization_method requires
 # "exl3" in ModelConfig's ordered overrides list.
 COPY overlay/exl3.py /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/exl3.py
+COPY overlay/exl3_swiglu.py /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/exl3_swiglu.py
 COPY overlay/patch_model_overrides.py /opt/glm53/patch_model_overrides.py
 COPY overlay/qwen3_dflash2.py /opt/glm53/qwen3_dflash2.py
 COPY overlay/dflash2_speculator.py /opt/glm53/dflash2_speculator.py

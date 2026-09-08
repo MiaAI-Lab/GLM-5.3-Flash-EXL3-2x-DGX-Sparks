@@ -931,9 +931,6 @@ def _fat_scratch(
         "gate_up": torch.empty(
             (capacity, 2 * intermediate), dtype=torch.float32, device=device
         ),
-        "act": torch.empty(
-            (capacity, intermediate), dtype=torch.float32, device=device
-        ),
         "act_h": torch.empty(
             (capacity, intermediate), dtype=torch.float16, device=device
         ),
@@ -989,6 +986,8 @@ def apply_exl3_batched_fat(
     use_kernel: bool = False,
 ) -> torch.Tensor:
     """Run fat experts with persistent buffers and optional direct trellis GEMM."""
+    from .exl3_swiglu import fat_swiglu
+
     ext = load_exllamav3_ext()
     offset = 0
     for e, n_rows in enumerate(counts_host):
@@ -1033,15 +1032,8 @@ def apply_exl3_batched_fat(
             ext.hgemm(h13, w13, gate_up)
             ext.had_r_128(gate_up, gate_up, None, svh13, 1.0)
 
-        gate_out = gate_up[:, :intermediate]
-        up_out = gate_up[:, intermediate:]
-        gate_out.clamp_(max=limit)
-        up_out.clamp_(min=-limit, max=limit)
-        act = scratch["act"][:n_rows]
-        torch.sigmoid(gate_out, out=act)
-        act.mul_(gate_out).mul_(up_out)
         act_h = scratch["act_h"][:n_rows]
-        act_h.copy_(act)
+        fat_swiglu(gate_up, act_h, limit)
 
         h2 = scratch["h2"][:n_rows]
         ext.had_r_128(act_h, h2, down.suh, None, 1.0)
