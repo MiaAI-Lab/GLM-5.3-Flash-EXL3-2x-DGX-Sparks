@@ -73,7 +73,7 @@ For each function call, output the function name and arguments within the follow
                 {{- emit_audio() -}}
             {%- endif -%}
         {%- endfor -%}
-    {%- else -%}
+    {%- elif content is not none -%}
         {{- content }}
     {%- endif -%}
 {%- endmacro -%}
@@ -144,7 +144,7 @@ For each function call, output the function name and arguments within the follow
 {%- if m.role == 'user' -%}<|user|>{{ visible_text(m.content) }}
 {%- elif m.role == 'assistant' -%}
 <|assistant|>
-{%- set content = visible_text(m.content) %}
+{%- set content = visible_text(m.content) or '' %}
 {%- if m.reasoning_content is string %}
     {%- set reasoning_content = m.reasoning_content %}
 {%- elif '</think>' in content %}
@@ -165,7 +165,7 @@ For each function call, output the function name and arguments within the follow
     {%- set tc = tc.function %}
 {%- endif %}
 {{- '<tool_call>' + tc.name -}}
-{% set _args = tc.arguments %}{% for k, v in _args.items() %}<arg_key>{{ k }}</arg_key><arg_value>{{ v | tojson(ensure_ascii=False) if v is not string else v }}</arg_value>{% endfor %}</tool_call>{% endfor %}
+{% set _args = tc.arguments %}{% if _args is string %}{% set _args = {} %}{% endif %}{% for k, v in _args.items() %}<arg_key>{{ k }}</arg_key><arg_value>{{ v | tojson(ensure_ascii=False) if v is not string else v }}</arg_value>{% endfor %}</tool_call>{% endfor %}
 {% endif %}
 {%- elif m.role == 'tool' -%}
 {%- if loop.first or (messages[loop.index0 - 1].role != "tool") %}
@@ -199,6 +199,7 @@ For each function call, output the function name and arguments within the follow
                     {%- elif not tc_id_exists(ns_a.tool_calls, eid) -%}
                         {%- set ns_chk.can_sort = false -%}
                     {%- endif -%}
+                    {%- if not ns_chk.can_sort -%}{%- break -%}{%- endif -%}
                 {%- endfor -%}
             {%- else -%}
                 {%- set tk_id = id_of(m) -%}
@@ -210,6 +211,7 @@ For each function call, output the function name and arguments within the follow
                     {%- set ns_chk.can_sort = false -%}
                 {%- endif -%}
             {%- endif -%}
+            {%- if not ns_chk.can_sort -%}{%- break -%}{%- endif -%}
         {%- endfor -%}
         {%- for i in range(ns_a.tool_calls | length) -%}
             {%- set tc_id = id_of(ns_a.tool_calls[i]) -%}
@@ -220,7 +222,9 @@ For each function call, output the function name and arguments within the follow
                 {%- if id_of(ns_a.tool_calls[j]) == tc_id -%}
                     {%- set ns_chk.can_sort = false -%}
                 {%- endif -%}
+                {%- if not ns_chk.can_sort -%}{%- break -%}{%- endif -%}
             {%- endfor -%}
+            {%- if not ns_chk.can_sort -%}{%- break -%}{%- endif -%}
     {%- endfor -%}
     {%- endif -%}
     {%- if ns_chk.can_sort -%}
