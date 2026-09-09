@@ -9,7 +9,11 @@ accurate FP32 libdevice entry `__nv_expf`, retaining explicitly rounded
 sigmoid/multiplication operations and all FP16 storage boundaries.
 
 This is not approximate `__expf`, does not route E3 through E2, and does not
-change the default expert cap or any serving knob. It requires a native image
+change the default expert cap or any serving knob by itself. A subsequent
+[default-startup correction](default-startup-validation.md) sets the prefill batch
+to 5120 and qualifies startup with graph estimation enabled; the 7168/CG0 timing
+below is historical evidence, not the current-default measurement.
+The kernel change requires a native image
 rebuild; mounting a Python overlay alone cannot install a CUDA kernel change.
 
 The arithmetic targets Torch's FP32 sigmoid, not bit identity with the former

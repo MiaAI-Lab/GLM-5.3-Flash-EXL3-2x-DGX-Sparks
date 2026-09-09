@@ -17,9 +17,13 @@ ENV_EXAMPLE = ROOT / ".env.example"
 def test_documented_defaults() -> None:
     start = START.read_text()
     example = ENV_EXAMPLE.read_text()
-    assert 'MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-7168}"' in start
+    assert 'MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-5120}"' in start
     assert 'EXL3_FAT_KERNEL="${EXL3_FAT_KERNEL:-1}"' in start
-    assert "MAX_NUM_BATCHED_TOKENS=7168" in example
+    assert re.search(r"^MAX_NUM_BATCHED_TOKENS=5120$", example, re.M)
+    # The memory correction must not silently reduce context or disable graphs.
+    assert re.search(r"^MAX_MODEL_LEN=850000$", example, re.M)
+    assert re.search(r"^GPU_MEM_UTIL=0\.85$", example, re.M)
+    assert re.search(r"^CG_ESTIMATE=1$", example, re.M)
     assert re.search(r"^EXL3_FAT_KERNEL=1$", example, re.M)
 
 

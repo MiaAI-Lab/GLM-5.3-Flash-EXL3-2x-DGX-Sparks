@@ -38,6 +38,9 @@ with accurate FP32 libdevice math measured **+3.32%** cold-prefill size-ladder t
 (+2.08% and +4.58% in the two pairs). This used 850K / utilization 0.85 with the disclosed `CG_ESTIMATE=0`
 compatibility override, not untouched defaults. A native image rebuild is required.
 See [validation, raw results, reproduction steps, and baseline caveats](docs/e3-activation-validation.md).
+The revised **5120-token default** subsequently passed four cold/warm boots with `CG_ESTIMATE=1`,
+850K context, and utilization 0.85; its warm-pair kernel gain was **+2.70%**.
+See [default-startup qualification and performance tradeoffs](docs/default-startup-validation.md).
 
 **Earlier run — 2026-09-07, measured with [sparkDash](https://github.com/MiaAI-Lab/sparkDash).**
 Shipped E3 image `glm53-flash-sm121:e3-20260907` at `MAX_MODEL_LEN=900000`, `GPU_MEM_UTIL=0.86`,
@@ -648,7 +651,7 @@ that are now documented/enforced:
 | `EXL3_FAT_GROUPED` | `1` | E3 grouped fat-expert tier (`overlay/exl3_fat_moe.cu`): one gather + gate/up + down launch per layer from device-side tables, no host sync. **+37–45% cold prefill** measured (see *Cold prefill (E3)*). Default on since 2026-09-07 with the launcher defaults 850k / util 0.85 / rightsize / cap 32. Needs an image with the E3 kernels (fails closed at load otherwise). `0` = E2 kernel path (then set `MAX_MODEL_LEN=1000000`, cap 256 is picked automatically). 1M does not fit with E3 at util ≤ 0.87 on this kit (560 MiB scratch charged to the KV budget) |
 | `EXL3_TEMP_ROWS_FUSED` | `32` with E3, `256` with E2 (launcher picks by `EXL3_FAT_GROUPED` unless set) | fused `exl3_moe` rows per expert; experts above it are "fat". Keep ≥ `MAX_NUM_SEQS × (DFLASH_TOKENS+1)` so decode stays one graph-safe launch. E2 wants 256 (its per-expert loop is host-bound) |
 | `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq |
-| `MAX_NUM_BATCHED_TOKENS` | `7168` | current maintainer default at `MAX_NUM_SEQS=4`. MNBT 2048 was the clean PR77 A/B configuration and the best measured balance on an independent `MAX_NUM_SEQS=16` geometry. Tune per deployment; change after a repeated same-kit comparison |
+| `MAX_NUM_BATCHED_TOKENS` | `5120` | Memory-budget correction for 850K / utilization 0.85 / `CG_ESTIMATE=1` on the tested 2x GB10 lane. 6144 and 7168 failed cold-start KV budgeting. 7168 remains an explicit throughput-tuning option with separately qualified memory settings. See [startup qualification and tradeoffs](docs/default-startup-validation.md); higher concurrency requires separate qualification |
 | `MAX_MODEL_LEN` | `850000` | default context since 2026-09-07 (E3 default; 1M fits again with `EXL3_FAT_GROUPED=0`). 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool. At MNBT 7168 one 1M request needs **14.52 GiB** KV (10.98 GiB at 500k; ~7.4 GiB fixed + 7.1 GiB per 1M); the E3 recipe runs 500k |
 | `GPU_MEM_UTIL` | `0.85` | GB10 UMA budget (default lowered from 0.87 on 2026-09-07: each 0.01 is 1.2 GiB of host headroom, and long prefills need it — see *Cold prefill (E3)*). E3 at 900k / 0.85: pool ~1.05M tokens / 1.17× (0.87: 16.2 GiB / 1,051,648 tokens). Pre-E3 receipts at 1M / 0.87: 1,754,237 tokens / 18.67 GiB (MNBT 2048); 1,243,902 tokens / 1.24× (7168, rightsize, E2) |
 | `KV_CACHE_DTYPE` | `fp8` | packed `fp8_ds_mla`; not `nvfp4`, not bf16 |
@@ -665,7 +668,7 @@ that are now documented/enforced:
 | `HEAD_CX7_IB` / `WORKER_CX7_IB` | `rocep1s0f1` / `rocep1s0f0` | NCCL HCAs |
 | `USE_HOST_NCCL` | `0` | image nvidia-nccl; host preload duplicates DeepEP |
 
-**Default from this checkout:** E2 fat kernel on (`EXL3_FAT_KERNEL=1`) and `MAX_NUM_BATCHED_TOKENS=7168`; the E3 grouped tier is the launcher default (`EXL3_FAT_GROUPED=1`, see *Cold prefill (E3)*). The pre-E2 C4 keep was 2048; the current E2 cold-prefill baseline is the linked PR77 table; E2 at 7168 is ~1,150–1,185 tok/s cold, E3 ~1,580–1,640.
+**Default from this checkout:** E2 fat kernel on (`EXL3_FAT_KERNEL=1`) and `MAX_NUM_BATCHED_TOKENS=5120`; the E3 grouped tier is the launcher default (`EXL3_FAT_GROUPED=1`, see *Cold prefill (E3)*). The pre-E2 C4 keep was 2048; the current E2 cold-prefill baseline is the linked PR77 table; E2 at 7168 is ~1,150–1,185 tok/s cold, E3 ~1,580–1,640.
 
 ## Image / overlay
 

@@ -1,0 +1,2853 @@
+{
+  "arms": {
+    "a1": {
+      "median_prefill_tps": {
+        "4096": 1409.74,
+        "16384": 1604.85,
+        "65536": 1421.58,
+        "docs-short": 1356.41,
+        "code-medium": 1328.07,
+        "mixed-long": 1296.96,
+        "size_geomean": 1476.097092044612
+      },
+      "prefix_hit_delta": 0.0,
+      "states": {
+        "head": {
+          "image": "sha256:314adebcaf8d730c7a25805be9c110d306cd464e12554326d9cffc908b67f2a2",
+          "restarts": 0,
+          "oom": false
+        },
+        "worker": {
+          "image": "sha256:314adebcaf8d730c7a25805be9c110d306cd464e12554326d9cffc908b67f2a2",
+          "restarts": 0,
+          "oom": false
+        }
+      },
+      "canaries_passed": 22,
+      "canaries_total": 25,
+      "canary_failures": [
+        {
+          "name": "original-code",
+          "repeat": 0,
+          "expected": "15"
+        },
+        {
+          "name": "original-code",
+          "repeat": 1,
+          "expected": "15"
+        },
+        {
+          "name": "original-code",
+          "repeat": 2,
+          "expected": "15"
+        }
+      ],
+      "rows": [
+        {
+          "name": "warmup-512",
+          "rep": -2,
+          "kind": "warmup",
+          "promptTokens": 543,
+          "prefillTps": 86.25,
+          "ttftMs": 6295.68,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 543,
+            "completionTokens": 2,
+            "totalTokens": 545
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": -1,
+          "kind": "sparkdash",
+          "promptTokens": 4126,
+          "prefillTps": 658.34,
+          "ttftMs": 6267.24,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4126,
+            "completionTokens": 2,
+            "totalTokens": 4128
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": -1,
+          "kind": "sparkdash",
+          "promptTokens": 16415,
+          "prefillTps": 682.25,
+          "ttftMs": 24060.06,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16415,
+            "completionTokens": 2,
+            "totalTokens": 16417
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": -1,
+          "kind": "sparkdash",
+          "promptTokens": 65565,
+          "prefillTps": 1355.98,
+          "ttftMs": 48352.63,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65565,
+            "completionTokens": 2,
+            "totalTokens": 65567
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": 0,
+          "kind": "sparkdash",
+          "promptTokens": 4125,
+          "prefillTps": 1409.74,
+          "ttftMs": 2926.08,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4125,
+            "completionTokens": 2,
+            "totalTokens": 4127
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": 0,
+          "kind": "sparkdash",
+          "promptTokens": 16414,
+          "prefillTps": 1606.34,
+          "ttftMs": 10218.28,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16414,
+            "completionTokens": 2,
+            "totalTokens": 16416
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": 0,
+          "kind": "sparkdash",
+          "promptTokens": 65567,
+          "prefillTps": 1421.58,
+          "ttftMs": 46122.74,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65567,
+            "completionTokens": 2,
+            "totalTokens": 65569
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": 1,
+          "kind": "sparkdash",
+          "promptTokens": 4126,
+          "prefillTps": 1185.96,
+          "ttftMs": 3479.05,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4126,
+            "completionTokens": 2,
+            "totalTokens": 4128
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": 1,
+          "kind": "sparkdash",
+          "promptTokens": 16414,
+          "prefillTps": 1441.11,
+          "ttftMs": 11389.82,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16414,
+            "completionTokens": 2,
+            "totalTokens": 16416
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": 1,
+          "kind": "sparkdash",
+          "promptTokens": 65566,
+          "prefillTps": 1356.12,
+          "ttftMs": 48348.36,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65566,
+            "completionTokens": 2,
+            "totalTokens": 65568
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": 2,
+          "kind": "sparkdash",
+          "promptTokens": 4127,
+          "prefillTps": 1443.07,
+          "ttftMs": 2859.87,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4127,
+            "completionTokens": 2,
+            "totalTokens": 4129
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": 2,
+          "kind": "sparkdash",
+          "promptTokens": 16414,
+          "prefillTps": 1604.85,
+          "ttftMs": 10227.73,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16414,
+            "completionTokens": 2,
+            "totalTokens": 16416
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": 2,
+          "kind": "sparkdash",
+          "promptTokens": 65568,
+          "prefillTps": 1484.34,
+          "ttftMs": 44173.3,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65568,
+            "completionTokens": 2,
+            "totalTokens": 65570
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": -1,
+          "kind": "holdout",
+          "promptTokens": 5730,
+          "prefillTps": 601.91,
+          "ttftMs": 9519.71,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5730,
+            "completionTokens": 8,
+            "totalTokens": 5738
+          },
+          "contentPreview": {
+            "first": "This document is a technical deployment guide and",
+            "last": "This document is a technical deployment guide and",
+            "chars": 49
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": -1,
+          "kind": "holdout",
+          "promptTokens": 17530,
+          "prefillTps": 1099.06,
+          "ttftMs": 15950.03,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17530,
+            "completionTokens": 8,
+            "totalTokens": 17538
+          },
+          "contentPreview": {
+            "first": "This document is a Python module implementing EX",
+            "last": "This document is a Python module implementing EX",
+            "chars": 48
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": -1,
+          "kind": "holdout",
+          "promptTokens": 37937,
+          "prefillTps": 1560.35,
+          "ttftMs": 24313.19,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37937,
+            "completionTokens": 8,
+            "totalTokens": 37945
+          },
+          "contentPreview": {
+            "first": "This document is a technical README and code",
+            "last": "This document is a technical README and code",
+            "chars": 44
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": 0,
+          "kind": "holdout",
+          "promptTokens": 5729,
+          "prefillTps": 1363.78,
+          "ttftMs": 4200.82,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5729,
+            "completionTokens": 8,
+            "totalTokens": 5737
+          },
+          "contentPreview": {
+            "first": "This document is a technical deployment guide and",
+            "last": "This document is a technical deployment guide and",
+            "chars": 49
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": 0,
+          "kind": "holdout",
+          "promptTokens": 17526,
+          "prefillTps": 1070.77,
+          "ttftMs": 16367.74,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17526,
+            "completionTokens": 8,
+            "totalTokens": 17534
+          },
+          "contentPreview": {
+            "first": "This document is a vLLM quant",
+            "last": "This document is a vLLM quant",
+            "chars": 29
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": 0,
+          "kind": "holdout",
+          "promptTokens": 37938,
+          "prefillTps": 1546.68,
+          "ttftMs": 24528.68,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37938,
+            "completionTokens": 8,
+            "totalTokens": 37946
+          },
+          "contentPreview": {
+            "first": "This document is a comprehensive technical README for",
+            "last": "This document is a comprehensive technical README for",
+            "chars": 53
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": 1,
+          "kind": "holdout",
+          "promptTokens": 5730,
+          "prefillTps": 715.13,
+          "ttftMs": 8012.55,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5730,
+            "completionTokens": 8,
+            "totalTokens": 5738
+          },
+          "contentPreview": {
+            "first": "This document is a technical README for serving",
+            "last": "This document is a technical README for serving",
+            "chars": 47
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": 1,
+          "kind": "holdout",
+          "promptTokens": 17528,
+          "prefillTps": 1328.07,
+          "ttftMs": 13198.07,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17528,
+            "completionTokens": 8,
+            "totalTokens": 17536
+          },
+          "contentPreview": {
+            "first": "This document is a vLLM quant",
+            "last": "This document is a vLLM quant",
+            "chars": 29
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": 1,
+          "kind": "holdout",
+          "promptTokens": 37939,
+          "prefillTps": 1284.18,
+          "ttftMs": 29543.42,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37939,
+            "completionTokens": 8,
+            "totalTokens": 37947
+          },
+          "contentPreview": {
+            "first": "This document is a technical README and code",
+            "last": "This document is a technical README and code",
+            "chars": 44
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": 2,
+          "kind": "holdout",
+          "promptTokens": 5727,
+          "prefillTps": 1356.41,
+          "ttftMs": 4222.17,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5727,
+            "completionTokens": 8,
+            "totalTokens": 5735
+          },
+          "contentPreview": {
+            "first": "This document is a deployment guide and benchmark",
+            "last": "This document is a deployment guide and benchmark",
+            "chars": 49
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": 2,
+          "kind": "holdout",
+          "promptTokens": 17531,
+          "prefillTps": 1530.61,
+          "ttftMs": 11453.63,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17531,
+            "completionTokens": 8,
+            "totalTokens": 17539
+          },
+          "contentPreview": {
+            "first": "This document is a vLLM quant",
+            "last": "This document is a vLLM quant",
+            "chars": 29
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": 2,
+          "kind": "holdout",
+          "promptTokens": 37939,
+          "prefillTps": 1296.96,
+          "ttftMs": 29252.16,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37939,
+            "completionTokens": 8,
+            "totalTokens": 37947
+          },
+          "contentPreview": {
+            "first": "This document is a technical README and implementation",
+            "last": "This document is a technical README and implementation",
+            "chars": 54
+          }
+        }
+      ],
+      "canary_results": [
+        {
+          "name": "original-code",
+          "repeat": 0,
+          "expected": "15",
+          "observed": "10",
+          "passed": false
+        },
+        {
+          "name": "bare-code",
+          "repeat": 0,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "explicit-addition",
+          "repeat": 0,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "different-sum",
+          "repeat": 0,
+          "expected": "12",
+          "observed": "12",
+          "passed": true
+        },
+        {
+          "name": "count-elements",
+          "repeat": 0,
+          "expected": "3",
+          "observed": "3",
+          "passed": true
+        },
+        {
+          "name": "arithmetic",
+          "repeat": 0,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "multiplication",
+          "repeat": 0,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "instruction",
+          "repeat": 0,
+          "expected": "ORCHID",
+          "observed": "ORCHID",
+          "passed": true
+        },
+        {
+          "name": "original-code",
+          "repeat": 1,
+          "expected": "15",
+          "observed": "10",
+          "passed": false
+        },
+        {
+          "name": "bare-code",
+          "repeat": 1,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "explicit-addition",
+          "repeat": 1,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "different-sum",
+          "repeat": 1,
+          "expected": "12",
+          "observed": "12",
+          "passed": true
+        },
+        {
+          "name": "count-elements",
+          "repeat": 1,
+          "expected": "3",
+          "observed": "3",
+          "passed": true
+        },
+        {
+          "name": "arithmetic",
+          "repeat": 1,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "multiplication",
+          "repeat": 1,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "instruction",
+          "repeat": 1,
+          "expected": "ORCHID",
+          "observed": "ORCHID",
+          "passed": true
+        },
+        {
+          "name": "original-code",
+          "repeat": 2,
+          "expected": "15",
+          "observed": "10",
+          "passed": false
+        },
+        {
+          "name": "bare-code",
+          "repeat": 2,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "explicit-addition",
+          "repeat": 2,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "different-sum",
+          "repeat": 2,
+          "expected": "12",
+          "observed": "12",
+          "passed": true
+        },
+        {
+          "name": "count-elements",
+          "repeat": 2,
+          "expected": "3",
+          "observed": "3",
+          "passed": true
+        },
+        {
+          "name": "arithmetic",
+          "repeat": 2,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "multiplication",
+          "repeat": 2,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "instruction",
+          "repeat": 2,
+          "expected": "ORCHID",
+          "observed": "ORCHID",
+          "passed": true
+        },
+        {
+          "name": "vision-red",
+          "repeat": null,
+          "expected": "red",
+          "observed": "Red",
+          "passed": true
+        }
+      ],
+      "default_receipt": [
+        "fc3a0c97690caa27c0b3985ff03254d6587c7bec5346c811e7ef815046fc46a4  start.sh",
+        "811caa77955bfeda00fd42a94ac27de73824eb8b308a2d287d3d857c6a5eeb16  .env.example",
+        "MAX_MODEL_LEN=850000",
+        "MAX_NUM_BATCHED_TOKENS=5120",
+        "GPU_MEM_UTIL=0.85",
+        "CG_ESTIMATE=1"
+      ]
+    },
+    "b1": {
+      "median_prefill_tps": {
+        "4096": 1454.14,
+        "16384": 1631.27,
+        "65536": 1682.27,
+        "docs-short": 1344.77,
+        "code-medium": 1540.77,
+        "mixed-long": 1575.65,
+        "size_geomean": 1586.143917711309
+      },
+      "prefix_hit_delta": 0.0,
+      "states": {
+        "head": {
+          "image": "sha256:fb6fd7af72ac62a91b64e9574590af3c443c79a40b305798f00aa5155895d6c4",
+          "restarts": 0,
+          "oom": false
+        },
+        "worker": {
+          "image": "sha256:fb6fd7af72ac62a91b64e9574590af3c443c79a40b305798f00aa5155895d6c4",
+          "restarts": 0,
+          "oom": false
+        }
+      },
+      "canaries_passed": 22,
+      "canaries_total": 25,
+      "canary_failures": [
+        {
+          "name": "original-code",
+          "repeat": 0,
+          "expected": "15"
+        },
+        {
+          "name": "original-code",
+          "repeat": 1,
+          "expected": "15"
+        },
+        {
+          "name": "original-code",
+          "repeat": 2,
+          "expected": "15"
+        }
+      ],
+      "rows": [
+        {
+          "name": "warmup-512",
+          "rep": -2,
+          "kind": "warmup",
+          "promptTokens": 543,
+          "prefillTps": 86.9,
+          "ttftMs": 6248.59,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 543,
+            "completionTokens": 2,
+            "totalTokens": 545
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": -1,
+          "kind": "sparkdash",
+          "promptTokens": 4126,
+          "prefillTps": 1043.31,
+          "ttftMs": 3954.72,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4126,
+            "completionTokens": 2,
+            "totalTokens": 4128
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": -1,
+          "kind": "sparkdash",
+          "promptTokens": 16415,
+          "prefillTps": 1092.3,
+          "ttftMs": 15027.93,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16415,
+            "completionTokens": 2,
+            "totalTokens": 16417
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": -1,
+          "kind": "sparkdash",
+          "promptTokens": 65565,
+          "prefillTps": 1675.36,
+          "ttftMs": 39134.87,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65565,
+            "completionTokens": 2,
+            "totalTokens": 65567
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": 0,
+          "kind": "sparkdash",
+          "promptTokens": 4125,
+          "prefillTps": 1453.57,
+          "ttftMs": 2837.84,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4125,
+            "completionTokens": 2,
+            "totalTokens": 4127
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": 0,
+          "kind": "sparkdash",
+          "promptTokens": 16414,
+          "prefillTps": 1636.76,
+          "ttftMs": 10028.32,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16414,
+            "completionTokens": 2,
+            "totalTokens": 16416
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": 0,
+          "kind": "sparkdash",
+          "promptTokens": 65567,
+          "prefillTps": 1687.53,
+          "ttftMs": 38853.91,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65567,
+            "completionTokens": 2,
+            "totalTokens": 65569
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": 1,
+          "kind": "sparkdash",
+          "promptTokens": 4126,
+          "prefillTps": 1454.87,
+          "ttftMs": 2835.99,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4126,
+            "completionTokens": 2,
+            "totalTokens": 4128
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": 1,
+          "kind": "sparkdash",
+          "promptTokens": 16414,
+          "prefillTps": 1631.27,
+          "ttftMs": 10062.13,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16414,
+            "completionTokens": 2,
+            "totalTokens": 16416
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": 1,
+          "kind": "sparkdash",
+          "promptTokens": 65566,
+          "prefillTps": 1682.27,
+          "ttftMs": 38974.61,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65566,
+            "completionTokens": 2,
+            "totalTokens": 65568
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": 2,
+          "kind": "sparkdash",
+          "promptTokens": 4127,
+          "prefillTps": 1454.14,
+          "ttftMs": 2838.1,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4127,
+            "completionTokens": 2,
+            "totalTokens": 4129
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": 2,
+          "kind": "sparkdash",
+          "promptTokens": 16414,
+          "prefillTps": 1625.67,
+          "ttftMs": 10096.77,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16414,
+            "completionTokens": 2,
+            "totalTokens": 16416
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": 2,
+          "kind": "sparkdash",
+          "promptTokens": 65568,
+          "prefillTps": 1671.55,
+          "ttftMs": 39225.94,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65568,
+            "completionTokens": 2,
+            "totalTokens": 65570
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": -1,
+          "kind": "holdout",
+          "promptTokens": 5730,
+          "prefillTps": 596.75,
+          "ttftMs": 9602.07,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5730,
+            "completionTokens": 8,
+            "totalTokens": 5738
+          },
+          "contentPreview": {
+            "first": "This document is a technical deployment guide and",
+            "last": "This document is a technical deployment guide and",
+            "chars": 49
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": -1,
+          "kind": "holdout",
+          "promptTokens": 17530,
+          "prefillTps": 1542.57,
+          "ttftMs": 11364.16,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17530,
+            "completionTokens": 8,
+            "totalTokens": 17538
+          },
+          "contentPreview": {
+            "first": "This document is a Python module implementing EX",
+            "last": "This document is a Python module implementing EX",
+            "chars": 48
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": -1,
+          "kind": "holdout",
+          "promptTokens": 37937,
+          "prefillTps": 1587.42,
+          "ttftMs": 23898.52,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37937,
+            "completionTokens": 8,
+            "totalTokens": 37945
+          },
+          "contentPreview": {
+            "first": "This document is a technical README and code",
+            "last": "This document is a technical README and code",
+            "chars": 44
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": 0,
+          "kind": "holdout",
+          "promptTokens": 5729,
+          "prefillTps": 1344.53,
+          "ttftMs": 4260.96,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5729,
+            "completionTokens": 8,
+            "totalTokens": 5737
+          },
+          "contentPreview": {
+            "first": "This document is a technical README for serving",
+            "last": "This document is a technical README for serving",
+            "chars": 47
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": 0,
+          "kind": "holdout",
+          "promptTokens": 17526,
+          "prefillTps": 1540.8,
+          "ttftMs": 11374.63,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17526,
+            "completionTokens": 8,
+            "totalTokens": 17534
+          },
+          "contentPreview": {
+            "first": "This document is a vLLM quant",
+            "last": "This document is a vLLM quant",
+            "chars": 29
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": 0,
+          "kind": "holdout",
+          "promptTokens": 37938,
+          "prefillTps": 1579.85,
+          "ttftMs": 24013.74,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37938,
+            "completionTokens": 8,
+            "totalTokens": 37946
+          },
+          "contentPreview": {
+            "first": "This document is a comprehensive technical README for",
+            "last": "This document is a comprehensive technical README for",
+            "chars": 53
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": 1,
+          "kind": "holdout",
+          "promptTokens": 5730,
+          "prefillTps": 1344.77,
+          "ttftMs": 4260.94,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5730,
+            "completionTokens": 8,
+            "totalTokens": 5738
+          },
+          "contentPreview": {
+            "first": "This document is a technical deployment guide and",
+            "last": "This document is a technical deployment guide and",
+            "chars": 49
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": 1,
+          "kind": "holdout",
+          "promptTokens": 17528,
+          "prefillTps": 1540.77,
+          "ttftMs": 11376.15,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17528,
+            "completionTokens": 8,
+            "totalTokens": 17536
+          },
+          "contentPreview": {
+            "first": "This document is a vLLM quant",
+            "last": "This document is a vLLM quant",
+            "chars": 29
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": 1,
+          "kind": "holdout",
+          "promptTokens": 37939,
+          "prefillTps": 1575.13,
+          "ttftMs": 24086.28,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37939,
+            "completionTokens": 8,
+            "totalTokens": 37947
+          },
+          "contentPreview": {
+            "first": "This document is a technical README and code",
+            "last": "This document is a technical README and code",
+            "chars": 44
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": 2,
+          "kind": "holdout",
+          "promptTokens": 5727,
+          "prefillTps": 1345.42,
+          "ttftMs": 4256.66,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5727,
+            "completionTokens": 8,
+            "totalTokens": 5735
+          },
+          "contentPreview": {
+            "first": "This document is a technical deployment guide and",
+            "last": "This document is a technical deployment guide and",
+            "chars": 49
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": 2,
+          "kind": "holdout",
+          "promptTokens": 17531,
+          "prefillTps": 1540.15,
+          "ttftMs": 11382.67,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17531,
+            "completionTokens": 8,
+            "totalTokens": 17539
+          },
+          "contentPreview": {
+            "first": "This document is a vLLM quant",
+            "last": "This document is a vLLM quant",
+            "chars": 29
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": 2,
+          "kind": "holdout",
+          "promptTokens": 37939,
+          "prefillTps": 1575.65,
+          "ttftMs": 24078.25,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37939,
+            "completionTokens": 8,
+            "totalTokens": 37947
+          },
+          "contentPreview": {
+            "first": "This document is a technical README and code",
+            "last": "This document is a technical README and code",
+            "chars": 44
+          }
+        }
+      ],
+      "canary_results": [
+        {
+          "name": "original-code",
+          "repeat": 0,
+          "expected": "15",
+          "observed": "10",
+          "passed": false
+        },
+        {
+          "name": "bare-code",
+          "repeat": 0,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "explicit-addition",
+          "repeat": 0,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "different-sum",
+          "repeat": 0,
+          "expected": "12",
+          "observed": "12",
+          "passed": true
+        },
+        {
+          "name": "count-elements",
+          "repeat": 0,
+          "expected": "3",
+          "observed": "3",
+          "passed": true
+        },
+        {
+          "name": "arithmetic",
+          "repeat": 0,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "multiplication",
+          "repeat": 0,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "instruction",
+          "repeat": 0,
+          "expected": "ORCHID",
+          "observed": "ORCHID",
+          "passed": true
+        },
+        {
+          "name": "original-code",
+          "repeat": 1,
+          "expected": "15",
+          "observed": "10",
+          "passed": false
+        },
+        {
+          "name": "bare-code",
+          "repeat": 1,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "explicit-addition",
+          "repeat": 1,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "different-sum",
+          "repeat": 1,
+          "expected": "12",
+          "observed": "12",
+          "passed": true
+        },
+        {
+          "name": "count-elements",
+          "repeat": 1,
+          "expected": "3",
+          "observed": "3",
+          "passed": true
+        },
+        {
+          "name": "arithmetic",
+          "repeat": 1,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "multiplication",
+          "repeat": 1,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "instruction",
+          "repeat": 1,
+          "expected": "ORCHID",
+          "observed": "ORCHID",
+          "passed": true
+        },
+        {
+          "name": "original-code",
+          "repeat": 2,
+          "expected": "15",
+          "observed": "10",
+          "passed": false
+        },
+        {
+          "name": "bare-code",
+          "repeat": 2,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "explicit-addition",
+          "repeat": 2,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "different-sum",
+          "repeat": 2,
+          "expected": "12",
+          "observed": "12",
+          "passed": true
+        },
+        {
+          "name": "count-elements",
+          "repeat": 2,
+          "expected": "3",
+          "observed": "3",
+          "passed": true
+        },
+        {
+          "name": "arithmetic",
+          "repeat": 2,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "multiplication",
+          "repeat": 2,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "instruction",
+          "repeat": 2,
+          "expected": "ORCHID",
+          "observed": "ORCHID",
+          "passed": true
+        },
+        {
+          "name": "vision-red",
+          "repeat": null,
+          "expected": "red",
+          "observed": "Red",
+          "passed": true
+        }
+      ],
+      "default_receipt": [
+        "fc3a0c97690caa27c0b3985ff03254d6587c7bec5346c811e7ef815046fc46a4  start.sh",
+        "811caa77955bfeda00fd42a94ac27de73824eb8b308a2d287d3d857c6a5eeb16  .env.example",
+        "MAX_MODEL_LEN=850000",
+        "MAX_NUM_BATCHED_TOKENS=5120",
+        "GPU_MEM_UTIL=0.85",
+        "CG_ESTIMATE=1"
+      ]
+    },
+    "a2": {
+      "median_prefill_tps": {
+        "4096": 1393.21,
+        "16384": 1608.44,
+        "65536": 1621.67,
+        "docs-short": 1310.9,
+        "code-medium": 1512.03,
+        "mixed-long": 1539.62,
+        "size_geomean": 1537.427494614988
+      },
+      "prefix_hit_delta": 0.0,
+      "states": {
+        "head": {
+          "image": "sha256:314adebcaf8d730c7a25805be9c110d306cd464e12554326d9cffc908b67f2a2",
+          "restarts": 0,
+          "oom": false
+        },
+        "worker": {
+          "image": "sha256:314adebcaf8d730c7a25805be9c110d306cd464e12554326d9cffc908b67f2a2",
+          "restarts": 0,
+          "oom": false
+        }
+      },
+      "canaries_passed": 23,
+      "canaries_total": 25,
+      "canary_failures": [
+        {
+          "name": "original-code",
+          "repeat": 0,
+          "expected": "15"
+        },
+        {
+          "name": "original-code",
+          "repeat": 2,
+          "expected": "15"
+        }
+      ],
+      "rows": [
+        {
+          "name": "warmup-512",
+          "rep": -2,
+          "kind": "warmup",
+          "promptTokens": 543,
+          "prefillTps": 621.45,
+          "ttftMs": 873.76,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 543,
+            "completionTokens": 2,
+            "totalTokens": 545
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": -1,
+          "kind": "sparkdash",
+          "promptTokens": 4126,
+          "prefillTps": 1311.51,
+          "ttftMs": 3145.99,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4126,
+            "completionTokens": 2,
+            "totalTokens": 4128
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": -1,
+          "kind": "sparkdash",
+          "promptTokens": 16415,
+          "prefillTps": 1567.73,
+          "ttftMs": 10470.56,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16415,
+            "completionTokens": 2,
+            "totalTokens": 16417
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": -1,
+          "kind": "sparkdash",
+          "promptTokens": 65565,
+          "prefillTps": 1635.01,
+          "ttftMs": 40100.73,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65565,
+            "completionTokens": 2,
+            "totalTokens": 65567
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": 0,
+          "kind": "sparkdash",
+          "promptTokens": 4125,
+          "prefillTps": 1393.21,
+          "ttftMs": 2960.78,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4125,
+            "completionTokens": 2,
+            "totalTokens": 4127
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": 0,
+          "kind": "sparkdash",
+          "promptTokens": 16414,
+          "prefillTps": 1608.44,
+          "ttftMs": 10204.94,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16414,
+            "completionTokens": 2,
+            "totalTokens": 16416
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": 0,
+          "kind": "sparkdash",
+          "promptTokens": 65567,
+          "prefillTps": 1621.67,
+          "ttftMs": 40431.76,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65567,
+            "completionTokens": 2,
+            "totalTokens": 65569
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": 1,
+          "kind": "sparkdash",
+          "promptTokens": 4126,
+          "prefillTps": 1377.14,
+          "ttftMs": 2996.07,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4126,
+            "completionTokens": 2,
+            "totalTokens": 4128
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": 1,
+          "kind": "sparkdash",
+          "promptTokens": 16414,
+          "prefillTps": 1613.97,
+          "ttftMs": 10169.93,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16414,
+            "completionTokens": 2,
+            "totalTokens": 16416
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": 1,
+          "kind": "sparkdash",
+          "promptTokens": 65566,
+          "prefillTps": 1628.27,
+          "ttftMs": 40267.34,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65566,
+            "completionTokens": 2,
+            "totalTokens": 65568
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": 2,
+          "kind": "sparkdash",
+          "promptTokens": 4127,
+          "prefillTps": 1422.67,
+          "ttftMs": 2900.89,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4127,
+            "completionTokens": 2,
+            "totalTokens": 4129
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": 2,
+          "kind": "sparkdash",
+          "promptTokens": 16414,
+          "prefillTps": 1589.51,
+          "ttftMs": 10326.44,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16414,
+            "completionTokens": 2,
+            "totalTokens": 16416
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": 2,
+          "kind": "sparkdash",
+          "promptTokens": 65568,
+          "prefillTps": 1602.27,
+          "ttftMs": 40922.05,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65568,
+            "completionTokens": 2,
+            "totalTokens": 65570
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": -1,
+          "kind": "holdout",
+          "promptTokens": 5730,
+          "prefillTps": 1144.56,
+          "ttftMs": 5006.27,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5730,
+            "completionTokens": 8,
+            "totalTokens": 5738
+          },
+          "contentPreview": {
+            "first": "This document is a technical deployment guide and",
+            "last": "This document is a technical deployment guide and",
+            "chars": 49
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": -1,
+          "kind": "holdout",
+          "promptTokens": 17530,
+          "prefillTps": 1503.84,
+          "ttftMs": 11656.85,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17530,
+            "completionTokens": 8,
+            "totalTokens": 17538
+          },
+          "contentPreview": {
+            "first": "This document is a Python module implementing EX",
+            "last": "This document is a Python module implementing EX",
+            "chars": 48
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": -1,
+          "kind": "holdout",
+          "promptTokens": 37937,
+          "prefillTps": 1530.21,
+          "ttftMs": 24792.02,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37937,
+            "completionTokens": 8,
+            "totalTokens": 37945
+          },
+          "contentPreview": {
+            "first": "This document is a technical README and code",
+            "last": "This document is a technical README and code",
+            "chars": 44
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": 0,
+          "kind": "holdout",
+          "promptTokens": 5729,
+          "prefillTps": 1310.9,
+          "ttftMs": 4370.27,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5729,
+            "completionTokens": 8,
+            "totalTokens": 5737
+          },
+          "contentPreview": {
+            "first": "This document is a technical deployment guide and",
+            "last": "This document is a technical deployment guide and",
+            "chars": 49
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": 0,
+          "kind": "holdout",
+          "promptTokens": 17526,
+          "prefillTps": 1512.03,
+          "ttftMs": 11591.03,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17526,
+            "completionTokens": 8,
+            "totalTokens": 17534
+          },
+          "contentPreview": {
+            "first": "This document is a vLLM quant",
+            "last": "This document is a vLLM quant",
+            "chars": 29
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": 0,
+          "kind": "holdout",
+          "promptTokens": 37938,
+          "prefillTps": 1539.62,
+          "ttftMs": 24641.22,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37938,
+            "completionTokens": 8,
+            "totalTokens": 37946
+          },
+          "contentPreview": {
+            "first": "This document is a comprehensive technical README for",
+            "last": "This document is a comprehensive technical README for",
+            "chars": 53
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": 1,
+          "kind": "holdout",
+          "promptTokens": 5730,
+          "prefillTps": 1330.91,
+          "ttftMs": 4305.32,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5730,
+            "completionTokens": 8,
+            "totalTokens": 5738
+          },
+          "contentPreview": {
+            "first": "This document is a technical deployment guide and",
+            "last": "This document is a technical deployment guide and",
+            "chars": 49
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": 1,
+          "kind": "holdout",
+          "promptTokens": 17528,
+          "prefillTps": 1497.93,
+          "ttftMs": 11701.48,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17528,
+            "completionTokens": 8,
+            "totalTokens": 17536
+          },
+          "contentPreview": {
+            "first": "This document is a vLLM quant",
+            "last": "This document is a vLLM quant",
+            "chars": 29
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": 1,
+          "kind": "holdout",
+          "promptTokens": 37939,
+          "prefillTps": 1518.76,
+          "ttftMs": 24980.27,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37939,
+            "completionTokens": 8,
+            "totalTokens": 37947
+          },
+          "contentPreview": {
+            "first": "This document is a technical README and code",
+            "last": "This document is a technical README and code",
+            "chars": 44
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": 2,
+          "kind": "holdout",
+          "promptTokens": 5727,
+          "prefillTps": 1268.64,
+          "ttftMs": 4514.27,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5727,
+            "completionTokens": 8,
+            "totalTokens": 5735
+          },
+          "contentPreview": {
+            "first": "This document is a technical deployment guide and",
+            "last": "This document is a technical deployment guide and",
+            "chars": 49
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": 2,
+          "kind": "holdout",
+          "promptTokens": 17531,
+          "prefillTps": 1524.6,
+          "ttftMs": 11498.77,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17531,
+            "completionTokens": 8,
+            "totalTokens": 17539
+          },
+          "contentPreview": {
+            "first": "This document is a vLLM quant",
+            "last": "This document is a vLLM quant",
+            "chars": 29
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": 2,
+          "kind": "holdout",
+          "promptTokens": 37939,
+          "prefillTps": 1545.82,
+          "ttftMs": 24543.02,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37939,
+            "completionTokens": 8,
+            "totalTokens": 37947
+          },
+          "contentPreview": {
+            "first": "This document is a technical README and recipe",
+            "last": "This document is a technical README and recipe",
+            "chars": 46
+          }
+        }
+      ],
+      "canary_results": [
+        {
+          "name": "original-code",
+          "repeat": 0,
+          "expected": "15",
+          "observed": "10",
+          "passed": false
+        },
+        {
+          "name": "bare-code",
+          "repeat": 0,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "explicit-addition",
+          "repeat": 0,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "different-sum",
+          "repeat": 0,
+          "expected": "12",
+          "observed": "12",
+          "passed": true
+        },
+        {
+          "name": "count-elements",
+          "repeat": 0,
+          "expected": "3",
+          "observed": "3",
+          "passed": true
+        },
+        {
+          "name": "arithmetic",
+          "repeat": 0,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "multiplication",
+          "repeat": 0,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "instruction",
+          "repeat": 0,
+          "expected": "ORCHID",
+          "observed": "ORCHID",
+          "passed": true
+        },
+        {
+          "name": "original-code",
+          "repeat": 1,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "bare-code",
+          "repeat": 1,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "explicit-addition",
+          "repeat": 1,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "different-sum",
+          "repeat": 1,
+          "expected": "12",
+          "observed": "12",
+          "passed": true
+        },
+        {
+          "name": "count-elements",
+          "repeat": 1,
+          "expected": "3",
+          "observed": "3",
+          "passed": true
+        },
+        {
+          "name": "arithmetic",
+          "repeat": 1,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "multiplication",
+          "repeat": 1,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "instruction",
+          "repeat": 1,
+          "expected": "ORCHID",
+          "observed": "ORCHID",
+          "passed": true
+        },
+        {
+          "name": "original-code",
+          "repeat": 2,
+          "expected": "15",
+          "observed": "10",
+          "passed": false
+        },
+        {
+          "name": "bare-code",
+          "repeat": 2,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "explicit-addition",
+          "repeat": 2,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "different-sum",
+          "repeat": 2,
+          "expected": "12",
+          "observed": "12",
+          "passed": true
+        },
+        {
+          "name": "count-elements",
+          "repeat": 2,
+          "expected": "3",
+          "observed": "3",
+          "passed": true
+        },
+        {
+          "name": "arithmetic",
+          "repeat": 2,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "multiplication",
+          "repeat": 2,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "instruction",
+          "repeat": 2,
+          "expected": "ORCHID",
+          "observed": "ORCHID",
+          "passed": true
+        },
+        {
+          "name": "vision-red",
+          "repeat": null,
+          "expected": "red",
+          "observed": "Red",
+          "passed": true
+        }
+      ],
+      "default_receipt": [
+        "fc3a0c97690caa27c0b3985ff03254d6587c7bec5346c811e7ef815046fc46a4  start.sh",
+        "811caa77955bfeda00fd42a94ac27de73824eb8b308a2d287d3d857c6a5eeb16  .env.example",
+        "MAX_MODEL_LEN=850000",
+        "MAX_NUM_BATCHED_TOKENS=5120",
+        "GPU_MEM_UTIL=0.85",
+        "CG_ESTIMATE=1"
+      ]
+    },
+    "b2": {
+      "median_prefill_tps": {
+        "4096": 1452.51,
+        "16384": 1625.55,
+        "65536": 1667.18,
+        "docs-short": 1337.46,
+        "code-medium": 1527.49,
+        "mixed-long": 1565.15,
+        "size_geomean": 1578.9461491127734
+      },
+      "prefix_hit_delta": 0.0,
+      "states": {
+        "head": {
+          "image": "sha256:fb6fd7af72ac62a91b64e9574590af3c443c79a40b305798f00aa5155895d6c4",
+          "restarts": 0,
+          "oom": false
+        },
+        "worker": {
+          "image": "sha256:fb6fd7af72ac62a91b64e9574590af3c443c79a40b305798f00aa5155895d6c4",
+          "restarts": 0,
+          "oom": false
+        }
+      },
+      "canaries_passed": 23,
+      "canaries_total": 25,
+      "canary_failures": [
+        {
+          "name": "original-code",
+          "repeat": 0,
+          "expected": "15"
+        },
+        {
+          "name": "original-code",
+          "repeat": 2,
+          "expected": "15"
+        }
+      ],
+      "rows": [
+        {
+          "name": "warmup-512",
+          "rep": -2,
+          "kind": "warmup",
+          "promptTokens": 543,
+          "prefillTps": 618.63,
+          "ttftMs": 877.75,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 543,
+            "completionTokens": 2,
+            "totalTokens": 545
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": -1,
+          "kind": "sparkdash",
+          "promptTokens": 4126,
+          "prefillTps": 1273.17,
+          "ttftMs": 3240.72,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4126,
+            "completionTokens": 2,
+            "totalTokens": 4128
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": -1,
+          "kind": "sparkdash",
+          "promptTokens": 16415,
+          "prefillTps": 1597.03,
+          "ttftMs": 10278.47,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16415,
+            "completionTokens": 2,
+            "totalTokens": 16417
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": -1,
+          "kind": "sparkdash",
+          "promptTokens": 65565,
+          "prefillTps": 1681.72,
+          "ttftMs": 38986.8,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65565,
+            "completionTokens": 2,
+            "totalTokens": 65567
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": 0,
+          "kind": "sparkdash",
+          "promptTokens": 4125,
+          "prefillTps": 1457.75,
+          "ttftMs": 2829.71,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4125,
+            "completionTokens": 2,
+            "totalTokens": 4127
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": 0,
+          "kind": "sparkdash",
+          "promptTokens": 16414,
+          "prefillTps": 1628.92,
+          "ttftMs": 10076.6,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16414,
+            "completionTokens": 2,
+            "totalTokens": 16416
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": 0,
+          "kind": "sparkdash",
+          "promptTokens": 65567,
+          "prefillTps": 1669.02,
+          "ttftMs": 39284.65,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65567,
+            "completionTokens": 2,
+            "totalTokens": 65569
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": 1,
+          "kind": "sparkdash",
+          "promptTokens": 4126,
+          "prefillTps": 1447.59,
+          "ttftMs": 2850.26,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4126,
+            "completionTokens": 2,
+            "totalTokens": 4128
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": 1,
+          "kind": "sparkdash",
+          "promptTokens": 16414,
+          "prefillTps": 1625.55,
+          "ttftMs": 10097.48,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16414,
+            "completionTokens": 2,
+            "totalTokens": 16416
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": 1,
+          "kind": "sparkdash",
+          "promptTokens": 65566,
+          "prefillTps": 1667.18,
+          "ttftMs": 39327.46,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65566,
+            "completionTokens": 2,
+            "totalTokens": 65568
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "4096",
+          "rep": 2,
+          "kind": "sparkdash",
+          "promptTokens": 4127,
+          "prefillTps": 1452.51,
+          "ttftMs": 2841.29,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 4127,
+            "completionTokens": 2,
+            "totalTokens": 4129
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "16384",
+          "rep": 2,
+          "kind": "sparkdash",
+          "promptTokens": 16414,
+          "prefillTps": 1615.71,
+          "ttftMs": 10158.98,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 16414,
+            "completionTokens": 2,
+            "totalTokens": 16416
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "65536",
+          "rep": 2,
+          "kind": "sparkdash",
+          "promptTokens": 65568,
+          "prefillTps": 1661.65,
+          "ttftMs": 39459.6,
+          "completionTokens": 2,
+          "usage": {
+            "promptTokens": 65568,
+            "completionTokens": 2,
+            "totalTokens": 65570
+          },
+          "contentPreview": {
+            "first": "OK",
+            "last": "OK",
+            "chars": 2
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": -1,
+          "kind": "holdout",
+          "promptTokens": 5730,
+          "prefillTps": 1310.07,
+          "ttftMs": 4373.81,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5730,
+            "completionTokens": 8,
+            "totalTokens": 5738
+          },
+          "contentPreview": {
+            "first": "This document is a technical deployment guide and",
+            "last": "This document is a technical deployment guide and",
+            "chars": 49
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": -1,
+          "kind": "holdout",
+          "promptTokens": 17530,
+          "prefillTps": 1532.57,
+          "ttftMs": 11438.32,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17530,
+            "completionTokens": 8,
+            "totalTokens": 17538
+          },
+          "contentPreview": {
+            "first": "This document is a vLLM quant",
+            "last": "This document is a vLLM quant",
+            "chars": 29
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": -1,
+          "kind": "holdout",
+          "promptTokens": 37937,
+          "prefillTps": 1556.58,
+          "ttftMs": 24372.05,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37937,
+            "completionTokens": 8,
+            "totalTokens": 37945
+          },
+          "contentPreview": {
+            "first": "This document is a technical README and code",
+            "last": "This document is a technical README and code",
+            "chars": 44
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": 0,
+          "kind": "holdout",
+          "promptTokens": 5729,
+          "prefillTps": 1329.91,
+          "ttftMs": 4307.82,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5729,
+            "completionTokens": 8,
+            "totalTokens": 5737
+          },
+          "contentPreview": {
+            "first": "This document is a technical deployment guide and",
+            "last": "This document is a technical deployment guide and",
+            "chars": 49
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": 0,
+          "kind": "holdout",
+          "promptTokens": 17526,
+          "prefillTps": 1518.58,
+          "ttftMs": 11541.01,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17526,
+            "completionTokens": 8,
+            "totalTokens": 17534
+          },
+          "contentPreview": {
+            "first": "This document describes a vLLM quant",
+            "last": "This document describes a vLLM quant",
+            "chars": 36
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": 0,
+          "kind": "holdout",
+          "promptTokens": 37938,
+          "prefillTps": 1568.26,
+          "ttftMs": 24191.17,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37938,
+            "completionTokens": 8,
+            "totalTokens": 37946
+          },
+          "contentPreview": {
+            "first": "This document is a comprehensive technical README and",
+            "last": "This document is a comprehensive technical README and",
+            "chars": 53
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": 1,
+          "kind": "holdout",
+          "promptTokens": 5730,
+          "prefillTps": 1337.46,
+          "ttftMs": 4284.24,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5730,
+            "completionTokens": 8,
+            "totalTokens": 5738
+          },
+          "contentPreview": {
+            "first": "This document is a technical README for serving",
+            "last": "This document is a technical README for serving",
+            "chars": 47
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": 1,
+          "kind": "holdout",
+          "promptTokens": 17528,
+          "prefillTps": 1527.49,
+          "ttftMs": 11475.06,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17528,
+            "completionTokens": 8,
+            "totalTokens": 17536
+          },
+          "contentPreview": {
+            "first": "This document is a vLLM quant",
+            "last": "This document is a vLLM quant",
+            "chars": 29
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": 1,
+          "kind": "holdout",
+          "promptTokens": 37939,
+          "prefillTps": 1564.09,
+          "ttftMs": 24256.22,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37939,
+            "completionTokens": 8,
+            "totalTokens": 37947
+          },
+          "contentPreview": {
+            "first": "This document is a technical README and implementation",
+            "last": "This document is a technical README and implementation",
+            "chars": 54
+          }
+        },
+        {
+          "name": "docs-short",
+          "rep": 2,
+          "kind": "holdout",
+          "promptTokens": 5727,
+          "prefillTps": 1339.47,
+          "ttftMs": 4275.58,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 5727,
+            "completionTokens": 8,
+            "totalTokens": 5735
+          },
+          "contentPreview": {
+            "first": "This document is a deployment guide and benchmark",
+            "last": "This document is a deployment guide and benchmark",
+            "chars": 49
+          }
+        },
+        {
+          "name": "code-medium",
+          "rep": 2,
+          "kind": "holdout",
+          "promptTokens": 17531,
+          "prefillTps": 1544.94,
+          "ttftMs": 11347.34,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 17531,
+            "completionTokens": 8,
+            "totalTokens": 17539
+          },
+          "contentPreview": {
+            "first": "This document is a vLLM quant",
+            "last": "This document is a vLLM quant",
+            "chars": 29
+          }
+        },
+        {
+          "name": "mixed-long",
+          "rep": 2,
+          "kind": "holdout",
+          "promptTokens": 37939,
+          "prefillTps": 1565.15,
+          "ttftMs": 24239.81,
+          "completionTokens": 8,
+          "usage": {
+            "promptTokens": 37939,
+            "completionTokens": 8,
+            "totalTokens": 37947
+          },
+          "contentPreview": {
+            "first": "This document is a technical README and code",
+            "last": "This document is a technical README and code",
+            "chars": 44
+          }
+        }
+      ],
+      "canary_results": [
+        {
+          "name": "original-code",
+          "repeat": 0,
+          "expected": "15",
+          "observed": "10",
+          "passed": false
+        },
+        {
+          "name": "bare-code",
+          "repeat": 0,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "explicit-addition",
+          "repeat": 0,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "different-sum",
+          "repeat": 0,
+          "expected": "12",
+          "observed": "12",
+          "passed": true
+        },
+        {
+          "name": "count-elements",
+          "repeat": 0,
+          "expected": "3",
+          "observed": "3",
+          "passed": true
+        },
+        {
+          "name": "arithmetic",
+          "repeat": 0,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "multiplication",
+          "repeat": 0,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "instruction",
+          "repeat": 0,
+          "expected": "ORCHID",
+          "observed": "ORCHID",
+          "passed": true
+        },
+        {
+          "name": "original-code",
+          "repeat": 1,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "bare-code",
+          "repeat": 1,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "explicit-addition",
+          "repeat": 1,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "different-sum",
+          "repeat": 1,
+          "expected": "12",
+          "observed": "12",
+          "passed": true
+        },
+        {
+          "name": "count-elements",
+          "repeat": 1,
+          "expected": "3",
+          "observed": "3",
+          "passed": true
+        },
+        {
+          "name": "arithmetic",
+          "repeat": 1,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "multiplication",
+          "repeat": 1,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "instruction",
+          "repeat": 1,
+          "expected": "ORCHID",
+          "observed": "ORCHID",
+          "passed": true
+        },
+        {
+          "name": "original-code",
+          "repeat": 2,
+          "expected": "15",
+          "observed": "10",
+          "passed": false
+        },
+        {
+          "name": "bare-code",
+          "repeat": 2,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "explicit-addition",
+          "repeat": 2,
+          "expected": "15",
+          "observed": "15",
+          "passed": true
+        },
+        {
+          "name": "different-sum",
+          "repeat": 2,
+          "expected": "12",
+          "observed": "12",
+          "passed": true
+        },
+        {
+          "name": "count-elements",
+          "repeat": 2,
+          "expected": "3",
+          "observed": "3",
+          "passed": true
+        },
+        {
+          "name": "arithmetic",
+          "repeat": 2,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "multiplication",
+          "repeat": 2,
+          "expected": "42",
+          "observed": "42",
+          "passed": true
+        },
+        {
+          "name": "instruction",
+          "repeat": 2,
+          "expected": "ORCHID",
+          "observed": "ORCHID",
+          "passed": true
+        },
+        {
+          "name": "vision-red",
+          "repeat": null,
+          "expected": "red",
+          "observed": "Red",
+          "passed": true
+        }
+      ],
+      "default_receipt": [
+        "fc3a0c97690caa27c0b3985ff03254d6587c7bec5346c811e7ef815046fc46a4  start.sh",
+        "811caa77955bfeda00fd42a94ac27de73824eb8b308a2d287d3d857c6a5eeb16  .env.example",
+        "MAX_MODEL_LEN=850000",
+        "MAX_NUM_BATCHED_TOKENS=5120",
+        "GPU_MEM_UTIL=0.85",
+        "CG_ESTIMATE=1"
+      ]
+    }
+  },
+  "paired_gains_pct": {
+    "a1->b1": {
+      "4096": 3.149516932200269,
+      "16384": 1.6462597750568575,
+      "65536": 18.33804639907708,
+      "docs-short": -0.8581476102358487,
+      "code-medium": 16.015722062843075,
+      "mixed-long": 21.487941031334824,
+      "size_geomean": 7.455256585748438
+    },
+    "a2->b2": {
+      "4096": 4.256357620172113,
+      "16384": 1.0637636467633271,
+      "65536": 2.8063662767394026,
+      "docs-short": 2.026088946525273,
+      "code-medium": 1.0224664854533438,
+      "mixed-long": 1.6582013743651203,
+      "size_geomean": 2.700527643951278
+    }
+  },
+  "combined_gains_pct": {
+    "4096": 3.701460576172555,
+    "16384": 1.354593253013725,
+    "65536": 10.299159301316996,
+    "docs-short": 0.5736319829474867,
+    "code-medium": 8.25984663705761,
+    "mixed-long": 11.131658738275064,
+    "size_geomean": 5.050994995157154
+  },
+  "caveats": [
+    "Two boots per variant; within-boot repetitions are not independent deployment trials.",
+    "Updated 5120-token defaults with CG_ESTIMATE=1; no inference overrides."
+  ],
+  "minimum_mem_available_gib": {
+    "gx10-3166": 3.3104591369628906,
+    "gx10-6105": 6.7819976806640625
+  },
+  "fixture_sha256": "90b7f1d9fe2517f0aff3d82e4062b7d1fdbdf72fe95c68c15b61ae8f6ea321fd",
+  "interpretation": "Cold baseline timing drift is substantial; combined gains are descriptive. Warm-pair size geomean gain2.70% is reported separately."
+}
