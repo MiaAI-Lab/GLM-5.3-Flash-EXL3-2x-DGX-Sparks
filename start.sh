@@ -60,6 +60,8 @@ fi
 # Caller exports (MTP_TOKENS=2 ./start.sh restart) must win over .env.
 _cli_mtp="${MTP_TOKENS-}"
 _cli_spec="${SPEC_METHOD-}"
+_cli_dflash_revision_set="${DFLASH_REVISION+1}"
+_cli_dflash_revision="${DFLASH_REVISION-}"
 _cli_eager="${ENFORCE_EAGER-}"
 _cli_fused="${EXL3_FUSED_MOE-}"
 _cli_row_tile="${EXL3_MOE_ROW_TILE-}"
@@ -95,6 +97,7 @@ source "$SCRIPT_DIR/.env"
 set +a
 [ -n "${_cli_mtp}" ] && MTP_TOKENS="$_cli_mtp"
 [ -n "${_cli_spec}" ] && SPEC_METHOD="$_cli_spec"
+[ -n "${_cli_dflash_revision_set}" ] && DFLASH_REVISION="$_cli_dflash_revision"
 [ -n "${_cli_eager}" ] && ENFORCE_EAGER="$_cli_eager"
 [ -n "${_cli_fused}" ] && EXL3_FUSED_MOE="$_cli_fused"
 [ -n "${_cli_row_tile}" ] && EXL3_MOE_ROW_TILE="$_cli_row_tile"
@@ -182,7 +185,7 @@ DFLASH_CACHE_NAME="${DFLASH_CACHE_NAME:-models--${DFLASH_MODEL//\//--}}"
 # Receipt-matched DFlash2 checkpoint used by the 2026-08-30 TP=2 results.
 # A mutable Hub main has already changed weights, so fresh and warm installs
 # must resolve the same snapshot unless the operator deliberately overrides it.
-DFLASH_REVISION="${DFLASH_REVISION:-dc77ff1c99eeb2df044ee3d4f0094eb033fee410}"
+DFLASH_REVISION="${DFLASH_REVISION-dc77ff1c99eeb2df044ee3d4f0094eb033fee410}"
 DFLASH_TOKENS="${DFLASH_TOKENS:-7}"
 # 2 = shard the ~2.3 GiB DFlash2 drafter across TP (C4 keep, 2026-08-30:
 # idle 8k 938 / 16k 972 / 100k 997; decode structured 65.1 / prose 27.1).
@@ -468,7 +471,7 @@ ensure_dflash_refs_main() {
 
 resolve_dflash_dir() {
     local ref="$DFLASH_PATH/refs/main" hash dir
-    if [ -n "${DFLASH_REVISION:-}" ] && [ -d "$DFLASH_PATH/snapshots/$DFLASH_REVISION" ]; then
+    if [ -n "${DFLASH_REVISION:-}" ]; then
         hash="$DFLASH_REVISION"
     else
         ensure_dflash_refs_main
@@ -922,9 +925,7 @@ download_dflash() {
     local -a dflash_args=("$DFLASH_MODEL")
     [ -n "${DFLASH_REVISION:-}" ] && dflash_args+=(--revision "$DFLASH_REVISION")
     HF_HOME="$HF_CACHE_DIR" "${HF_BIN_CMD[@]}" download "${dflash_args[@]}"
-    selected="$(resolve_dflash_dir)"
-    have=1
-    [ "${have:-0}" -ge 1 ] || die "DFlash2 download finished without model.safetensors"
+    resolve_dflash_dir >/dev/null
     log "DFlash2 download complete"
 }
 
