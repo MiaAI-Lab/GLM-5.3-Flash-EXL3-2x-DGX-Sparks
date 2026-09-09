@@ -65,7 +65,28 @@ def test_empty_repo_counts_zero() -> None:
         assert result.stdout.strip() == "0", result.stdout
 
 
+def test_cached_blob_links_count_but_dangling_links_do_not() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        active = repo / "snapshots" / "active"
+        active.mkdir(parents=True)
+        (repo / "refs").mkdir()
+        (repo / "refs" / "main").write_text("active", encoding="utf-8")
+        (repo / "blobs").mkdir()
+        (repo / "blobs" / "present").touch()
+        (active / "present.safetensors").symlink_to("../../blobs/present")
+        (active / "missing.safetensors").symlink_to("../../blobs/missing")
+        result = run_bash(
+            "set -euo pipefail\n"
+            + function("count_shards")
+            + f"count_shards {str(repo)!r}\n"
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "1", result.stdout
+
+
 if __name__ == "__main__":
     test_target_completeness_is_scoped_to_active_snapshot()
     test_empty_repo_counts_zero()
+    test_cached_blob_links_count_but_dangling_links_do_not()
     print("snapshot-scoped count guard OK")

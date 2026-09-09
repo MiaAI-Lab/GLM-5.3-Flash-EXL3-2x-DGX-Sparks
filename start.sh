@@ -429,7 +429,7 @@ count_shards() {
         printf '0'
         return
     fi
-    find "$repo_path/snapshots/$ref" -maxdepth 1 -type f -name '*.safetensors' 2>/dev/null \
+    find -L "$repo_path/snapshots/$ref" -maxdepth 1 -type f -name '*.safetensors' 2>/dev/null \
         | wc -l | tr -d '[:space:]' || true
 }
 
