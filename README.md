@@ -33,7 +33,13 @@ GPU-driven launches per MoE layer (gather, gate/up + SwiGLU, down + scatter) bui
 device-side segment tables — no per-expert launches, no weight repacking, no host sync
 (`overlay/exl3_fat_moe.cu`, Fable's design, E2 rounding boundaries restored).
 
-**Latest run — 2026-09-07, measured with [sparkDash](https://github.com/MiaAI-Lab/sparkDash).**
+**FP32 activation follow-up — 2026-09-09.** Replacing the already-fused E3 epilogue's FP64 exponential
+with accurate FP32 libdevice math measured **+3.32%** cold-prefill size-ladder throughput in native E3 A/B/A/B
+(+2.08% and +4.58% in the two pairs). This used 850K / utilization 0.85 with the disclosed `CG_ESTIMATE=0`
+compatibility override, not untouched defaults. A native image rebuild is required.
+See [validation, raw results, reproduction steps, and baseline caveats](docs/e3-activation-validation.md).
+
+**Earlier run — 2026-09-07, measured with [sparkDash](https://github.com/MiaAI-Lab/sparkDash).**
 Shipped E3 image `glm53-flash-sm121:e3-20260907` at `MAX_MODEL_LEN=900000`, `GPU_MEM_UTIL=0.86`,
 `GLM53_INDEXER_WORKSPACE=rightsize`, `EXL3_TEMP_ROWS_FUSED=32`, MNBT 7168, `MAX_NUM_SEQS=4`,
 DFlash2 k=7 draft TP=2, C4, thinking off.

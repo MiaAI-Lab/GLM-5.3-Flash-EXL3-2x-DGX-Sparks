@@ -19,7 +19,20 @@
 // streams (gate, up) for the same 128 intermediate columns so the SwiGLU and
 // the down-projection input Hadamard fuse into its epilogue.
 
+// Call accurate FP32 libdevice exp directly: ordinary expf is lowered to
+// __expf by exllamav3's --use_fast_math build. Both native and additive builds
+// must retain the accurate exponential at the activation rounding boundary.
+extern "C" __device__ float __nv_expf(float);
+
 namespace {
+
+__device__ __forceinline__ float fm_swiglu_fp32(float g, float u)
+{
+    // Explicit round-to-nearest operations keep sigmoid * gate * up ordered.
+    // Global fast-math FTZ still applies to FP32 subnormals; this is not a
+    // blanket override of the compilation flags for the surrounding kernel.
+    return __fmul_rn(__fmul_rn(__fdiv_rn(1.0f, __fadd_rn(1.0f, __nv_expf(-g))), g), u);
+}
 
 constexpr int FM_THREADS = 256;                 // 8 warps
 constexpr int FM_WARPS = FM_THREADS / 32;
@@ -357,16 +370,14 @@ void fm_gateup_kernel(
                     // full precision) * g * u in fp32; act_h.copy_() rounds to
                     // fp16; had_hf_r_128_inner<pre_scale> multiplies by
                     // down.suh in fp16; fp32 Hadamard; fp16 store.
-                    // exllamav3 builds with --use_fast_math (expf -> __expf,
-                    // approximate division); the double-precision exp and the
-                    // IEEE-rounded __fdiv_rn are immune to that flag, so the
-                    // result is the same whether this file is compiled inside
-                    // exllamav3_ext or as the standalone module.
+                    // Use accurate FP32 exp rather than promoting to FP64. This
+                    // targets Torch's FP32 sigmoid, not bit identity with the
+                    // previous double-exp approximation at rounding midpoints.
                     float4 act;
-                    act.x = __fdiv_rn(1.0f, 1.0f + (float) exp(-(double) g.x)) * g.x * u.x;
-                    act.y = __fdiv_rn(1.0f, 1.0f + (float) exp(-(double) g.y)) * g.y * u.y;
-                    act.z = __fdiv_rn(1.0f, 1.0f + (float) exp(-(double) g.z)) * g.z * u.z;
-                    act.w = __fdiv_rn(1.0f, 1.0f + (float) exp(-(double) g.w)) * g.w * u.w;
+                    act.x = fm_swiglu_fp32(g.x, u.x);
+                    act.y = fm_swiglu_fp32(g.y, u.y);
+                    act.z = fm_swiglu_fp32(g.z, u.z);
+                    act.w = fm_swiglu_fp32(g.w, u.w);
                     half4 ha(__floats2half2_rn(act.x, act.y), __floats2half2_rn(act.z, act.w));
                     half4 hs = *reinterpret_cast<const half4*>(suh_d + lane * 4);
                     ha.x = __hmul2(ha.x, hs.x);
