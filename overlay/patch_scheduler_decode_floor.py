@@ -41,7 +41,7 @@ def _glm53_mixed_prefill_policy(running, current):
 
     None = no extra policy. 0 = skip this prefill this step. N>0 = cap.
     """
-    raw = os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "skip").strip().lower()
+    raw = os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "0").strip().lower()
     if raw in ("0", "off", "no"):
         return None
     if raw in ("skip", "-1"):
@@ -131,7 +131,7 @@ def main() -> int:
     text = replace_once(text, RUNNING_OLD, RUNNING_NEW, "running-prefill")
     text = replace_once(text, WAITING_OLD, WAITING_NEW, "waiting-prefill")
     P.write_text(text)
-    cap = os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "skip")
+    cap = os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "0")
     print(f"patched {P.name} (mixed prefill policy={cap})")
     return 0
 

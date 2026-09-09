@@ -279,8 +279,9 @@ READY_TIMEOUT="${READY_TIMEOUT:-3600}"
 # 1 = suppress client stop strings until </think> (DSpark #42 class).
 GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # Mixed-step prefill policy when a peer is already decoding (issue #6).
-# skip = do not mix; N>0 = cap tokens; 0 = off.
-GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
+# 0 = off (default since 2026-09-09: skip starved every new request behind running decodes,
+# which serialises coding agents' tool round-trips); skip = do not mix; N>0 = cap tokens.
+GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-0}"
 # Adaptive verification length (overlay/patch_adaptive_k.py). off = stock k=7 every step.
 GLM53_ADAPTIVE_K="${GLM53_ADAPTIVE_K:-off}"
 GLM53_ADAPTIVE_K_SET="${GLM53_ADAPTIVE_K_SET:-2,4,7}"
@@ -290,8 +291,10 @@ GLM53_ADAPTIVE_K_MIN_STEPS="${GLM53_ADAPTIVE_K_MIN_STEPS:-4}"
 GLM53_ADAPTIVE_K_SATURATE="${GLM53_ADAPTIVE_K_SATURATE:-max}"
 GLM53_ADAPTIVE_K_HIST="${GLM53_ADAPTIVE_K_HIST:-200}"
 # Dense projections FP8 weight-only via Marlin (overlay/patch_dense_fp8.py). off = BF16 as shipped.
-# PROVISIONAL (changes target numerics; needs a KLD panel). Groups: shared,dense,kda,mla.
-GLM53_DENSE_FP8="${GLM53_DENSE_FP8:-off}"
+# Default dense,kda since 2026-09-09: KL panel vs BF16 0.005-0.017 nats/token on 57k tokens of code/prose
+# (flat across 0-32k depth, argmax agreement 95-98 %, ~2x the run-to-run floor), tool-calling eval unchanged.
+# Groups: shared,dense,kda,mla; off = BF16.
+GLM53_DENSE_FP8="${GLM53_DENSE_FP8:-dense,kda}"
 # Sparse-indexer prefill gather workspace (overlay/patch_indexer_workspace.py).
 # stock = max_model_len * 40 entries (5036.40 MB locked at 1M, measured);
 # rightsize = the legal per-step maximum, ~+26% KV (default since 2026-09-07:

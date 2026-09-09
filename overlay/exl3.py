@@ -1724,7 +1724,7 @@ class Exl3Config(QuantizationConfig):
 
 # ----------------------------------------------------------------------------
 # [glm53-dense-fp8] Optional FP8 weight-only (Marlin) path for the BF16 dense
-# projections. GLM53_DENSE_FP8=off (default) | comma list of groups:
+# projections. GLM53_DENSE_FP8=dense,kda (default since 2026-09-09) | off | comma list of groups:
 #   shared  mlp.shared_experts.{gate_up_proj,down_proj}
 #   dense   mlp.{gate_up_proj,down_proj} of the dense-MLP layers
 #   kda     self_attn.{in_proj_qkvbfg_a,f_b_proj,g_b_proj,o_proj} of KDA layers
@@ -1732,8 +1732,9 @@ class Exl3Config(QuantizationConfig):
 #           stays BF16: MLA reads its weight directly for the absorbed matmuls)
 # Weights load as BF16 exactly as today (all custom loaders untouched, ABLIT edits
 # o_proj at the end of load_weights), then process_weights_after_loading quantizes
-# per output channel to FP8 e4m3 and repacks for the Marlin kernel. PROVISIONAL:
-# changes target numerics; needs a KLD panel before it can become a default.
+# per output channel to FP8 e4m3 and repacks for the Marlin kernel. KL panel (2026-09-09,
+# scripts/quality/kl_panel.py, logs/quality-20260909): 0.005-0.017 nats/token vs BF16 on 57k
+# tokens of code/prose, flat across 0-32k depth, argmax agreement 95-98 %; tool-calling unchanged.
 # ----------------------------------------------------------------------------
 _GLM53_DENSE_FP8_SUFFIXES = {
     "shared": (".mlp.shared_experts.gate_up_proj", ".mlp.shared_experts.down_proj"),
@@ -1744,7 +1745,7 @@ _GLM53_DENSE_FP8_SUFFIXES = {
 
 
 def _glm53_dense_fp8_groups() -> set[str]:
-    raw = os.environ.get("GLM53_DENSE_FP8", "off").strip().lower()
+    raw = os.environ.get("GLM53_DENSE_FP8", "dense,kda").strip().lower()
     if raw in ("", "off", "0", "no", "none"):
         return set()
     if raw in ("all", "on", "1"):

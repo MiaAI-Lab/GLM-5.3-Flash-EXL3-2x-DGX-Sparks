@@ -3,7 +3,7 @@
 GLM53_DENSE_FP8 is on, let the KDA and MLA constructors keep the quant config so
 their projections reach Exl3Config.get_quant_method (idempotent, fail closed).
 
-GLM53_DENSE_FP8=off (default): only the module file is refreshed (its new code
+GLM53_DENSE_FP8=off: only the module file is refreshed (its new code
 is unreachable: get_quant_method returns UnquantizedLinearMethod for every
 LinearBase, exactly as before). Anything else: also patch kda.py / model.py.
 """
@@ -60,7 +60,7 @@ def main() -> int:
         print(f"installed {src} -> {dst}")
     else:
         print(f"{dst.name}: already current")
-    mode = os.environ.get("GLM53_DENSE_FP8", "off").strip().lower()
+    mode = os.environ.get("GLM53_DENSE_FP8", "dense,kda").strip().lower()
     if mode in ("", "off", "0", "no", "none"):
         print("GLM53_DENSE_FP8=off — constructors untouched")
         return 0
