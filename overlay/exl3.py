@@ -903,7 +903,7 @@ def _fat_scratch(
         int(gate.trellis.shape[-1]),
     )
     scratch = _FAT_SCRATCH_CACHE.get(key)
-    if scratch is not None and int(scratch["h"].shape[0]) >= rows:
+    if scratch is not None and int(scratch["h13"].shape[0]) >= rows:
         return scratch
 
     in_tiles, out_tiles, k_words = map(int, gate.trellis.shape)
@@ -921,9 +921,6 @@ def _fat_scratch(
         ),
         "w2": torch.empty(
             (intermediate, hidden), dtype=torch.float16, device=device
-        ),
-        "h": torch.empty(
-            (capacity, hidden), dtype=torch.float16, device=device
         ),
         "h13": torch.empty(
             (capacity, hidden), dtype=torch.float16, device=device
@@ -987,6 +984,7 @@ def apply_exl3_batched_fat(
 ) -> torch.Tensor:
     """Run fat experts with persistent buffers and optional direct trellis GEMM."""
     from .exl3_swiglu import fat_swiglu
+    from .exl3_gather_hadamard import gather_hadamard
 
     ext = load_exllamav3_ext()
     offset = 0
@@ -1004,10 +1002,8 @@ def apply_exl3_batched_fat(
         scratch = _fat_scratch(xh.device, n_rows, gate)
         intermediate = int(gate.out_features)
 
-        h = scratch["h"][:n_rows]
         h13 = scratch["h13"][:n_rows]
-        torch.index_select(xh, 0, token_idx, out=h)
-        ext.had_r_128(h, h13, gate.suh, None, 1.0)
+        gather_hadamard(xh, token_idx, gate.suh, h13)
 
         packed13 = scratch["packed13"]
         out_tiles = int(gate.trellis.shape[1])
