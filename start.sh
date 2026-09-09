@@ -225,7 +225,7 @@ LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
 SKIP_MM_PROFILING="${SKIP_MM_PROFILING:-1}"
 # JSON default cannot sit in ${LIMIT_MM:-{...}} — } ends the expansion.
 if [ -z "${LIMIT_MM:-}" ]; then
-    LIMIT_MM='{"image":4,"video":1}'
+    LIMIT_MM='{"image":100,"video":1}'
 fi
 TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.1a}"
 FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-12.1a}"
