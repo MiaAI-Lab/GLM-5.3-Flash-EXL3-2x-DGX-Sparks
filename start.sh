@@ -57,79 +57,23 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
     cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
     printf '\033[1;36m[glm53-exl3]\033[0m wrote .env from .env.example — edit HEAD_IP / WORKER_IP if needed\n'
 fi
-# Caller exports (MTP_TOKENS=2 ./start.sh restart) must win over .env.
-_cli_mtp="${MTP_TOKENS-}"
-_cli_spec="${SPEC_METHOD-}"
-_cli_dflash_revision_set="${DFLASH_REVISION+1}"
-_cli_dflash_revision="${DFLASH_REVISION-}"
-_cli_eager="${ENFORCE_EAGER-}"
-_cli_fused="${EXL3_FUSED_MOE-}"
-_cli_row_tile="${EXL3_MOE_ROW_TILE-}"
-_cli_temp_rows="${EXL3_TEMP_ROWS_FUSED-}"
-_cli_fat_sorted="${EXL3_FAT_SORTED-}"
-_cli_fat_batched="${EXL3_FAT_BATCHED-}"
-_cli_fat_kernel="${EXL3_FAT_KERNEL-}"
-_cli_fat_grouped="${EXL3_FAT_GROUPED-}"
-_cli_mnbt="${MAX_NUM_BATCHED_TOKENS-}"
-_cli_long_prefill_set="${LONG_PREFILL_TOKEN_THRESHOLD+1}"
-_cli_long_prefill="${LONG_PREFILL_TOKEN_THRESHOLD-}"
-_cli_image="${IMAGE-}"
-_cli_util="${GPU_MEM_UTIL-}"
-_cli_lm="${LANGUAGE_MODEL_ONLY-}"
-_cli_max_num_seqs="${MAX_NUM_SEQS-}"
-_cli_max_model_len="${MAX_MODEL_LEN-}"
-_cli_adaptive_k="${GLM53_ADAPTIVE_K-}"
-_cli_adaptive_k_set="${GLM53_ADAPTIVE_K_SET-}"
-_cli_dense_fp8="${GLM53_DENSE_FP8-}"
-_cli_ablit="${ABLIT-}"
-_cli_ablit_method="${ABLIT_METHOD-}"
-_cli_ablit_direction="${ABLIT_DIRECTION-}"
-_cli_ablit_layers="${ABLIT_LAYERS-}"
-_cli_ablit_alpha="${ABLIT_ALPHA-}"
-_cli_ablit_mtp="${ABLIT_INCLUDE_MTP-}"
-# Setness-aware: an explicitly empty caller value is an operator error and
-# must reach validate_numeric_config, not be swallowed by a .env value.
-_cli_indexer_workspace_set="${GLM53_INDEXER_WORKSPACE+1}"
-_cli_indexer_workspace="${GLM53_INDEXER_WORKSPACE-}"
-_cli_spinwait_ms_set="${GLM53_SPINWAIT_MS+1}"
-_cli_spinwait_ms="${GLM53_SPINWAIT_MS-}"
-# An empty caller value must disable a default set in .env.
-_cli_default_effort_set="${GLM53_DEFAULT_REASONING_EFFORT+1}"
-_cli_default_effort="${GLM53_DEFAULT_REASONING_EFFORT-}"
+# Caller exports, including explicit empties, must win over .env.
+# Snapshot exports rather than parsing .env: it is sourced as shell code.
+_caller_overrides=()
+while IFS= read -r _k; do
+    _flags="$(declare -p "$_k")"
+    _flags="${_flags#declare -}"; _flags="${_flags%% *}"
+    case "$_flags" in *r*) continue ;; esac
+    if [ -n "${!_k+x}" ]; then _caller_overrides+=("$_k=${!_k}"); fi
+done < <(compgen -e)
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
 set +a
-[ -n "${_cli_mtp}" ] && MTP_TOKENS="$_cli_mtp"
-[ -n "${_cli_spec}" ] && SPEC_METHOD="$_cli_spec"
-[ -n "${_cli_dflash_revision_set}" ] && DFLASH_REVISION="$_cli_dflash_revision"
-[ -n "${_cli_eager}" ] && ENFORCE_EAGER="$_cli_eager"
-[ -n "${_cli_fused}" ] && EXL3_FUSED_MOE="$_cli_fused"
-[ -n "${_cli_row_tile}" ] && EXL3_MOE_ROW_TILE="$_cli_row_tile"
-[ -n "${_cli_temp_rows}" ] && EXL3_TEMP_ROWS_FUSED="$_cli_temp_rows"
-[ -n "${_cli_fat_sorted}" ] && EXL3_FAT_SORTED="$_cli_fat_sorted"
-[ -n "${_cli_fat_batched}" ] && EXL3_FAT_BATCHED="$_cli_fat_batched"
-[ -n "${_cli_fat_kernel}" ] && EXL3_FAT_KERNEL="$_cli_fat_kernel"
-[ -n "${_cli_fat_grouped}" ] && EXL3_FAT_GROUPED="$_cli_fat_grouped"
-[ -n "${_cli_mnbt}" ] && MAX_NUM_BATCHED_TOKENS="$_cli_mnbt"
-[ -n "${_cli_long_prefill_set}" ] && LONG_PREFILL_TOKEN_THRESHOLD="$_cli_long_prefill"
-[ -n "${_cli_image}" ] && IMAGE="$_cli_image"
-[ -n "${_cli_util}" ] && GPU_MEM_UTIL="$_cli_util"
-[ -n "${_cli_lm}" ] && LANGUAGE_MODEL_ONLY="$_cli_lm"
-[ -n "${_cli_max_num_seqs}" ] && MAX_NUM_SEQS="$_cli_max_num_seqs"
-[ -n "${_cli_max_model_len}" ] && MAX_MODEL_LEN="$_cli_max_model_len"
-[ -n "${_cli_adaptive_k}" ] && GLM53_ADAPTIVE_K="$_cli_adaptive_k"
-[ -n "${_cli_adaptive_k_set}" ] && GLM53_ADAPTIVE_K_SET="$_cli_adaptive_k_set"
-[ -n "${_cli_dense_fp8}" ] && GLM53_DENSE_FP8="$_cli_dense_fp8"
-[ -n "${_cli_ablit}" ] && ABLIT="$_cli_ablit"
-[ -n "${_cli_ablit_method}" ] && ABLIT_METHOD="$_cli_ablit_method"
-[ -n "${_cli_ablit_direction}" ] && ABLIT_DIRECTION="$_cli_ablit_direction"
-[ -n "${_cli_ablit_layers}" ] && ABLIT_LAYERS="$_cli_ablit_layers"
-[ -n "${_cli_ablit_alpha}" ] && ABLIT_ALPHA="$_cli_ablit_alpha"
-[ -n "${_cli_ablit_mtp}" ] && ABLIT_INCLUDE_MTP="$_cli_ablit_mtp"
-[ -n "${_cli_indexer_workspace_set}" ] && GLM53_INDEXER_WORKSPACE="$_cli_indexer_workspace"
-[ -n "${_cli_spinwait_ms_set}" ] && GLM53_SPINWAIT_MS="$_cli_spinwait_ms"
-[ -n "${_cli_default_effort_set}" ] && GLM53_DEFAULT_REASONING_EFFORT="$_cli_default_effort"
+# Each entry is NAME=value; quoting preserves whitespace and empty values.
+# shellcheck disable=SC2163
+for _kv in ${_caller_overrides[@]+"${_caller_overrides[@]}"}; do export "$_kv"; done
+unset _k _kv _flags _caller_overrides
 
 # ----------------------------- configuration -------------------------------
 MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"
