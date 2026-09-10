@@ -138,23 +138,24 @@ def test_restart_validates_before_stop() -> None:
     assert validation < restart
 
 
-def test_tp4_rejects_swa_override() -> None:
+def test_tp4_rejects_retention_override() -> None:
     script = (
         guard_source(START_TP4)
         + '\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4; '
         + 'MAX_NUM_BATCHED_TOKENS=1024; GLM53_INDEXER_WORKSPACE=stock; '
-        + 'GLM53_SPINWAIT_MS=stock; GLM53_APC_RETENTION_INTERVAL_SWA="$1"\n'
+        + 'GLM53_SPINWAIT_MS=stock; export "$1=$2"\n'
         + 'validate_numeric_config\n'
     )
-    for value, expected in (("", 0), ("0", 2), ("14336", 2)):
-        result = subprocess.run(
-            ["bash", "-c", script, "test", value],
-            text=True,
-            capture_output=True,
-            check=False,
-            env={**os.environ, "LC_ALL": "C"},
-        )
-        assert result.returncode == expected, (value, result.stderr)
+    for knob in ("GLM53_APC_RETENTION_INTERVAL", "GLM53_APC_RETENTION_INTERVAL_SWA"):
+        for value, expected in (("", 0), ("0", 2), ("14336", 2)):
+            result = subprocess.run(
+                ["bash", "-c", script, "test", knob, value],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "LC_ALL": "C"},
+            )
+            assert result.returncode == expected, (value, result.stderr)
 
     source = START_TP4.read_text()
     assert '_cli_apc_swa_set="${GLM53_APC_RETENTION_INTERVAL_SWA+1}"' in source
@@ -167,5 +168,5 @@ if __name__ == "__main__":
     test_indexer_workspace_enum()
     test_spinwait_numeric_contract()
     test_restart_validates_before_stop()
-    test_tp4_rejects_swa_override()
+    test_tp4_rejects_retention_override()
     print("numeric config tests: PASS")

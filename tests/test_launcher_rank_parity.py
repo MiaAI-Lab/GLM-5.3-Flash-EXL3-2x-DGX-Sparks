@@ -73,12 +73,10 @@ CONTAINER_NAMES = LAUNCHER_KNOBS + (
 PINNED = (
     "patch_hybrid_prefix_hit.py",
     "patch_apc_per_group_retention.py",
-    "patch_apc_fine_grained_hits.py",
 )
 APC_HOST_VARS = {
     "APC_PATCH_HOST": "patch_hybrid_prefix_hit.py",
     "PERGROUP_PATCH_HOST": "patch_apc_per_group_retention.py",
-    "FINEHIT_PATCH_HOST": "patch_apc_fine_grained_hits.py",
 }
 
 SEP = "\x1f"
@@ -506,10 +504,10 @@ def part_c(h: Harness) -> None:
     text = source()
     order = overlay_order()
     idx = {name: order.index(name) for name in PINNED if name in order}
-    check(len(idx) == 3, f"C1 all three prefix-cache overlays are listed: {sorted(idx)}")
+    check(len(idx) == 2, f"C1 both prefix-cache overlays are listed: {sorted(idx)}")
     check(
-        len(idx) == 3 and idx[PINNED[0]] < idx[PINNED[1]] < idx[PINNED[2]],
-        "C1 pinned order hybrid -> per-group -> fine-grained",
+        len(idx) == 2 and idx[PINNED[0]] < idx[PINNED[1]],
+        "C1 pinned order hybrid -> per-group",
     )
     check(
         'emit_overlay_block >> "$HEAD_SCRIPT"' in text and 'emit_overlay_block >> "$WORKER_SCRIPT"' in text,
@@ -533,9 +531,8 @@ def part_c(h: Harness) -> None:
             body = s.read_text()
             check(
                 body.index("/opt/glm53/patch_hybrid_prefix_hit.py")
-                < body.index("/opt/glm53/patch_apc_per_group_retention.py")
-                < body.index("/opt/glm53/patch_apc_fine_grained_hits.py"),
-                f"C3 {s.name}: hybrid -> per-group -> fine-grained in the generated script",
+                < body.index("/opt/glm53/patch_apc_per_group_retention.py"),
+                f"C3 {s.name}: hybrid -> per-group in the generated script",
             )
             check(
                 "python3 /opt/glm53/patch_ablit.py" in body

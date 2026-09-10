@@ -1100,14 +1100,8 @@ sync_weights() {
 }
 
 # ------------------------ inner container scripts --------------------------
-# Overlay application order inside BOTH rank containers. write_inner_scripts
-# emits this one list verbatim into the head and the worker inner script, so
-# the two ranks cannot drift apart. Pinned for the prefix-cache overlays,
-# which share the kv_cache_coordinator.py helper insert point:
-#   patch_hybrid_prefix_hit -> patch_apc_per_group_retention -> patch_apc_fine_grained_hits
-# (hybrid = Mia's partial-hit base, per-group = PR #83, fine-grained = PR #84).
-# Entries that are not mounted are skipped in-container (`[ -f ]`); which ones
-# MUST exist is decided by the overlay artifact guard above, not here.
+# Both ranks apply the same checked overlays. Hybrid replay precedes retention
+# because they share the coordinator helper insertion point.
 GLM53_OVERLAY_ORDER=(
     patch_glm_video_placeholders.py
     patch_suppress_stops_in_reasoning.py
@@ -1115,7 +1109,6 @@ GLM53_OVERLAY_ORDER=(
     patch_glm5_drafter_group.py
     patch_hybrid_prefix_hit.py
     patch_apc_per_group_retention.py
-    patch_apc_fine_grained_hits.py
     patch_xgrammar_termination.py
     patch_kpool_tail_slotmap.py
     patch_spinwait.py

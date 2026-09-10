@@ -403,6 +403,10 @@ validate_numeric_config() {
     _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-stock}" \
         stock rightsize || return
     _glm53_validate_spinwait_ms || return
+    if [ -n "${GLM53_APC_RETENTION_INTERVAL:-}" ]; then
+        echo "GLM53_APC_RETENTION_INTERVAL is supported only by start.sh (TP=2); unset it for start-tp4.sh" >&2
+        return 2
+    fi
     if [ -n "${GLM53_APC_RETENTION_INTERVAL_SWA:-}" ]; then
         echo "GLM53_APC_RETENTION_INTERVAL_SWA is supported only by start.sh (TP=2); unset it for start-tp4.sh" >&2
         return 2

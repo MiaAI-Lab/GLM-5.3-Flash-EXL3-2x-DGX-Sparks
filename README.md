@@ -463,6 +463,9 @@ took 112.49 s instead of 14.70 s, and a branch at 90% took 99.89 s instead of
 111,104. All tested answers were correct. These are sequential histories,
 not four simultaneously active 210K streams.
 
+The global launcher spelling is `GLM53_APC_RETENTION_INTERVAL` (TP=2 only).
+Leave it unset for normal use; TP=4 rejects either retention override.
+
 Both retention knobs remain unset by default. Keep that default unless the
 tradeoff fits the workload. SWA-only sparse retention with a dense target is
 a separate configuration; the all-zero results do not qualify it. See the
