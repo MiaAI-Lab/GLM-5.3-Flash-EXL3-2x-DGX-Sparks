@@ -131,7 +131,7 @@ def test_spinwait_caller_capture_is_setness_aware() -> None:
 
 def test_every_env_example_key_preserves_caller_setness() -> None:
     keys = re.findall(
-        r"^([A-Za-z_][A-Za-z0-9_]*)=", (ROOT / ".env.example").read_text(), re.M
+        r"^(?:# )?([A-Za-z_][A-Za-z0-9_]*)=", (ROOT / ".env.example").read_text(), re.M
     )
     keys.append("FUTURE_LAUNCHER_KNOB")
     dotenv = "".join(f"{key}=dotenv\n" for key in keys)
