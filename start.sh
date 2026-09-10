@@ -438,6 +438,7 @@ validate_overlay_artifacts() {
     local video_end='    print("glm53: overlay install ok aligned=True", file=sys.stderr)'
     local ablit_marker='MARKER = "ABLIT-HOOK"'
     local -a artifacts=(
+        "$EXL3_OVERLAY_HOST|class Exl3Config(QuantizationConfig):|        )"
         "$VIDEO_PATCH_HOST|vllm/model_executor/layers/|$video_end"
         "$STOP_PATCH_HOST|[suppress-stops-in-reasoning]|    raise SystemExit(main(sys.argv))"
         "$SCHED_PATCH_HOST|[glm53-decode-floor]|$main_guard"

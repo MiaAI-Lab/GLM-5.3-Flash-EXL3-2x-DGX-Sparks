@@ -147,6 +147,7 @@ def stream_chat(messages: list[dict], max_tokens: int) -> dict:
     response, started = request("/v1/chat/completions", payload)
     first = None
     chunks: list[str] = []
+    reasoning_chunks: list[str] = []
     usage: dict = {}
     finish_reason = None
     with response:
@@ -163,10 +164,12 @@ def stream_chat(messages: list[dict], max_tokens: int) -> dict:
                 continue
             finish_reason = choices[0].get("finish_reason") or finish_reason
             part = choices[0].get("delta") or {}
-            value = part.get("content") or part.get("reasoning") or part.get("reasoning_content") or ""
-            if value:
+            content = part.get("content") or ""
+            reasoning = part.get("reasoning") or part.get("reasoning_content") or ""
+            if content or reasoning:
                 first = first or time.perf_counter()
-                chunks.append(value)
+            chunks.append(content)
+            reasoning_chunks.append(reasoning)
     ended = time.perf_counter()
     prompt_tokens = usage.get("prompt_tokens")
     if not isinstance(prompt_tokens, int):
@@ -188,7 +191,7 @@ def stream_chat(messages: list[dict], max_tokens: int) -> dict:
         "ttft_s": round(first - started, 3) if first else None,
         "wall_s": round(ended - started, 3), "usage": usage,
         "metric_delta": metrics, "finish_reason": finish_reason,
-        "content": "".join(chunks),
+        "content": "".join(chunks), "reasoning": "".join(reasoning_chunks),
     }
 
 
@@ -296,7 +299,7 @@ def main() -> int:
             "probe_identity": probe_id,
             "lcp_tokens": lcp(base_id["tokens"], probe_tokens),
             "lcp_fraction": round(lcp(base_id["tokens"], probe_tokens) / len(base_id["tokens"]), 6),
-            "expected": expected, "expected_found": expected.lower() in content.lower(),
+            "expected": expected, "expected_found": expected.casefold() == content.strip().casefold(),
             "stale_values_found": [value for value in ORIGINAL.values()
                 if value != expected and value.lower() in content.lower()],
             "probe": probe,

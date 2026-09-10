@@ -132,7 +132,7 @@ def host_vars() -> dict[str, str]:
     assignment in start.sh, from the real assignment, not from substring hits."""
     out: dict[str, str] = {}
     for m in re.finditer(
-        r'^([A-Z_]+_PATCH_HOST)="\$\{\1:-\$SCRIPT_DIR/overlay/([A-Za-z0-9_.]+)\}"$', source(), re.M
+        r'^([A-Z_]+_(?:PATCH|OVERLAY)_HOST)="\$\{\1:-\$SCRIPT_DIR/overlay/([A-Za-z0-9_.]+)\}"$', source(), re.M
     ):
         out[m.group(1)] = m.group(2)
     return out
