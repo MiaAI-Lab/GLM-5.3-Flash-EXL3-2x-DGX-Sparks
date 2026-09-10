@@ -431,7 +431,7 @@ MARK/anchor, matching `overlay/patch_hybrid_prefix_hit.py`.
 * Depends on `_glm53_is_draft_swa_spec` / `_glm53_inner_kv_spec` (`C:33-43`); inserts them if the hybrid
   patch has not run, so ordering between the two overlays does not matter. Asserted, not assumed: the
   host test applies both overlays to a **pristine** copy in both orders and checks that they succeed, are
-  idempotent under re-application in any order, and produce **byte-identical** files (§8.1).
+  byte-idempotent under re-application, and produce **AST-equivalent** files across orders (§8.1).
 * Launcher wiring (`start.sh:1080-1085`, already on this branch):
   `GLM53_APC_RETENTION_INTERVAL_SWA` → `VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA`, accepted
   values `""` (inherit the global policy), `0`, or a positive multiple of 3584 ≤ 1,000,000 (largest legal value
@@ -483,7 +483,7 @@ Runs anywhere with a copy of `kv_cache_coordinator.py`; no GPU, no vLLM import.
    `_glm53_is_draft_swa_spec` exactly once, add `import os` exactly once, survive re-application of
    either patch in either order byte-identically, retain Mia's hybrid-`min()` skip and
    `eagle_group_ids` narrowing, resolve the live layout to `[None,…,None,0]` — and the two orders must
-   produce **byte-identical** output.
+   produce **AST-equivalent** output.
 8. **Id-cost + capacity arithmetic** (§2, §4.1) against a pure-Python replica of the two
    `reachable_block_mask` formulas (dense 33/56; `R=14336` 33/224; boundary tail 33), and the §4.1
    formula evaluated for all five rows — `14 / 23 / 42 / 72 / 54` — so the doc's table and the test

@@ -17,8 +17,6 @@ included with their commit attribution. The additional behavior is:
 - Overlay composition and rank wiring are checked before use: both overlays
   apply to pristine sources in either order (idempotent, AST-equal), and the
   launcher validates mounted artifacts before a restart stops the ranks.
-  Launcher changes also enforce an immutable DFlash snapshot, preserve caller
-  overrides, and validate mounted artifacts before a restart stops the ranks.
 
 This is a draft contribution for maintainer discussion, not a recommendation
 to make all-zero retention the default. Global and SWA retention remain
@@ -44,7 +42,7 @@ revision was `dc77ff1c99eeb2df044ee3d4f0094eb033fee410`.
 | Execution | E2 fat kernel, mixed-prefill skip, CUDA graphs `1,2,4,8,16,24,32` | Same |
 
 The candidate image was built from `cfcceedbecd5778d7acd6109be2c22f305567ab4`.
-Later host/patcher changes render byte-identical model/cache runtime files.
+These archived measurements describe the recipe and runtime hashes in this section.
 The image IDs identify retained local images, not publicly pullable registry
 digests. The tested runtime hashes are:
 
@@ -162,8 +160,7 @@ proven. TP=4 sparse SWA is rejected, not qualified. A full boot using the
 maintainer's default 1M/7168 geometry is not part of this qualification.
 
 The useful decision is whether to accept the reusable replay/priority work
-as an opt-in extension to #83, and whether to split the launcher/pin work into
-a separate change. All-zero retention should not become the default on the
+as an opt-in extension to #83. All-zero retention should not become the default on the
 strength of the four-history result; edited and branching workloads need the
 tradeoff above. No ideal checkpoint interval is claimed.
 
@@ -171,6 +168,6 @@ tradeoff above. No ideal checkpoint interval is claimed.
 
 | Artifact | SHA-256 |
 |---|---|
-| [Harness](qualification/apc-2026-09-05/branch_matrix.py) | `7c41494bb6011ef33ec0851d52ae656731921b1d10edf669d63f3fa046db6656` |
+| [Harness](qualification/apc-2026-09-05/branch_matrix.py) | `ccdaf602ef5b378dc275f70d627b0276626fb81ff7aceec4831665e2679e173b` |
 | [Candidate raw matrix](qualification/apc-2026-09-05/new.json) | `82078a09861d9ee9ea07fc7d0976f1c56ad075e118c20a6d701987422070766b` |
 | [Old raw matrix](qualification/apc-2026-09-05/old.json) | `bdbedaccd02c7be608329e8aed8a02456e4acbc17ab80da3ceee21fa1767c52a` |
