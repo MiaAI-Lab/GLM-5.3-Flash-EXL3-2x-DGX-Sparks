@@ -24,7 +24,7 @@ printf '%s\n' "$guard" > "/tmp/_effort_guard.$$"
 guard_rc() { # reads the value from the environment; echoes validate_numeric_config's rc
     GLM53_DEFAULT_REASONING_EFFORT="$1" bash -c '
         source "/tmp/_effort_guard.'$$'"
-        GPU_MEM_UTIL=0.87 MAX_MODEL_LEN=1000000 MAX_NUM_SEQS=4 MAX_NUM_BATCHED_TOKENS=2048
+        GPU_MEM_UTIL=0.87 MAX_MODEL_LEN=1000000 MAX_NUM_SEQS=4 MAX_NUM_BATCHED_TOKENS=2048 GLM53_SPINWAIT_MS=stock
         validate_numeric_config' >/dev/null 2>&1
     echo $?
 }
@@ -50,7 +50,7 @@ check_guard 'high;id' 2
 
 # an UNSET knob must also pass (the guard reads ${VAR-}, not $VAR under set -u)
 if bash -c 'set -u; source "/tmp/_effort_guard.'$$'"
-    GPU_MEM_UTIL=0.87 MAX_MODEL_LEN=1000000 MAX_NUM_SEQS=4 MAX_NUM_BATCHED_TOKENS=2048
+    GPU_MEM_UTIL=0.87 MAX_MODEL_LEN=1000000 MAX_NUM_SEQS=4 MAX_NUM_BATCHED_TOKENS=2048 GLM53_SPINWAIT_MS=stock
     validate_numeric_config' >/dev/null 2>&1; then
     echo "ok   guard [<unset>] -> rc 0"
 else
@@ -60,7 +60,7 @@ fi
 # the rejection message must name the knob and the four legal values
 msg="$(GLM53_DEFAULT_REASONING_EFFORT=medium bash -c '
     source "/tmp/_effort_guard.'$$'"
-    GPU_MEM_UTIL=0.87 MAX_MODEL_LEN=1000000 MAX_NUM_SEQS=4 MAX_NUM_BATCHED_TOKENS=2048
+    GPU_MEM_UTIL=0.87 MAX_MODEL_LEN=1000000 MAX_NUM_SEQS=4 MAX_NUM_BATCHED_TOKENS=2048 GLM53_SPINWAIT_MS=stock
     validate_numeric_config' 2>&1 >/dev/null || true)"
 case "$msg" in
     *GLM53_DEFAULT_REASONING_EFFORT*low*high*max*) echo "ok   guard error names knob and enum" ;;
@@ -137,16 +137,18 @@ else echo "FAIL rank flags differ: head [$h] worker [$w]"; fail=1; fi
 
 # ------------------------------------------------------------- wiring ------
 launcher="$(cat "$START")"
-case "$launcher" in
-    *'_cli_default_effort_set="${GLM53_DEFAULT_REASONING_EFFORT+1}"'*)
-        echo "ok   caller capture is setness-aware" ;;
-    *) echo "FAIL caller capture is not setness-aware"; fail=1 ;;
-esac
-case "$launcher" in
-    *'[ -n "${_cli_default_effort_set}" ] && GLM53_DEFAULT_REASONING_EFFORT="$_cli_default_effort"'*)
-        echo "ok   caller value wins over .env" ;;
-    *) echo "FAIL caller override line missing"; fail=1 ;;
-esac
+if python3 - "$HERE" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from test_start_overrides import _run_preamble
+
+key = "GLM53_DEFAULT_REASONING_EFFORT"
+probe = '\nprintf "[%s]\\n" "${GLM53_DEFAULT_REASONING_EFFORT-UNSET}"\n'
+for caller, expected in (({}, "high"), ({key: "low"}, "low"), ({key: ""}, "")):
+    assert _run_preamble(f"{key}=high\n", caller, probe) == f"[{expected}]"
+PY
+then echo "ok   caller value and explicit empty win over .env; unset uses .env"
+else echo "FAIL caller precedence"; fail=1; fi
 case "$launcher" in
     *'-e "GLM53_DEFAULT_REASONING_EFFORT=${GLM53_DEFAULT_REASONING_EFFORT-}"'*)
         echo "ok   knob reaches both containers via nccl_common" ;;

@@ -456,7 +456,11 @@ cp .env.example .env          # edit HEAD_IP / WORKER_IP / WORKER_USER if needed
 ```
 
 First run of `./start.sh` copies `.env.example` → `.env` if missing. Prefix env
-wins over `.env` (`SPEC_METHOD=dflash SKIP_DOWNLOAD=1 ./start.sh restart`).
+wins over `.env` (`SPEC_METHOD=dflash SKIP_DOWNLOAD=1 ./start.sh restart`) for
+every key, including an explicitly empty export (`KEY= ./start.sh`). Empty
+values still follow each knob's own defaulting and validation rules; for example,
+an empty `GLM53_DEFAULT_REASONING_EFFORT` disables the `.env` setting, while an
+empty `GLM53_INDEXER_WORKSPACE` is rejected.
 
 `./start.sh` downloads weights automatically when the HF cache is incomplete
 (120 shards of `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`, falling back to
@@ -686,6 +690,7 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `overlay/patch_model_overrides.py` | `"exl3"` in ModelConfig overrides |
 | `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0`, E2 diag schema, E3 grouped tables/parity/graph-replay/fallback checks |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
+| `tests/test_start_overrides.py` | CPU-only caller precedence: `.env` keys, empty exports, shell assignments, and child inheritance |
 | `start.sh` / `stop.sh` / `download.sh` | 2-node launch; Hub fetch on the head only |
 | `start-tp4.sh` / `.env.tp4.example` | experimental 4-node TP=4 launch; knobs stay out of `.env` |
 | `files/chat_template.jinja` | GLM-5.3 MM template (`<|image|>` / `<|video|>`); checkpoint jinja is language-only |

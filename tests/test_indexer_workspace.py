@@ -786,14 +786,12 @@ def test_recipe_wiring_if_present() -> None:
     launcher = start.read_text()
     image = dockerfile.read_text()
     assert 'GLM53_INDEXER_WORKSPACE="${GLM53_INDEXER_WORKSPACE-rightsize}"' in launcher
-    assert '_cli_indexer_workspace="${GLM53_INDEXER_WORKSPACE-}"' in launcher
-    # Setness-aware capture: an explicitly empty caller value must survive the
-    # .env source and reach the enum guard, not be swallowed by a .env value.
-    assert '_cli_indexer_workspace_set="${GLM53_INDEXER_WORKSPACE+1}"' in launcher
-    assert (
-        '[ -n "${_cli_indexer_workspace_set}" ] '
-        '&& GLM53_INDEXER_WORKSPACE="$_cli_indexer_workspace"'
-    ) in launcher
+    from test_start_overrides import _run_preamble
+
+    key = "GLM53_INDEXER_WORKSPACE"
+    probe = '\nprintf "[%s]\\n" "${GLM53_INDEXER_WORKSPACE-UNSET}"\n'
+    for caller, expected in (({}, "rightsize"), ({key: "stock"}, "stock"), ({key: ""}, "")):
+        assert _run_preamble(f"{key}=rightsize\n", caller, probe) == f"[{expected}]"
     assert '_glm53_validate_enum GLM53_INDEXER_WORKSPACE' in launcher
     assert '-e "GLM53_INDEXER_WORKSPACE=$GLM53_INDEXER_WORKSPACE"' in launcher
     assert launcher.count("python3 /opt/glm53/patch_indexer_workspace.py") == 2
