@@ -190,7 +190,20 @@ if [ "${ENFORCE_EAGER}" != "1" ]; then
         *" --cudagraph-capture-sizes "*|*" cudagraph-capture-sizes "*) ;;
         *)
             if [ "$SPEC_METHOD" = "dflash" ]; then
-                EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 4 8 16 24 32"
+                # Adaptive-k verifies 2/4/7 drafts -> query lens {3,5,8}; the
+                # graph batch is num_seqs x query_len up to 4x8. The stock list
+                # misses 3 and 5, so adaptive-k would silently fall back to
+                # eager shapes for those steps (measured 2026-09-11).
+                _adaptive_k_mode="$(printf '%s' "${GLM53_ADAPTIVE_K:-off}" | tr '[:upper:]' '[:lower:]')"
+                case "$_adaptive_k_mode" in
+                    ema|on|1)
+                        EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 3 4 5 6 8 9 10 12 15 16 20 24 32"
+                        ;;
+                    *)
+                        EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 4 8 16 24 32"
+                        ;;
+                esac
+                unset _adaptive_k_mode
             else
                 EXTRA_ARGS="${EXTRA_ARGS:+$EXTRA_ARGS }--cudagraph-capture-sizes 1 2 3 4 6 8 12"
             fi
