@@ -59,6 +59,10 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
 fi
 # Caller exports, including explicit empties, must win over .env.
 # Snapshot exports rather than parsing .env: it is sourced as shell code.
+# Setness-aware pair for the fine-grained kill switch: an explicitly empty
+# caller value must reach the guard, not silently lose to a .env value.
+_cli_finegrained_set="${GLM53_FINEGRAINED_APC+1}"
+_cli_finegrained="${GLM53_FINEGRAINED_APC-}"
 _caller_overrides=()
 while IFS= read -r _k; do
     _flags="$(declare -p "$_k")"
@@ -73,7 +77,8 @@ set +a
 # Each entry is NAME=value; quoting preserves whitespace and empty values.
 # shellcheck disable=SC2163
 for _kv in ${_caller_overrides[@]+"${_caller_overrides[@]}"}; do export "$_kv"; done
-unset _k _kv _flags _caller_overrides
+[ -n "${_cli_finegrained_set}" ] && GLM53_FINEGRAINED_APC="$_cli_finegrained"
+unset _k _kv _flags _caller_overrides _cli_finegrained_set _cli_finegrained
 
 # ----------------------------- configuration -------------------------------
 MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"
@@ -165,6 +170,7 @@ SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode
 DRAFTER_PATCH_HOST="${DRAFTER_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm5_drafter_group.py}"
 APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py}"
 PERGROUP_PATCH_HOST="${PERGROUP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_per_group_retention.py}"
+FINEHIT_PATCH_HOST="${FINEHIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_fine_grained_hits.py}"
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
@@ -242,6 +248,10 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # Mixed-step prefill policy when a peer is already decoding (issue #6).
 # skip = do not mix; N>0 = cap tokens; 0 = off.
 GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
+# 1 = fine-grained (64-token) prefix-cache hits (overlay patch_apc_fine_grained_hits.py);
+# 0 = upstream 3584-block hits. Default applies only when UNSET; an explicitly
+# empty value is an operator error and validate_numeric_config rejects it.
+GLM53_FINEGRAINED_APC="${GLM53_FINEGRAINED_APC-1}"
 # Adaptive verification length (overlay/patch_adaptive_k.py). off = stock k=7 every step.
 GLM53_ADAPTIVE_K="${GLM53_ADAPTIVE_K:-off}"
 GLM53_ADAPTIVE_K_SET="${GLM53_ADAPTIVE_K_SET:-2,4,7}"
@@ -389,6 +399,16 @@ _glm53_validate_spinwait_ms() {
         GLM53_SPINWAIT_MS "$GLM53_SPINWAIT_MS" 1000
 }
 
+# Kill switches are exactly 0 or 1; the coordinator refuses anything else at
+# init (overlay/patch_apc_fine_grained_hits.py), so catch it pre-stop here.
+_glm53_validate_bool_flag() {
+    local name="$1" value="$2"
+    if [ "$value" != 0 ] && [ "$value" != 1 ]; then
+        echo "$name must be exactly 0 or 1 (got: $value)" >&2
+        return 2
+    fi
+}
+
 validate_numeric_config() {
     if ! [[ "$GPU_MEM_UTIL" =~ ^(0([.][0-9]+)?|[.][0-9]+|1([.]0+)?)$ ]] \
        || ! awk -v u="$GPU_MEM_UTIL" 'BEGIN { exit !(u > 0 && u <= 1) }'; then
@@ -416,6 +436,7 @@ validate_numeric_config() {
         echo "GLM53_APC_RETENTION_INTERVAL_SWA requires SPEC_METHOD=dflash (got: $SPEC_METHOD)" >&2
         return 2
     fi
+    _glm53_validate_bool_flag GLM53_FINEGRAINED_APC "${GLM53_FINEGRAINED_APC-1}" || return
 }
 # GLM53 numeric config guard (end)
 
@@ -445,6 +466,7 @@ validate_overlay_artifacts() {
         "$DRAFTER_PATCH_HOST|vllm/v1/core/kv_cache_utils.py|$main_guard"
         "$APC_PATCH_HOST|[glm53-hybrid-apc]|$main_guard"
         "$PERGROUP_PATCH_HOST|glm53-apc-per-group-contract:explicit-v1|$main_guard"
+        "$FINEHIT_PATCH_HOST|[glm53-finegrained-apc]|$main_guard"
         "$XGRAMMAR_PATCH_HOST|vllm/v1/structured_output/|$main_guard"
         "$KPOOL_TAIL_PATCH_HOST|[glm53-kpool-tail-slotmap]|$main_guard"
         "$SPINWAIT_PATCH_HOST|device_communicators/shm_broadcast.py|$main_guard"
@@ -652,6 +674,7 @@ preflight() {
     [ -f "$DRAFTER_PATCH_HOST" ] || die "$DRAFTER_PATCH_HOST missing"
     [ -f "$APC_PATCH_HOST" ] || die "$APC_PATCH_HOST missing"
     [ -f "$PERGROUP_PATCH_HOST" ] || die "$PERGROUP_PATCH_HOST missing"
+    [ -f "$FINEHIT_PATCH_HOST" ] || die "$FINEHIT_PATCH_HOST missing"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "$XGRAMMAR_PATCH_HOST missing"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "$KPOOL_TAIL_PATCH_HOST missing"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "$SPINWAIT_PATCH_HOST missing"
@@ -1109,6 +1132,7 @@ GLM53_OVERLAY_ORDER=(
     patch_glm5_drafter_group.py
     patch_hybrid_prefix_hit.py
     patch_apc_per_group_retention.py
+    patch_apc_fine_grained_hits.py
     patch_xgrammar_termination.py
     patch_kpool_tail_slotmap.py
     patch_spinwait.py
@@ -1299,6 +1323,8 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$APC_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_hybrid_prefix_hit.py"
     [ -f "$PERGROUP_PATCH_HOST" ] || die "missing $PERGROUP_PATCH_HOST"
     scp -q -o BatchMode=yes "$PERGROUP_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_apc_per_group_retention.py"
+    [ -f "$FINEHIT_PATCH_HOST" ] || die "missing $FINEHIT_PATCH_HOST"
+    scp -q -o BatchMode=yes "$FINEHIT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_apc_fine_grained_hits.py"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "missing $XGRAMMAR_PATCH_HOST"
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
@@ -1349,6 +1375,7 @@ launch_cluster() {
         -e VLLM_NO_USAGE_STATS=1
         -e DO_NOT_TRACK=1
         -e "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=$CG_ESTIMATE"
+        -e "GLM53_FINEGRAINED_APC=$GLM53_FINEGRAINED_APC"
     )
     # Global sparse retention is implemented by the pinned vLLM runtime.  Full
     # attention remains dense; Mamba managers use this value.  Keep this an
@@ -1419,6 +1446,7 @@ launch_cluster() {
         -v '/tmp/patch_glm5_drafter_group.py:/opt/glm53/patch_glm5_drafter_group.py:ro' \
         -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
         -v '/tmp/patch_apc_per_group_retention.py:/opt/glm53/patch_apc_per_group_retention.py:ro' \
+        -v '/tmp/patch_apc_fine_grained_hits.py:/opt/glm53/patch_apc_fine_grained_hits.py:ro' \
         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
         -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
@@ -1455,6 +1483,7 @@ launch_cluster() {
         -v "$DRAFTER_PATCH_HOST:/opt/glm53/patch_glm5_drafter_group.py:ro" \
         -v "$APC_PATCH_HOST:/opt/glm53/patch_hybrid_prefix_hit.py:ro" \
         -v "$PERGROUP_PATCH_HOST:/opt/glm53/patch_apc_per_group_retention.py:ro" \
+        -v "$FINEHIT_PATCH_HOST:/opt/glm53/patch_apc_fine_grained_hits.py:ro" \
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
         -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
