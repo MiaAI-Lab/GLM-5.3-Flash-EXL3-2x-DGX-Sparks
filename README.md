@@ -445,6 +445,33 @@ tokens — the 7168 / 10752 / 14336 hit rows above are exactly 2 / 3 / 4 full
 pages. And since this build exposes **no cache-reset endpoint**, the bench
 salts its filler content per invocation so every cold is genuinely cold.
 
+### Optional sparse retention and DFlash replay
+
+`GLM53_APC_RETENTION_INTERVAL_SWA` controls the DFlash2 drafter separately
+from target retention. Empty inherits the global retention policy and keeps
+ordinary eviction priority. Explicit `0` retains reachable drafter boundaries
+and makes cached draft-only blocks lower priority than target cache blocks.
+Sparse target Mamba state also retains the prior replay boundary; a cached
+DFlash window is reused only after successful EAGLE verification, otherwise
+the request backs up to rebuild its window.
+
+**Sparse retention is not a general performance upgrade.** On one 2× Spark
+deployment, explicit global/SWA `0/0` retained four independent 210K histories
+for ~2.5 s revisits. In a matched 128K comparison, however, an edit at 90%
+took 112.49 s instead of 14.70 s, and a branch at 90% took 99.89 s instead of
+3.35 s: the sparse policy reused zero tokens where the old runtime reused
+111,104. All tested answers were correct. These are sequential histories,
+not four simultaneously active 210K streams.
+
+The global launcher spelling is `GLM53_APC_RETENTION_INTERVAL` (TP=2 only).
+Leave it unset for normal use; TP=4 rejects either retention override.
+
+Both retention knobs remain unset by default. Keep that default unless the
+tradeoff fits the workload. SWA-only sparse retention with a dense target is
+a separate configuration; the all-zero results do not qualify it. See the
+[protocol, raw measurements, and limitations](docs/apc-retention-qualification.md)
+before selecting a policy or a cache budget for another kit.
+
 ## Quick start (2× Spark)
 
 ```bash
@@ -577,7 +604,7 @@ word lands at char 39 of the prompt, so changing it is a full prefix-cache miss
 on an otherwise-warm conversation, not a partial one.
 `tests/test_chat_template.py` pins that shape.
 
-Needs: Docker (no sudo) on both nodes, passwordless SSH head → worker,
+Needs: Docker (no sudo) on both nodes, python3 with Jinja2 on the head (verifies mounted inputs before `restart` stops anything), passwordless SSH head → worker,
 `hf` / `huggingface-cli` + `curl` + `rsync` on the head, ~180 GiB free per
 node for the first download. The GHCR image is public; login is only needed
 if you hit anonymous pull rate limits (`GHCR_TOKEN` + `GHCR_USER`).
@@ -652,6 +679,7 @@ that are now documented/enforced:
 | `MAX_MODEL_LEN` | `850000` | default context since 2026-09-07 (E3 default; 1M fits again with `EXL3_FAT_GROUPED=0`). 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool. At MNBT 7168 one 1M request needs **14.52 GiB** KV (10.98 GiB at 500k; ~7.4 GiB fixed + 7.1 GiB per 1M); the E3 recipe runs 500k |
 | `GPU_MEM_UTIL` | `0.85` | GB10 UMA budget (default lowered from 0.87 on 2026-09-07: each 0.01 is 1.2 GiB of host headroom, and long prefills need it — see *Cold prefill (E3)*). E3 at 900k / 0.85: pool ~1.05M tokens / 1.17× (0.87: 16.2 GiB / 1,051,648 tokens). Pre-E3 receipts at 1M / 0.87: 1,754,237 tokens / 18.67 GiB (MNBT 2048); 1,243,902 tokens / 1.24× (7168, rightsize, E2) |
 | `KV_CACHE_DTYPE` | `fp8` | packed `fp8_ds_mla`; not `nvfp4`, not bf16 |
+| `GLM53_APC_RETENTION_INTERVAL_SWA` | *(unset)* | TP=2 DFlash2 drafter retention. Empty inherits global retention with ordinary priority; explicit `0` keeps reachable boundaries and enables draft-only eviction priority; positive values must be multiples of 3584, at most 1,000,000. Requires `SPEC_METHOD=dflash` and the hybrid prefix overlay. TP=4 rejects a non-empty value. Qualify retention, branching, and draft acceptance for the chosen global/SWA pair; see [measurements](docs/apc-retention-qualification.md) |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (7168) |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
 | `GLM53_DEFAULT_REASONING_EFFORT` | *(empty)* | `low` / `high` / `max` via `--default-chat-template-kwargs` on both ranks. Empty sends no flag, so omitted effort renders Max. Per-request `chat_template_kwargs.reasoning_effort` overrides the default; `medium` is rejected because the template maps it to Max |
@@ -689,6 +717,8 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `overlay/patch_exl3_ext_aarch64.py` | stub AVX CPU allreduce so the ext builds on GB10 |
 | `overlay/patch_model_overrides.py` | `"exl3"` in ModelConfig overrides |
 | `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0`, E2 diag schema, E3 grouped tables/parity/graph-replay/fallback checks |
+| `tests/test_apc_per_group_retention.py` | host: overlay apply/idempotence, min-exemption derivation, routing, env validation, composition with `patch_hybrid_prefix_hit.py` in both orders, id-cost/capacity arithmetic (needs `GLM53_KV_COORDINATOR_PY_SRC` + `_PRISTINE` copies of the fork's coordinator) |
+| `tests/test_launcher_rank_parity.py` | launcher (CPU-only, docker/ssh stubbed): retention validation, pre-stop artifact checks, ordered hybrid/per-group overlays, and matching rank environments and mounts |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
 | `tests/test_start_overrides.py` | CPU-only caller precedence: `.env` keys, empty exports, shell assignments, and child inheritance |
 | `start.sh` / `stop.sh` / `download.sh` | 2-node launch; Hub fetch on the head only |
