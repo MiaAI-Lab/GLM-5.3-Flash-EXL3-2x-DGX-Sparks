@@ -52,6 +52,11 @@ next_pow2() {
 
 # k=7 → +8. Pick one s per live BLOCK in {16,32,64,128,256}.
 LADDER_S=(1 24 56 120 248)
+# Long-prefill rungs: trigger BuildPrefillChunkMetadataKernel (1, 2 and
+# partial MNBT=7168 chunks). 65536 covers agent-sized contexts; >128k prompts
+# can still compile one more specialization.
+# Prefills do not affect the DFlash BLOCK shapes above (decode is 1 query).
+PREFILL_S=(3584 7168 14336 65536)
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -146,42 +151,46 @@ mk_ladder_prompt() {
 }
 
 verify_ladder_rung() {
-  local s=$1 prompt want_block got resp t0 t1 qpad
+  local s=$1 tag=${2:-ladder} prompt want_block got resp t0 t1 qpad
   qpad=$((DFLASH_K + 1))
-  : > "$tmpdir/ladder-$s"
+  : > "$tmpdir/$tag-$s"
   prompt=$(mk_ladder_prompt "$s")
   want_block=$(next_pow2 $((s + qpad)))
   if [ "$want_block" -gt 256 ]; then want_block=256; fi
+  printf '{"model":"%s","prompt":"%s"}' "$MODEL" "$prompt" > "$tmpdir/$tag-$s.tok.json"
   if ! resp=$("$CURL_BIN" -fsS --max-time 30 "${AUTH_ARGS[@]}" \
         "$BASE/tokenize" -H "Content-Type: application/json" \
-        -d '{"model":"'"$MODEL"'","prompt":"'"$prompt"'"}' \
+        --data-binary "@$tmpdir/$tag-$s.tok.json" \
         2>>"$tmpdir/errors"); then
-    echo "boot-shape-warmup: tokenize verify FAILED for rung s=${s}: POST /tokenize errored — rung skipped, BLOCK ${want_block} NOT warmed" >&2
-    echo fail > "$tmpdir/ladder-$s"
+    echo "boot-shape-warmup: tokenize verify FAILED for rung ${tag} s=${s}: POST /tokenize errored — rung skipped, BLOCK ${want_block} NOT warmed" >&2
+    echo fail > "$tmpdir/$tag-$s"
     return 0
   fi
   got=$(printf '%s\n' "$resp" | grep -o '"count"[[:space:]]*:[[:space:]]*[0-9]*' | head -n 1 | grep -o '[0-9]*$')
   if [ -z "$got" ]; then
-    echo "boot-shape-warmup: tokenize verify FAILED for rung s=${s}: no usable \"count\" in /tokenize response — rung skipped, BLOCK ${want_block} NOT warmed" >&2
-    echo fail > "$tmpdir/ladder-$s"
+    echo "boot-shape-warmup: tokenize verify FAILED for rung ${tag} s=${s}: no usable \"count\" in /tokenize response — rung skipped, BLOCK ${want_block} NOT warmed" >&2
+    echo fail > "$tmpdir/$tag-$s"
     return 0
   fi
   if [ "$got" -ne "$s" ]; then
-    echo "boot-shape-warmup: tokenize verify FAILED for rung s=${s}: /tokenize reported ${got} tokens, need exactly ${s} — rung skipped, BLOCK ${want_block} NOT warmed" >&2
-    echo fail > "$tmpdir/ladder-$s"
+    echo "boot-shape-warmup: tokenize verify FAILED for rung ${tag} s=${s}: /tokenize reported ${got} tokens, need exactly ${s} — rung skipped, BLOCK ${want_block} NOT warmed" >&2
+    echo fail > "$tmpdir/$tag-$s"
     return 0
   fi
   t0=$(date +%s)
+  # Long rungs exceed ARG_MAX as a curl argument; stage the JSON in a file.
+  printf '{"model":"%s","prompt":"%s","max_tokens":1,"temperature":0}' \
+    "$MODEL" "$prompt" > "$tmpdir/$tag-$s.json"
   if "$CURL_BIN" -fsS --max-time "$REQ_TIMEOUT" "${AUTH_ARGS[@]}" \
       "$BASE/v1/completions" -H "Content-Type: application/json" \
-      -d '{"model":"'"$MODEL"'","prompt":"'"$prompt"'","max_tokens":1,"temperature":0}' \
+      --data-binary "@$tmpdir/$tag-$s.json" \
       >/dev/null 2>>"$tmpdir/errors"; then
-    echo ok > "$tmpdir/ladder-$s"
+    echo ok > "$tmpdir/$tag-$s"
     t1=$(date +%s)
-    echo "  ladder s=${s}: tokenize ${got}/${s} -> BLOCK ${want_block} fired ($((t1 - t0))s)"
+    echo "  ${tag} s=${s}: tokenize ${got}/${s} -> BLOCK ${want_block} fired ($((t1 - t0))s)"
   else
-    echo fail > "$tmpdir/ladder-$s"
-    echo "  ladder s=${s}: tokenize ${got}/${s} -> BLOCK ${want_block} request FAILED"
+    echo fail > "$tmpdir/$tag-$s"
+    echo "  ${tag} s=${s}: tokenize ${got}/${s} -> BLOCK ${want_block} request FAILED"
   fi
 }
 
@@ -189,6 +198,13 @@ ladder() {
   local s
   for s in "${LADDER_S[@]}"; do
     verify_ladder_rung "$s"
+  done
+}
+
+prefill() {
+  local s
+  for s in "${PREFILL_S[@]}"; do
+    verify_ladder_rung "$s" prefill
   done
 }
 
@@ -201,6 +217,7 @@ echo "boot-shape-warmup: sweeping DFlash2 k=${DFLASH_K} / sampler / kpool shapes
 total_t0=$(date +%s)
 
 ladder
+prefill
 
 EXPECTED_CHAT_REQUESTS=6
 burst c1        1 32 bounded false
@@ -231,10 +248,11 @@ verify_sampler_cache || SAMPLER_POSTCOND=fail
 total=0 ok_count=0
 for f in "$tmpdir"/*-*; do
   [ -f "$f" ] || continue
+  case "$f" in *.json) continue;; esac
   total=$((total + 1))
   [ "$(cat "$f")" = "ok" ] && ok_count=$((ok_count + 1))
 done
-EXPECTED_REQUESTS=$(( ${#LADDER_S[@]} + EXPECTED_CHAT_REQUESTS ))
+EXPECTED_REQUESTS=$(( ${#LADDER_S[@]} + ${#PREFILL_S[@]} + EXPECTED_CHAT_REQUESTS ))
 if [ "$total" -ne "$EXPECTED_REQUESTS" ]; then
   echo "boot-shape-warmup: internal error: tallied $total outcomes for $EXPECTED_REQUESTS scheduled requests" >&2
   exit 1
