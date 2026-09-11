@@ -539,8 +539,10 @@ curl -s http://127.0.0.1:8888/v1/chat/completions \
 
 Thinking defaults on. Disable it with the **top-level** JSON field
 `"chat_template_kwargs": {"enable_thinking": false}`. This closes the empty
-thinking block in the generation prompt. The `Reasoning Effort:` line itself
-renders unconditionally since #63 (prefix-cache stability), thinking on or off.
+thinking block in the generation prompt and drops the `Reasoning Effort:` line.
+That line is emitted once, **immediately before the last user message** (not at
+the prompt head as before), so toggling thinking or changing the effort only
+re-prefills the final user turn — see *Client request defaults* below.
 
 Do not send a literal nested `extra_body` object over raw HTTP; `extra_body` is
 an OpenAI Python SDK option that merges its contents into the top-level request.
@@ -556,7 +558,7 @@ template reads. None of them need a restart, and none are enforced by
 
 | Field | Send | Why |
 |---|---|---|
-| `reasoning_effort` | `high` for reasoning work | Unset = **Max** (`files/chat_template.jinja:7`); `low` is the model card's lightest simple-Q&A mode. Keep it constant per route — see below |
+| `reasoning_effort` | `high` for reasoning work | Unset = **Max** (`files/chat_template.jinja:7`, or `GLM53_DEFAULT_REASONING_EFFORT`); `low` is the model card's lightest simple-Q&A mode. Safe to change per request since the directive moved before the last user message — see below |
 | `max_tokens` | ≥ `32768` with thinking on | Max-effort reasoning runs well past 8k output tokens. Too small a cap truncates mid-thought and the reply comes back with empty `content` |
 | `chat_template_kwargs.clear_thinking` | `true` for multi-turn agents | Replaces earlier turns' reasoning with `<think></think>` (`chat_template.jinja:154`), keeping the current tool-call chain. Cuts context, not answer quality |
 | `top_p` / `temperature` | leave unset | `generation_config.json` already supplies `0.95` / `1.0`; the boot log prints the override line. Sending `top_p=1.0` explicitly overrides that and is worse |
@@ -572,10 +574,33 @@ $ curl -s $BASE/v1/chat/completions -d '{...,"reasoning_effort":"low"}' | jq '.c
 ["annotations","audio","content","function_call","reasoning","refusal","role"]
 ```
 
-**Do not vary `reasoning_effort` per request within a conversation.** The effort
-word lands at char 39 of the prompt, so changing it is a full prefix-cache miss
-on an otherwise-warm conversation, not a partial one.
+**Changing `reasoning_effort` (or toggling thinking) per request is cache-safe.**
+The `<|system|>Reasoning Effort: <Low|High|Max>` directive is emitted once,
+immediately before the **last** user message, and only when thinking is on.
+Everything before that point renders byte-identically across off / low / high /
+max, so a change costs one re-prefill of the final user turn, not the whole
+conversation. Measured on this kit (~16.5k-token prompt, 3584-token pages,
+`--enable-prompt-tokens-details` on): low → high → low kept **14,336** cached
+tokens on every call (TTFT ~2.5 s); the old head placement dropped to **0** on
+each change (TTFT ~15 s). At ~47k and ~152k tokens the same effort change cost
+**0.9 s / 2.1 s** before-last-user against **28.8 s / 92 s** at the head.
 `tests/test_chat_template.py` pins that shape.
+
+Why before the last user message and not after it (just before `<|assistant|>`)?
+Both keep the cache, but tail placement was measured and **rejected**: at
+`high` on a one-shot code fixture the model emitted a second `</think>` and a
+duplicated code block 10/22 times (temperature 0, seeded reps); before-last-user
+matched the old head placement 14/14. Thinking off is unaffected either way.
+Caveat: at `max` on the same code fixture before-last-user thinks about 6× longer
+than head did (1,196 vs 192 reasoning tokens, all answers correct); `high` is
+unchanged. Re-measure with `tests/bench_effort_placement.py` (to read
+`usage.prompt_tokens_details.cached_tokens` set `EXTRA_ARGS="--enable-prompt-tokens-details"`;
+the launcher does not add that flag).
+
+Effort words the template does not know (`medium`, `minimal`, `xhigh`) render
+**Max** (`chat_template.jinja:7`), so an OpenAI-style client that sends
+`reasoning_effort: "medium"` gets the longest tier. Send `low` / `high` / `max`,
+or `none` to turn thinking off for that request.
 
 Needs: Docker (no sudo) on both nodes, passwordless SSH head → worker,
 `hf` / `huggingface-cli` + `curl` + `rsync` on the head, ~180 GiB free per
@@ -714,6 +739,7 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `overlay/patch_ablit.py` | install the load_weights hook; bind-mounted and run on both ranks |
 | `ablit/` | direction vectors + `LAYER_MAP.json` from drowzeys' published recipe; `fetch_transplant.py` + `transplant/` for the donor o_proj byte-copy |
 | `tests/test_ablit.py` | recipe integrity, orthogonalization math, TP-shard equivalence, transplant byte-copy + TP slice, hook gating |
+| `tests/bench_effort_placement.py` | live A/B of the `Reasoning Effort:` directive position (head / before-last-user / tail / none): phase 0 cache retention across effort changes on ~16.5k / 42k / 128k prompts (`--phase0-tokens`), phase 1 obedience + answer checks (exec / JSON / exact value / tool call) per fixture × tier × arm, malformed-answer detection |
 | `tests/test_default_reasoning_effort.sh` | `GLM53_DEFAULT_REASONING_EFFORT` enum guard (`""`/`low`/`high`/`max`; `medium` rejected) and the `--default-chat-template-kwargs` flag at both rank sites, sliced out of `start.sh` and evaluated |
 | `scripts/boot-shape-warmup.sh` | post-`/health` DFlash2 k=7 BLOCK ladder + sampler/kpool arms |
 
