@@ -5,7 +5,12 @@
 {%- set thinking_enabled = true -%}
 {%- endif -%}
 {%- set effective_reasoning_effort = reasoning_effort if reasoning_effort is defined and reasoning_effort in ['low', 'high'] else 'max' -%}
-{%- if thinking_enabled and effective_reasoning_effort is not none -%}<|system|>Reasoning Effort: {{ effective_reasoning_effort | capitalize }}{%- endif -%}
+{#- The Reasoning Effort directive is no longer emitted here. It is emitted once, immediately
+    before the LAST user message (see the message loop), so a thinking on/off or effort change
+    never touches the prompt head: vLLM chains prefix-cache block hashes from token 0, and a
+    change at char ~39 re-prefilled the whole conversation. Placing it after the last user
+    message (just before <|assistant|>) was measured and rejected: at High it produced a
+    malformed double-</think> answer 10/22 times. Before-last-user matched head 14/14. -#}
 {%- set clear_thinking = clear_thinking if clear_thinking is defined else false -%}
 {%- if tools -%}
 {%- macro tool_to_json(tool) -%}
@@ -141,7 +146,9 @@ For each function call, output the function name and arguments within the follow
     {%- endif %}
 {%- endfor %}
 {%- for m in messages -%}
-{%- if m.role == 'user' -%}<|user|>{{ visible_text(m.content) }}
+{%- if m.role == 'user' -%}
+{%- if add_generation_prompt and thinking_enabled and effective_reasoning_effort is not none and loop.index0 == ns.last_user_index -%}<|system|>Reasoning Effort: {{ effective_reasoning_effort | capitalize }}{%- endif -%}
+<|user|>{{ visible_text(m.content) }}
 {%- elif m.role == 'assistant' -%}
 <|assistant|>
 {%- set content = visible_text(m.content) %}
@@ -262,5 +269,7 @@ For each function call, output the function name and arguments within the follow
 {%- endif -%}
 {%- endfor -%}
 {%- if add_generation_prompt -%}
+    {#- fallback for a conversation with no user message at all: emit the directive at the tail -#}
+    {%- if thinking_enabled and effective_reasoning_effort is not none and ns.last_user_index == -1 -%}<|system|>Reasoning Effort: {{ effective_reasoning_effort | capitalize }}{%- endif -%}
     <|assistant|>{{- '<think>' if thinking_enabled else '<think></think>' -}}
 {%- endif -%}
