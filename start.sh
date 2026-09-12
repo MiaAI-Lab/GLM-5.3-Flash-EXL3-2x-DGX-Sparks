@@ -434,10 +434,15 @@ validate_numeric_config() {
 # preflight() re-checks existence later; this is the fail-closed early gate.
 # The chat-template parse below needs jinja2 on the host. The caller's
 # `python3` can be a venv/brew interpreter without it, so probe the caller
-# first, then common system interpreters; GLM53_VALIDATE_PYTHON overrides.
+# first, then common system interpreters. An explicit override is the sole
+# candidate (one executable name/path, no arguments); even empty is an error.
 _glm53_template_python() {
     local candidate
-    for candidate in "${GLM53_VALIDATE_PYTHON:-}" python3 python3.12 python3.11 /usr/bin/python3; do
+    local -a candidates=(python3 python3.12 python3.11 /usr/bin/python3)
+    if [ "${GLM53_VALIDATE_PYTHON+x}" = x ]; then
+        candidates=("$GLM53_VALIDATE_PYTHON")
+    fi
+    for candidate in "${candidates[@]}"; do
         [ -n "$candidate" ] || continue
         command -v "$candidate" >/dev/null 2>&1 || continue
         if "$candidate" -c 'import jinja2' >/dev/null 2>&1; then
@@ -513,7 +518,11 @@ validate_overlay_artifacts() {
     fi
     local template_python
     if ! template_python="$(_glm53_template_python)"; then
-        echo "no host python3 with jinja2 found (chat-template validation; set GLM53_VALIDATE_PYTHON)" >&2
+        if [ "${GLM53_VALIDATE_PYTHON+x}" = x ]; then
+            echo "GLM53_VALIDATE_PYTHON must name an executable Python with jinja2 (no fallback): ${GLM53_VALIDATE_PYTHON}" >&2
+        else
+            echo "no host python3 with jinja2 found (chat-template validation; set GLM53_VALIDATE_PYTHON)" >&2
+        fi
         return 2
     fi
     if ! "$template_python" -c 'from jinja2 import Environment; import sys; Environment(extensions=["jinja2.ext.loopcontrols"]).parse(open(sys.argv[1], encoding="utf-8").read())' "$CHAT_TEMPLATE_HOST" 2>/dev/null; then
