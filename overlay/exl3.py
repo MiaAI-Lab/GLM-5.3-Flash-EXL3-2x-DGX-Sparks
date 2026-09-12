@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import os
+import re
 import sys
 import types
 from pathlib import Path
@@ -1714,8 +1715,132 @@ class Exl3Config(QuantizationConfig):
         if isinstance(layer, RoutedExperts):
             return Exl3MoEMethod(layer.moe_config, self)
         if isinstance(layer, LinearBase):
+            group = _glm53_dense_fp8_group(prefix)  # [glm53-dense-fp8]
+            if group is not None:
+                return Glm53DenseFp8Method(group)
             return UnquantizedLinearMethod()
         return None
+
+
+# ----------------------------------------------------------------------------
+# [glm53-dense-fp8] Optional FP8 weight-only (Marlin) path for the BF16 dense
+# projections. GLM53_DENSE_FP8=off (default) | comma list of groups:
+#   shared  mlp.shared_experts.{gate_up_proj,down_proj}
+#   dense   mlp.{gate_up_proj,down_proj} of the dense-MLP layers
+#   kda     self_attn.{in_proj_qkvbfg_a,f_b_proj,g_b_proj,o_proj} of KDA layers
+#   mla     self_attn.{fused_qkv_a_proj,q_b_proj,o_proj} of MLA layers (kv_b_proj
+#           stays BF16: MLA reads its weight directly for the absorbed matmuls)
+# Weights load as BF16 exactly as today (all custom loaders untouched, ABLIT edits
+# o_proj at the end of load_weights), then process_weights_after_loading quantizes
+# per output channel to FP8 e4m3 and repacks for the Marlin kernel. PROVISIONAL:
+# changes target numerics; needs a KLD panel before it can become a default.
+# ----------------------------------------------------------------------------
+_GLM53_DENSE_FP8_SUFFIXES = {
+    "shared": (".mlp.shared_experts.gate_up_proj", ".mlp.shared_experts.down_proj"),
+    "dense": (".mlp.gate_up_proj", ".mlp.down_proj"),
+    "kda": (".self_attn.in_proj_qkvbfg_a", ".self_attn.f_b_proj", ".self_attn.g_b_proj", ".self_attn.o_proj"),
+    "mla": (".self_attn.fused_qkv_a_proj", ".self_attn.q_b_proj", ".self_attn.o_proj"),
+}
+
+
+def _glm53_dense_fp8_groups() -> set[str]:
+    raw = os.environ.get("GLM53_DENSE_FP8", "off").strip().lower()
+    if raw in ("", "off", "0", "no", "none"):
+        return set()
+    if raw in ("all", "on", "1"):
+        return {"shared", "dense", "kda", "mla"}
+    groups = {g.strip() for g in raw.split(",") if g.strip()}
+    unknown = groups - set(_GLM53_DENSE_FP8_SUFFIXES)
+    if unknown:
+        raise ValueError(f"GLM53_DENSE_FP8: unknown group(s) {sorted(unknown)}")
+    return groups
+
+
+def _glm53_layer_types() -> list[str] | None:
+    try:
+        from vllm.config import get_current_vllm_config
+
+        cfg = get_current_vllm_config().model_config.hf_text_config
+        lt = getattr(cfg, "layer_types", None)
+        return list(lt) if lt else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _glm53_dense_fp8_group(prefix: str, groups: set[str] | None = None, layer_types: list[str] | None = None) -> str | None:
+    """Group name if `prefix` (vLLM module path) is an allow-listed dense projection."""
+    groups = _glm53_dense_fp8_groups() if groups is None else groups
+    if not groups:
+        return None
+    if ".mtp" in prefix or "visual" in prefix or "draft" in prefix:
+        return None
+    m = re.search(r"\.layers\.(\d+)\.", prefix)
+    layer_idx = int(m.group(1)) if m else None
+    for group in ("shared", "dense", "kda", "mla"):
+        if group not in groups:
+            continue
+        if not any(prefix.endswith(s) for s in _GLM53_DENSE_FP8_SUFFIXES[group]):
+            continue
+        if group == "dense" and ".shared_experts." in prefix:
+            continue
+        if group in ("kda", "mla"):
+            lt = _glm53_layer_types() if layer_types is None else layer_types
+            if lt is None or layer_idx is None or layer_idx >= len(lt):
+                continue
+            is_kda = lt[layer_idx] == "linear_attention"
+            if (group == "kda") != is_kda:
+                continue
+        return group
+    return None
+
+
+class Glm53DenseFp8Method(UnquantizedLinearMethod):
+    """BF16 weight at load time; per-output-channel FP8 e4m3 + Marlin at apply."""
+
+    def __init__(self, group: str) -> None:
+        super().__init__()
+        self.group = group
+        self.ready = False
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+            prepare_fp8_layer_for_marlin,
+        )
+
+        w = layer.weight.data
+        if w.dtype != torch.bfloat16 and w.dtype != torch.float16:
+            raise RuntimeError(f"[glm53-dense-fp8] expected a BF16/FP16 weight, got {w.dtype} for {self.group}")
+        n, k = w.shape
+        assert n == layer.output_size_per_partition and k == layer.input_size_per_partition, (w.shape, layer)
+        wf = w.float()
+        scales = wf.abs().amax(dim=1).clamp(min=1e-12) / 448.0  # [N] per output channel
+        fp8 = (wf / scales[:, None]).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+        del wf
+        layer.orig_dtype = w.dtype
+        layer.weight = torch.nn.Parameter(fp8, requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(scales.to(layer.orig_dtype), requires_grad=False)
+        layer.weight_block_size = None
+        prepare_fp8_layer_for_marlin(layer, size_k_first=False)
+        layer.glm53_fp8_n, layer.glm53_fp8_k = n, k
+        self.ready = True
+
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        if not self.ready:
+            return super().apply(layer, x, bias)
+        from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+            apply_fp8_marlin_linear,
+        )
+
+        return apply_fp8_marlin_linear(
+            input=x,
+            weight=layer.weight,
+            weight_scale=layer.weight_scale,
+            workspace=layer.workspace,
+            size_n=layer.glm53_fp8_n,
+            size_k=layer.glm53_fp8_k,
+            bias=bias,
+        )
 
 
 class Exl3MoEMethod(FusedMoEMethodBase):
