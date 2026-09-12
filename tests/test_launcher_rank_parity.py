@@ -690,6 +690,20 @@ def part_d(h: Harness) -> None:
         check(any(wdest in i for i in issues), f"D4 a worker scp fed from a different host file is reported ({issues[:1]})")
 
 
+def allocator_overrides(h: Harness) -> None:
+    for value in (None, "", "expandable_segments:False, max_split_size_mb:128"):
+        env = {} if value is None else {"PYTORCH_CUDA_ALLOC_CONF": value}
+        ranks = rank_runs(h, **env)
+        check(ranks is not None, f"allocator {value!r}: captured both launches")
+        if ranks is None:
+            continue
+        expected = "expandable_segments:True" if value is None else value
+        check(
+            all(rank.env.get("PYTORCH_CUDA_ALLOC_CONF") == expected for rank in ranks[:2]),
+            f"allocator {value!r}: both ranks receive the complete assignment",
+        )
+
+
 # ------------------------------------------------------------------- main --
 
 
@@ -704,6 +718,7 @@ def main() -> int:
         part_b(h)
         part_c(h)
         part_d(h)
+        allocator_overrides(h)
     print()
     if FAILURES:
         print(f"FAILED ({len(FAILURES)}): " + "; ".join(FAILURES))

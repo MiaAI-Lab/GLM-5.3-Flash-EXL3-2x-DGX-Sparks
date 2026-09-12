@@ -1365,10 +1365,11 @@ launch_cluster() {
         nccl_common+=(-e "VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA=$GLM53_APC_RETENTION_INTERVAL_SWA")
         log "drafter (SWA) prefix-cache retention interval: ${GLM53_APC_RETENTION_INTERVAL_SWA} (both ranks)"
     fi
-    local worker_nccl="" e
+    local worker_nccl="" e quoted_env
     for e in "${nccl_common[@]}"; do
         [ "$e" = "-e" ] && continue
-        worker_nccl+=" -e $e"
+        printf -v quoted_env '%q' "$e"
+        worker_nccl+=" -e $quoted_env"
     done
 
     local -a head_preload=() worker_preload=""
