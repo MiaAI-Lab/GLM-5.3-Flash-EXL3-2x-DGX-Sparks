@@ -606,16 +606,20 @@ preflight() {
         || warn "no GB10 GPU visible on worker"
 
     # Each rank's GID index must be populated on EVERY selected CX7 device.
-    # Comma-separated device names are passed unchanged to NCCL below.
-    local gid_head=ok gid_worker=ok gid_path hca
-    for hca in ${HEAD_CX7_IB//,/ }; do
+    # HEAD_CX7_IB / WORKER_CX7_IB are literal names or comma-separated lists;
+    # pass the original values unchanged to NCCL below.
+    local gid_head=ok gid_worker=ok gid_path hca i
+    local -a head_hcas worker_hcas
+    IFS=, read -r -a head_hcas <<< "$HEAD_CX7_IB"
+    IFS=, read -r -a worker_hcas <<< "$WORKER_CX7_IB"
+    for hca in "${head_hcas[@]}"; do
         gid_path="/sys/class/infiniband/${hca}/ports/1/gids/${HEAD_GID}"
         if [ -z "$(cat "$gid_path" 2>/dev/null | tr -d ':0' || true)" ]; then
             gid_head=""
             warn "head GID index ${HEAD_GID} is EMPTY on ${hca}"
         fi
     done
-    for hca in ${WORKER_CX7_IB//,/ }; do
+    for hca in "${worker_hcas[@]}"; do
         gid_path="/sys/class/infiniband/${hca}/ports/1/gids/${WORKER_GID}"
         if [ -z "$(worker_ssh "cat '$gid_path' 2>/dev/null" | tr -d ':0' || true)" ]; then
             gid_worker=""
@@ -623,8 +627,18 @@ preflight() {
         fi
     done
     if [ -z "$gid_head" ] || [ -z "$gid_worker" ]; then
-        warn "Inspect each listed device's /sys/class/infiniband/<device>/ports/1/gids"
-        warn "and gid_attrs/types; select populated RoCE v2 entries on both nodes."
+        warn "GID tables — pick each node's ::ffff:<ip> entry whose type is RoCE v2;"
+        warn "the two indices need not match, and a v1 entry at the same index will not work:"
+        for hca in "${head_hcas[@]}"; do
+            for i in 0 1 2 3 4 5 6 7; do
+                printf '    head   %s gid%s: %-40s %s\n' "$hca" "$i" \
+                    "$(cat "/sys/class/infiniband/${hca}/ports/1/gids/$i" 2>/dev/null)" \
+                    "$(cat "/sys/class/infiniband/${hca}/ports/1/gid_attrs/types/$i" 2>/dev/null)" >&2
+            done
+        done
+        for hca in "${worker_hcas[@]}"; do
+            worker_ssh "for i in 0 1 2 3 4 5 6 7; do printf '    worker %s gid%s: %-40s %s\n' '${hca}' \"\$i\" \"\$(cat /sys/class/infiniband/${hca}/ports/1/gids/\$i 2>/dev/null)\" \"\$(cat /sys/class/infiniband/${hca}/ports/1/gid_attrs/types/\$i 2>/dev/null)\"; done" >&2 || true
+        done
         die "set NCCL_IB_GID_INDEX (same index both ranks) or HEAD_GID/WORKER_GID (per rank) in .env to populated indices"
     fi
 
