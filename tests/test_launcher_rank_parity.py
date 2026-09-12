@@ -26,6 +26,8 @@ Hardening asked for by the production-like tester run on PRs #83/#84:
      a knob the launcher wires must be PRESENT on both ranks, not merely
      equal. The comparison itself is exercised with a synthetic one-rank
      mismatch so a silent pass cannot hide behind equality.
+  E  Host template interpreter selection -- caller PATH, fallback order, strict
+     explicit overrides, and actual Jinja parse failures before either stop.
 
 Everything drives the shipped start.sh under bash from an allow-listed
 environment (PATH with docker / ssh / scp / rsync / curl / ip / nvidia-smi
@@ -703,6 +705,119 @@ def allocator_overrides(h: Harness) -> None:
             f"allocator {value!r}: both ranks receive the complete assignment",
         )
 
+# ------------------------------------------------------------------ part E --
+
+
+def part_e(h: Harness) -> None:
+    print("Part E: host Python/Jinja selection, with real template parsing")
+    # Available candidates use the test runner's Jinja2. Missing-Jinja candidates
+    # run that same Python with -S, so AST/JSON validation still executes normally.
+    from jinja2 import Environment
+
+    Environment(extensions=["jinja2.ext.loopcontrols"])
+    interpreter_log = h.tmp / "interpreters.log"
+
+    def interpreter(name: str, jinja: bool) -> Path:
+        path = h.bin / name
+        path.write_text(
+            "#!/bin/bash\n"
+            f"printf '%s\\037%s\\n' {shlex.quote(name)} \"$*\" >> {shlex.quote(str(interpreter_log))}\n"
+            f"exec {shlex.quote(sys.executable)} {' ' if jinja else '-S '}\"$@\"\n"
+        )
+        path.chmod(0o755)
+        return path
+
+    def run(**extra: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        h.log.unlink(missing_ok=True)
+        interpreter_log.unlink(missing_ok=True)
+        # Intercept only the absolute system candidate in this shell. Never use
+        # the host's actual /usr/bin/python3 or its incidental installed packages.
+        script = (
+            'function /usr/bin/python3() { "$GLM53_TEST_SYSTEM_PYTHON" "$@"; }\n'
+            'source ./start.sh restart\n'
+        )
+        r = subprocess.run(
+            ["bash", "-c", script],
+            cwd=h.repo,
+            text=True,
+            capture_output=True,
+            check=False,
+            env=h.env(GLM53_TEST_SYSTEM_PYTHON=str(h.bin / "system-python"), **extra),
+        )
+        calls = interpreter_log.read_text().splitlines() if interpreter_log.exists() else []
+        # Record real Jinja import/parse executions, not unrelated AST/JSON work.
+        selected = [line.split(SEP, 1)[0] for line in calls if "jinja2" in line]
+        return r, selected
+
+    def reaches_stop(label: str, expected: list[str], **extra: str) -> None:
+        r, selected = run(**extra)
+        calls = h.host_touching_calls()
+        check(
+            any(c[:3] == ["docker", "rm", "-f"] for c in calls)
+            and any(c[0] == "ssh" and "docker rm -f" in c[-1] for c in calls)
+            and selected == expected,
+            f"E {label}: validators={selected}, rc={r.returncode}, stderr={r.stderr[-200:]!r}",
+        )
+
+    def fails_closed(label: str, expected: list[str], **extra: str) -> None:
+        r, selected = run(**extra)
+        check(
+            r.returncode == 2 and not h.host_touching_calls() and selected == expected,
+            f"E {label}: validators={selected}, rc={r.returncode}, stderr={r.stderr[-200:]!r}",
+        )
+
+    for name in ("python3", "python3.12", "python3.11", "system-python"):
+        interpreter(name, True)
+    reaches_stop("caller PATH wins", ["python3", "python3"])
+    interpreter("python3", False)
+    reaches_stop("alternate interpreter", ["python3", "python3.12", "python3.12"])
+    interpreter("python3.12", False)
+    reaches_stop("second alternate", ["python3", "python3.12", "python3.11", "python3.11"])
+    interpreter("python3.11", False)
+    reaches_stop("system fallback", ["python3", "python3.12", "python3.11", "system-python", "system-python"])
+    interpreter("system-python", False)
+    fails_closed("all candidates lack Jinja", ["python3", "python3.12", "python3.11", "system-python"])
+
+    # Healthy alternatives must not rescue an invalid explicit override.
+    for name in ("python3", "python3.12", "python3.11", "system-python"):
+        interpreter(name, True)
+    pinned = interpreter("pinned python", True)
+    reaches_stop("explicit path with spaces", ["pinned python", "pinned python"], GLM53_VALIDATE_PYTHON=str(pinned))
+    reaches_stop("explicit PATH name", ["python3.11", "python3.11"], GLM53_VALIDATE_PYTHON="python3.11")
+    no_jinja = interpreter("no-jinja", False)
+    fails_closed("override lacks Jinja", ["no-jinja"], GLM53_VALIDATE_PYTHON=str(no_jinja))
+    not_executable = interpreter("not-executable", True)
+    not_executable.chmod(0o644)
+    for label, value in (
+        ("empty override", ""),
+        ("missing override", str(h.tmp / "missing-python")),
+        ("non-executable override", str(not_executable)),
+        ("override is not a command line", f"{pinned} -S"),
+    ):
+        fails_closed(label, [], GLM53_VALIDATE_PYTHON=value)
+
+    invalid = h.tmp / "invalid-template.jinja"
+    invalid.write_text("{% if broken %}\n")
+    fails_closed("invalid template does not try alternatives", ["python3", "python3"], CHAT_TEMPLATE_HOST=str(invalid))
+    fails_closed(
+        "invalid template with explicit interpreter",
+        ["pinned python", "pinned python"],
+        GLM53_VALIDATE_PYTHON=str(pinned),
+        CHAT_TEMPLATE_HOST=str(invalid),
+    )
+    interpreter("python3", False)
+    fails_closed(
+        "invalid template after discovery",
+        ["python3", "python3.12", "python3.12"],
+        CHAT_TEMPLATE_HOST=str(invalid),
+    )
+    loop_template = h.tmp / "loop-template.jinja"
+    loop_template.write_text("{% for item in [1] %}{% break %}{% endfor %}\n")
+    reaches_stop(
+        "loop controls remain enabled",
+        ["python3", "python3.12", "python3.12"],
+        CHAT_TEMPLATE_HOST=str(loop_template),
+    )
 
 # ------------------------------------------------------------------- main --
 
@@ -719,6 +834,8 @@ def main() -> int:
         part_c(h)
         part_d(h)
         allocator_overrides(h)
+    with tempfile.TemporaryDirectory() as raw:
+        part_e(Harness(Path(raw)))
     print()
     if FAILURES:
         print(f"FAILED ({len(FAILURES)}): " + "; ".join(FAILURES))

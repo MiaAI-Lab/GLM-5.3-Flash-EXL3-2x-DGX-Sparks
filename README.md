@@ -131,6 +131,11 @@ python3 tests/bench_decode.py --phase structured --structured --runs 5 --max-tok
 python3 tests/bench_decode.py --phase prose --runs 5 --max-tokens 400 --skip-coherence --out /tmp/glm53-prose.json
 ```
 
+For keyed servers, export `VLLM_API_KEY` before running the decode benchmark.
+It sends Bearer auth on completion requests; a non-empty `API_KEY` takes
+precedence over `VLLM_API_KEY`. Unset or empty values fall through, and no
+header is sent when both are unset or empty. `/health` and `/metrics` stay keyless.
+
 ## E2 fat-expert prefill — [PR77](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/pull/77) (2026-09-01)
 
 PR77 adds purpose-built direct/scatter CUDA kernels for the routed “fat”
@@ -604,11 +609,23 @@ word lands at char 39 of the prompt, so changing it is a full prefix-cache miss
 on an otherwise-warm conversation, not a partial one.
 `tests/test_chat_template.py` pins that shape.
 
-Needs: Docker (no sudo) on both nodes, python3 with Jinja2 on the head (verifies mounted inputs before `restart` stops anything), passwordless SSH head → worker,
+Needs: Docker (no sudo) on both nodes, python3 on the head plus a host Python with Jinja2 (verifies mounted inputs before `restart` stops anything), passwordless SSH head → worker,
 `hf` / `huggingface-cli` + `curl` + `rsync` on the head, ~180 GiB free per
 node for the first download. The GHCR image is public; login is only needed
 if you hit anonymous pull rate limits (`GHCR_TOKEN` + `GHCR_USER`).
 Mixed OS accounts: set `WORKER_USER` (this kit uses `zurih` on spark2).
+
+Chat-template validation tries `python3` from the caller's `PATH`, then
+`python3.12`, `python3.11`, and `/usr/bin/python3`, selecting the first that can
+import Jinja2. To pin the validator, set `GLM53_VALIDATE_PYTHON` to one executable
+name (resolved on `PATH`) or path, without command-line arguments; paths containing
+spaces are supported. When this variable is set, it is the **only** candidate:
+an empty value, missing/non-executable interpreter, or missing Jinja2 fails closed
+with exit status 2, without falling back. Unset it to restore automatic discovery.
+The selected interpreter must still parse the template successfully, with loop
+controls enabled; parse failures never trigger interpreter fallback. These failures
+abort `start`/`restart` before either rank is stopped. Python-overlay and JSON
+validation still use the caller's `python3`; this knob changes no other checks.
 
 NCCL cannot use the `10.0.0.x` loopback aliases — leave the CX7 pins unless
 your cabling differs. `ncclCommInitRank` hangs without them.
