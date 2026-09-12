@@ -96,15 +96,12 @@ as below; the stock k=7 / BF16 serve measured ~18–27 tok/s per stream on the l
 | **×1** | **268 ms** | **32.1** | **32.1** |
 | **×2** | 399 ms | 22.1 | 41.2 |
 
-### Faster prose decode (adaptive-k default ON; dense FP8 opt-in)
+### Faster prose decode (opt-in, 2026-09-08)
 
-Two decode speed-ups ship in the overlay. **Adaptive-k is on by default** (`.env.example`,
-lossless at temperature 0); **dense FP8 stays opt-in** because it changes numerics. Matched
-A/B/A at 131k and 850k, 8 runs per prompt, bootstrap 95 % CI; receipts in
-`logs/overnight-decode-20260907T224521Z/` and `logs/headroom-20260911/`:
+Two decode speed-ups ship in the overlay, both **off by default** (matched A/B/A at 131k and 850k, 8 runs per prompt, bootstrap 95 % CI; receipts in `logs/overnight-decode-20260907T224521Z/`):
 
-- **Adaptive verification length** (`GLM53_ADAPTIVE_K=ema`): the DFlash2 drafter still proposes 7 tokens, but the scheduler verifies only a per-step prefix (2, 4 or 7) chosen from a running average of how many drafts have been surviving, batch-uniform so every decode step keeps its FULL CUDA graph. Lossless at temperature 0. Measured vs stock k=7 (8 runs/prompt, 131k and 850k): Silk Road essay +21 %, sky/sunset +13 %, hash-map +10 %, code +5–15 %, counting unchanged. Re-measured 2026-09-11 (union captures, MNBT 7168): hash-map prose **+10.3 %** (29.36 vs 26.63 tok/s A/B/A), structured 65.95 vs 65.91.
-- **FP8 weight-only dense projections** (`GLM53_DENSE_FP8=dense,kda`): KDA and dense-MLP projections quantised per output channel to FP8 at load and run through the Marlin kernel, ~11 ms less per step on everything (+10 % on counting, prose +12–19 % alone, **+37 % on hard prose stacked with adaptive-k**). PROVISIONAL: it changes target numerics by FP8 rounding. 2026-09-11 stacked re-measure vs stock k=7 + BF16 dense: structured 65.9 → **75.0** tok/s, prose 26.6 → **34.4**; KLD vs BF16 dense 0.002–0.016 nats / argmax 97.0–99.7 % on four fixed texts (repo's earlier proxy bar 0.002–0.013).
+- **Adaptive verification length** (`GLM53_ADAPTIVE_K=ema`): the DFlash2 drafter still proposes 7 tokens, but the scheduler verifies only a per-step prefix (2, 4 or 7) chosen from a running average of how many drafts have been surviving, batch-uniform so every decode step keeps its FULL CUDA graph. Lossless at temperature 0. Measured vs stock k=7 (8 runs/prompt, 131k and 850k): Silk Road essay +21 %, sky/sunset +13 %, hash-map +10 %, code +5–15 %, counting unchanged.
+- **FP8 weight-only dense projections** (`GLM53_DENSE_FP8=dense,kda`): KDA and dense-MLP projections quantised per output channel to FP8 at load and run through the Marlin kernel, ~11 ms less per step on everything (+10 % on counting, prose +12–19 % alone, **+37 % on hard prose stacked with adaptive-k**). PROVISIONAL: it changes target numerics by FP8 rounding (KL proxy vs stock 0.002–0.013 nats/position, argmax agreement 94–100 %; no full KLD panel yet).
 
 Turn on (no rebuild; the patches apply at container start on both nodes):
 
@@ -112,12 +109,18 @@ Turn on (no rebuild; the patches apply at container start on both nodes):
 # .env
 GLM53_ADAPTIVE_K=ema
 GLM53_ADAPTIVE_K_SET=2,4,7
-GLM53_DENSE_FP8=dense,kda            # optional; drop to keep BF16 dense weights (lossless config)
-# The launcher now auto-adds the adaptive-k capture list; only needed to override it or cap KV:
-# EXTRA_ARGS="--kv-cache-memory-bytes 15032385536"
+GLM53_DENSE_FP8=dense,kda            # drop this line to keep BF16 dense weights (lossless config)
+EXTRA_ARGS="--kv-cache-memory-bytes 15032385536"
 ```
 
-then `./start.sh restart`. The launcher auto-adds the capture-size list `1 2 3 4 5 6 8 9 10 12 15 16 20 24 32` when adaptive-k is on (multiples of 3, 5 and 8 up to 4 requests; the stock `1 2 4 8 16 24 32` misses the 3- and 5-token shapes). The optional KV cap turns dense-FP8's freed GPU memory into host headroom instead of a bigger pool: uncapped dense FP8 measured 1,019,360 tokens and ~2 GiB MemAvailable at 850k on 2026-09-11. 14 GiB leaves an 883,552-token pool (1.04x of 850k) and ~5 GiB free; 15 GiB buys 1.11x but measured only 0.8-2.2 GiB free under load, which is not enough margin on this UMA. Do not go much lower at 850k either — the boot refuses a pool that cannot hold one max-length request (13 GiB is ~820k tokens). Verify after boot: `docker logs glm53-exl3-head | grep -a "adaptive-k\|dense fp8"` should show `uniform decode graph query lens: [3, 5, 8]` and `dense fp8 groups: dense,kda`, and with `ABLIT=1` the line `ABLIT_METHOD=auto -> transplant` (a missing `ablit/transplant/` silently falls back to the projection edit, which garbles sampled output). A running server can be retuned without a reboot through `~/.cache/vllm-glm53-flash/glm53_adaptive_k.json` (`{"mode":"ema","set":"2,4,7","margin":1.0}`; `{"mode":"off"}` restores k=7). Live sparkDash prose numbers with both on are in the table above.
+For DFlash with adaptive-k enabled (`ema`/`on`/`1`, case-insensitive, surrounding
+whitespace ignored), the launcher supplies the capture-size list automatically.
+It combines stock captures with multiples of the configured `GLM53_ADAPTIVE_K_SET`
+query lengths (`k + 1`, bounded by `DFLASH_TOKENS + 1`), including the full draft
+length, through `MAX_NUM_SEQS`. Explicit `--cudagraph-capture-sizes` in `EXTRA_ARGS`
+always wins; eager mode and non-DFlash capture defaults are unchanged.
+
+then `./start.sh restart`. The capture-size list is required for adaptive-k (multiples of 3, 5 and 8 up to 4 requests; the stock `1 2 4 8 16 24 32` misses the 3- and 5-token shapes). The KV cap turns FP8's freed GPU memory into host headroom instead of a bigger pool: uncapped, the head dropped to ~1.5 GiB MemAvailable at 850k. 14 GiB leaves an 883,552-token pool (1.04x of 850k) and ~5 GiB free; 15 GiB buys 1.11x but measured only 0.8-2.2 GiB free under load, which is not enough margin on this UMA. Do not go much lower at 850k either — the boot refuses a pool that cannot hold one max-length request (13 GiB is ~820k tokens). Verify after boot: `docker logs glm53-exl3-head | grep -a "adaptive-k\|dense fp8"` should show `uniform decode graph query lens: [3, 5, 8]` and `dense fp8 groups: dense,kda`, and with `ABLIT=1` the line `ABLIT_METHOD=auto -> transplant` (a missing `ablit/transplant/` silently falls back to the projection edit, which garbles sampled output). A running server can be retuned without a reboot through `~/.cache/vllm-glm53-flash/glm53_adaptive_k.json` (`{"mode":"ema","set":"2,4,7","margin":1.0}`; `{"mode":"off"}` restores k=7). Live sparkDash prose numbers with both on are in the table above.
 
 Lab `tests/bench_decode.py` on the same protocol (median of 5 × 400, 2026-08-30 C4, `DFLASH_DRAFT_TP=2`): Structured **65.1** tok/s (0.959 accept / 6.71 per step); Prose (hash-map) **27.1** (0.341 / 2.39). Prior TP=1 lab: 61.7 / 26.9. Long context / mixed (~60–100k KV) 24–27. MTP k=2 baseline ~24.6.
 

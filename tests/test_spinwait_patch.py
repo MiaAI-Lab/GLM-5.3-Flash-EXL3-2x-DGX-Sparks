@@ -173,8 +173,7 @@ def test_recipe_wiring() -> None:
     assert start.count("/opt/glm53/patch_spinwait.py:ro") == 2
     assert "COPY overlay/patch_spinwait.py /opt/glm53/patch_spinwait.py" in dockerfile
     assert "tests/test_spinwait_patch.py" in dockerfile
-    # 2026-09-11: the shipped default moved from stock to the swept winner 16.
-    assert "GLM53_SPINWAIT_MS=16" in env_example
+    assert "GLM53_SPINWAIT_MS=stock" in env_example
     assert "GLM53_SPINWAIT_2MS" not in start + dockerfile + env_example
 
 
