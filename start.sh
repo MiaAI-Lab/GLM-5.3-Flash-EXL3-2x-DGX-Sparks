@@ -256,8 +256,9 @@ READY_TIMEOUT="${READY_TIMEOUT:-3600}"
 # 1 = suppress client stop strings until </think> (DSpark #42 class).
 GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # Mixed-step prefill policy when a peer is already decoding (issue #6).
-# skip = do not mix; N>0 = cap tokens; 0 = off.
-GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
+# 0 = stock chunked prefill (concurrent agents); N>0 = cap mixed tokens.
+# skip = decode protection; new prompts can wait for a whole response.
+GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-0}"
 # Adaptive verification length (overlay/patch_adaptive_k.py). off = stock k=7 every step.
 GLM53_ADAPTIVE_K="${GLM53_ADAPTIVE_K:-off}"
 GLM53_ADAPTIVE_K_SET="${GLM53_ADAPTIVE_K_SET:-2,4,7}"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep decode from sharing an engine step with a long sparse-MLA prefill.
+"""Optional protection from mixing decode with a long sparse-MLA prefill.
 
 Issue #6: max_num_batched_tokens=1024 is the whole engine step. A decode
 lane needs ~8 tokens (1 + DFlash2 k=7); the leftover ~1016 go to a peer
@@ -7,14 +7,15 @@ FLASHINFER_MLA_SPARSE_SM120 prefill chunk (~1.5 s). Decode still runs, but
 at ~5 tok/s instead of ~50.
 
 A 128-token mixed cap is not enough on 80k KV: the indexer has a large
-per-step cost, so mixed decode stays ~10 tok/s. Default is therefore to
-skip scheduling that prefill this step (it resumes when no peer is
-decoding). Solo prefill is unchanged (1024).
+per-step cost, so mixed decode stays ~10 tok/s. However, skipping every
+prefill while a peer decodes can starve another agent for the entire
+response. Default to the stock chunked-prefill scheduler so both make
+progress. Decode protection remains an explicit throughput tradeoff.
 
 GLM53_MIXED_PREFILL_CHUNK:
-  skip / -1  — do not mix prefill with decode (default)
+  skip / -1  — do not mix prefill with decode; new prompts may starve
   N>0        — cap mixed prefill chunks to N tokens (128 still stalls ~10 tok/s)
-  0 / off    — disable
+  0 / off    — stock chunked-prefill scheduling (default)
 
 Fail closed if the vLLM scheduler anchors drift.
 """
@@ -41,7 +42,7 @@ def _glm53_mixed_prefill_policy(running, current):
 
     None = no extra policy. 0 = skip this prefill this step. N>0 = cap.
     """
-    raw = os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "skip").strip().lower()
+    raw = os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "0").strip().lower()
     if raw in ("0", "off", "no"):
         return None
     if raw in ("skip", "-1"):
@@ -119,6 +120,16 @@ def main() -> int:
         raise SystemExit(f"missing {P}")
     text = P.read_text()
     if MARK in text:
+        # Existing images already contain this patch. Upgrade its known old
+        # default as well; otherwise an idempotent reapply keeps starvation
+        # enabled when the launcher does not supply an explicit value.
+        old_default = 'os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "skip")'
+        new_default = 'os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "0")'
+        if old_default in text:
+            text = replace_once(text, old_default, new_default, "legacy mixed-prefill default")
+            P.write_text(text)
+            print(f"{P.name}: upgraded mixed-prefill default to stock scheduling")
+            return 0
         print(f"{P.name}: {MARK} already present — skipping")
         return 0
     if "import os\n" not in text.split("import time\n", 1)[0]:
@@ -131,7 +142,7 @@ def main() -> int:
     text = replace_once(text, RUNNING_OLD, RUNNING_NEW, "running-prefill")
     text = replace_once(text, WAITING_OLD, WAITING_NEW, "waiting-prefill")
     P.write_text(text)
-    cap = os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "skip")
+    cap = os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "0")
     print(f"patched {P.name} (mixed prefill policy={cap})")
     return 0
 
