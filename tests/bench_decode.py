@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import math
+import os
 import re
 import sys
 import time
@@ -33,16 +33,18 @@ SPEC_RE = re.compile(
 )
 
 
+def _auth_headers() -> dict[str, str]:
+    """Return the bearer header for keyed vLLM serves, if configured."""
+    key = os.environ.get("API_KEY") or os.environ.get("VLLM_API_KEY")
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
 def _post(path: str, body: dict, timeout: float = 600.0, stream: bool = False):
     data = json.dumps(body).encode()
-    headers = {"Content-Type": "application/json"}
-    _k = os.environ.get("VLLM_API_KEY", "").strip()
-    if _k:
-        headers["Authorization"] = "Bearer " + _k
     req = urllib.request.Request(
         BASE + path,
         data=data,
-        headers=headers,
+        headers={"Content-Type": "application/json", **_auth_headers()},
         method="POST",
     )
     return urllib.request.urlopen(req, timeout=timeout)

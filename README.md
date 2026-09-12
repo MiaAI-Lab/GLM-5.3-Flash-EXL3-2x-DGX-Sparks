@@ -110,8 +110,15 @@ Turn on (no rebuild; the patches apply at container start on both nodes):
 GLM53_ADAPTIVE_K=ema
 GLM53_ADAPTIVE_K_SET=2,4,7
 GLM53_DENSE_FP8=dense,kda            # drop this line to keep BF16 dense weights (lossless config)
-EXTRA_ARGS="--cudagraph-capture-sizes 1 2 3 4 5 6 8 9 10 12 15 16 20 24 32 --kv-cache-memory-bytes 15032385536"
+EXTRA_ARGS="--kv-cache-memory-bytes 15032385536"
 ```
+
+For DFlash with adaptive-k enabled (`ema`/`on`/`1`, case-insensitive, surrounding
+whitespace ignored), the launcher supplies the capture-size list automatically.
+It combines stock captures with multiples of the configured `GLM53_ADAPTIVE_K_SET`
+query lengths (`k + 1`, bounded by `DFLASH_TOKENS + 1`), including the full draft
+length, through `MAX_NUM_SEQS`. Explicit `--cudagraph-capture-sizes` in `EXTRA_ARGS`
+always wins; eager mode and non-DFlash capture defaults are unchanged.
 
 then `./start.sh restart`. The capture-size list is required for adaptive-k (multiples of 3, 5 and 8 up to 4 requests; the stock `1 2 4 8 16 24 32` misses the 3- and 5-token shapes). The KV cap turns FP8's freed GPU memory into host headroom instead of a bigger pool: uncapped, the head dropped to ~1.5 GiB MemAvailable at 850k. 14 GiB leaves an 883,552-token pool (1.04x of 850k) and ~5 GiB free; 15 GiB buys 1.11x but measured only 0.8-2.2 GiB free under load, which is not enough margin on this UMA. Do not go much lower at 850k either — the boot refuses a pool that cannot hold one max-length request (13 GiB is ~820k tokens). Verify after boot: `docker logs glm53-exl3-head | grep -a "adaptive-k\|dense fp8"` should show `uniform decode graph query lens: [3, 5, 8]` and `dense fp8 groups: dense,kda`, and with `ABLIT=1` the line `ABLIT_METHOD=auto -> transplant` (a missing `ablit/transplant/` silently falls back to the projection edit, which garbles sampled output). A running server can be retuned without a reboot through `~/.cache/vllm-glm53-flash/glm53_adaptive_k.json` (`{"mode":"ema","set":"2,4,7","margin":1.0}`; `{"mode":"off"}` restores k=7). Live sparkDash prose numbers with both on are in the table above.
 
@@ -130,6 +137,11 @@ python3 tests/bench_decode.py --phase structured --structured --runs 5 --max-tok
 # prose (hash-map explanation)
 python3 tests/bench_decode.py --phase prose --runs 5 --max-tokens 400 --skip-coherence --out /tmp/glm53-prose.json
 ```
+
+For keyed servers, export `VLLM_API_KEY` before running the decode benchmark.
+It sends Bearer auth on completion requests; a non-empty `API_KEY` takes
+precedence over `VLLM_API_KEY`. Unset or empty values fall through, and no
+header is sent when both are unset or empty. `/health` and `/metrics` stay keyless.
 
 ## E2 fat-expert prefill — [PR77](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/pull/77) (2026-09-01)
 
@@ -445,6 +457,33 @@ tokens — the 7168 / 10752 / 14336 hit rows above are exactly 2 / 3 / 4 full
 pages. And since this build exposes **no cache-reset endpoint**, the bench
 salts its filler content per invocation so every cold is genuinely cold.
 
+### Optional sparse retention and DFlash replay
+
+`GLM53_APC_RETENTION_INTERVAL_SWA` controls the DFlash2 drafter separately
+from target retention. Empty inherits the global retention policy and keeps
+ordinary eviction priority. Explicit `0` retains reachable drafter boundaries
+and makes cached draft-only blocks lower priority than target cache blocks.
+Sparse target Mamba state also retains the prior replay boundary; a cached
+DFlash window is reused only after successful EAGLE verification, otherwise
+the request backs up to rebuild its window.
+
+**Sparse retention is not a general performance upgrade.** On one 2× Spark
+deployment, explicit global/SWA `0/0` retained four independent 210K histories
+for ~2.5 s revisits. In a matched 128K comparison, however, an edit at 90%
+took 112.49 s instead of 14.70 s, and a branch at 90% took 99.89 s instead of
+3.35 s: the sparse policy reused zero tokens where the old runtime reused
+111,104. All tested answers were correct. These are sequential histories,
+not four simultaneously active 210K streams.
+
+The global launcher spelling is `GLM53_APC_RETENTION_INTERVAL` (TP=2 only).
+Leave it unset for normal use; TP=4 rejects either retention override.
+
+Both retention knobs remain unset by default. Keep that default unless the
+tradeoff fits the workload. SWA-only sparse retention with a dense target is
+a separate configuration; the all-zero results do not qualify it. See the
+[protocol, raw measurements, and limitations](docs/apc-retention-qualification.md)
+before selecting a policy or a cache budget for another kit.
+
 ## Quick start (2× Spark)
 
 ```bash
@@ -577,11 +616,23 @@ word lands at char 39 of the prompt, so changing it is a full prefix-cache miss
 on an otherwise-warm conversation, not a partial one.
 `tests/test_chat_template.py` pins that shape.
 
-Needs: Docker (no sudo) on both nodes, passwordless SSH head → worker,
+Needs: Docker (no sudo) on both nodes, python3 on the head plus a host Python with Jinja2 (verifies mounted inputs before `restart` stops anything), passwordless SSH head → worker,
 `hf` / `huggingface-cli` + `curl` + `rsync` on the head, ~180 GiB free per
 node for the first download. The GHCR image is public; login is only needed
 if you hit anonymous pull rate limits (`GHCR_TOKEN` + `GHCR_USER`).
 Mixed OS accounts: set `WORKER_USER` (this kit uses `zurih` on spark2).
+
+Chat-template validation tries `python3` from the caller's `PATH`, then
+`python3.12`, `python3.11`, and `/usr/bin/python3`, selecting the first that can
+import Jinja2. To pin the validator, set `GLM53_VALIDATE_PYTHON` to one executable
+name (resolved on `PATH`) or path, without command-line arguments; paths containing
+spaces are supported. When this variable is set, it is the **only** candidate:
+an empty value, missing/non-executable interpreter, or missing Jinja2 fails closed
+with exit status 2, without falling back. Unset it to restore automatic discovery.
+The selected interpreter must still parse the template successfully, with loop
+controls enabled; parse failures never trigger interpreter fallback. These failures
+abort `start`/`restart` before either rank is stopped. Python-overlay and JSON
+validation still use the caller's `python3`; this knob changes no other checks.
 
 NCCL cannot use the `10.0.0.x` loopback aliases — leave the CX7 pins unless
 your cabling differs. `ncclCommInitRank` hangs without them.
@@ -651,8 +702,11 @@ that are now documented/enforced:
 | `MAX_NUM_BATCHED_TOKENS` | `7168` | current maintainer default at `MAX_NUM_SEQS=4`. MNBT 2048 was the clean PR77 A/B configuration and the best measured balance on an independent `MAX_NUM_SEQS=16` geometry. Tune per deployment; change after a repeated same-kit comparison |
 | `MAX_MODEL_LEN` | `850000` | default context since 2026-09-07 (E3 default; 1M fits again with `EXL3_FAT_GROUPED=0`). 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool. At MNBT 7168 one 1M request needs **14.52 GiB** KV (10.98 GiB at 500k; ~7.4 GiB fixed + 7.1 GiB per 1M); the E3 recipe runs 500k |
 | `GPU_MEM_UTIL` | `0.85` | GB10 UMA budget (default lowered from 0.87 on 2026-09-07: each 0.01 is 1.2 GiB of host headroom, and long prefills need it — see *Cold prefill (E3)*). E3 at 900k / 0.85: pool ~1.05M tokens / 1.17× (0.87: 16.2 GiB / 1,051,648 tokens). Pre-E3 receipts at 1M / 0.87: 1,754,237 tokens / 18.67 GiB (MNBT 2048); 1,243,902 tokens / 1.24× (7168, rightsize, E2) |
+| `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` when unset | TP=2 `start.sh` passes the effective value to both ranks. An explicit empty value disables this option; caller exports, including empty, override `.env`. Changing allocator settings requires a restart and separate memory/connector qualification; TP=4 is unchanged |
 | `KV_CACHE_DTYPE` | `fp8` | packed `fp8_ds_mla`; not `nvfp4`, not bf16 |
 | `DEFAULT_MAX_NEW_TOKENS` | `65536` | server-side default for an omitted `max_tokens` (HF semantics: == vLLM `max_tokens`). Without it a request may decode unbounded (budget ~`max_model_len` - prompt) and grow KV until it preempts other sessions. Admission is chunk-based in this build (not gated on max_tokens) - long-context concurrency is governed by the effective KV pool (issue #43). Explicit client `max_tokens` wins; empty = old unbounded fallback |
+| `GLM53_APC_RETENTION_INTERVAL_SWA` | *(unset)* | TP=2 DFlash2 drafter retention. Empty inherits global retention with ordinary priority; explicit `0` keeps reachable boundaries and enables draft-only eviction priority; positive values must be multiples of 3584, at most 1,000,000. Requires `SPEC_METHOD=dflash` and the hybrid prefix overlay. TP=4 rejects a non-empty value. Qualify retention, branching, and draft acceptance for the chosen global/SWA pair; see [measurements](docs/apc-retention-qualification.md) |
+
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (7168) |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
 | `GLM53_DEFAULT_REASONING_EFFORT` | *(empty)* | `low` / `high` / `max` via `--default-chat-template-kwargs` on both ranks. Empty sends no flag, so omitted effort renders Max. Per-request `chat_template_kwargs.reasoning_effort` overrides the default; `medium` is rejected because the template maps it to Max |
@@ -690,6 +744,8 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `overlay/patch_exl3_ext_aarch64.py` | stub AVX CPU allreduce so the ext builds on GB10 |
 | `overlay/patch_model_overrides.py` | `"exl3"` in ModelConfig overrides |
 | `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0`, E2 diag schema, E3 grouped tables/parity/graph-replay/fallback checks |
+| `tests/test_apc_per_group_retention.py` | host: overlay apply/idempotence, min-exemption derivation, routing, env validation, composition with `patch_hybrid_prefix_hit.py` in both orders, id-cost/capacity arithmetic (needs `GLM53_KV_COORDINATOR_PY_SRC` + `_PRISTINE` copies of the fork's coordinator) |
+| `tests/test_launcher_rank_parity.py` | launcher (CPU-only, docker/ssh stubbed): retention validation, pre-stop artifact checks, ordered hybrid/per-group overlays, and matching rank environments and mounts |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
 | `tests/test_start_overrides.py` | CPU-only caller precedence: `.env` keys, empty exports, shell assignments, and child inheritance |
 | `start.sh` / `stop.sh` / `download.sh` | 2-node launch; Hub fetch on the head only |
