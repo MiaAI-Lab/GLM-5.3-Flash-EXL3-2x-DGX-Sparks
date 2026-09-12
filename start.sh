@@ -635,31 +635,40 @@ preflight() {
     worker_ssh "nvidia-smi -L 2>/dev/null | grep -q GB10" \
         || warn "no GB10 GPU visible on worker"
 
-    # Each rank's GID index must name a populated entry on ITS OWN CX7 device.
-    # An empty (all-zero) entry passes every earlier check and then kills that
-    # rank ~60 s in with ibv_modify_qp errno 61 "No data available". The index is
-    # per-NIC, so validate head and worker separately: some pairs share one good
-    # index, others need different ones (HEAD_GID / WORKER_GID).
-    local gid_head gid_worker gid_path
-    gid_path="/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gids/${HEAD_GID}"
-    gid_head=$(cat "$gid_path" 2>/dev/null | tr -d ':0' || true)
-    gid_path="/sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gids/${WORKER_GID}"
-    gid_worker=$(worker_ssh "cat '$gid_path' 2>/dev/null" | tr -d ':0' || true)
+    # Each rank's GID index must be populated on EVERY selected CX7 device.
+    # HEAD_CX7_IB / WORKER_CX7_IB are literal names or comma-separated lists;
+    # pass the original values unchanged to NCCL below.
+    local gid_head=ok gid_worker=ok gid_path hca i
+    local -a head_hcas worker_hcas
+    IFS=, read -r -a head_hcas <<< "$HEAD_CX7_IB"
+    IFS=, read -r -a worker_hcas <<< "$WORKER_CX7_IB"
+    for hca in "${head_hcas[@]}"; do
+        gid_path="/sys/class/infiniband/${hca}/ports/1/gids/${HEAD_GID}"
+        if [ -z "$(cat "$gid_path" 2>/dev/null | tr -d ':0' || true)" ]; then
+            gid_head=""
+            warn "head GID index ${HEAD_GID} is EMPTY on ${hca}"
+        fi
+    done
+    for hca in "${worker_hcas[@]}"; do
+        gid_path="/sys/class/infiniband/${hca}/ports/1/gids/${WORKER_GID}"
+        if [ -z "$(worker_ssh "cat '$gid_path' 2>/dev/null" | tr -d ':0' || true)" ]; then
+            gid_worker=""
+            warn "worker GID index ${WORKER_GID} is EMPTY on ${hca}"
+        fi
+    done
     if [ -z "$gid_head" ] || [ -z "$gid_worker" ]; then
-        if [ -z "$gid_head" ]; then
-            warn "head GID index ${HEAD_GID} is EMPTY on ${HEAD_CX7_IB}"
-        fi
-        if [ -z "$gid_worker" ]; then
-            warn "worker GID index ${WORKER_GID} is EMPTY on ${WORKER_CX7_IB}"
-        fi
         warn "GID tables — pick each node's ::ffff:<ip> entry whose type is RoCE v2;"
         warn "the two indices need not match, and a v1 entry at the same index will not work:"
-        for i in 0 1 2 3 4 5 6 7; do
-            printf '    head   gid%s: %-40s %s\n' "$i" \
-                "$(cat "/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gids/$i" 2>/dev/null)" \
-                "$(cat "/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gid_attrs/types/$i" 2>/dev/null)" >&2
+        for hca in "${head_hcas[@]}"; do
+            for i in 0 1 2 3 4 5 6 7; do
+                printf '    head   %s gid%s: %-40s %s\n' "$hca" "$i" \
+                    "$(cat "/sys/class/infiniband/${hca}/ports/1/gids/$i" 2>/dev/null)" \
+                    "$(cat "/sys/class/infiniband/${hca}/ports/1/gid_attrs/types/$i" 2>/dev/null)" >&2
+            done
         done
-        worker_ssh "for i in 0 1 2 3 4 5 6 7; do printf '    worker gid%s: %-40s %s\n' \"\$i\" \"\$(cat /sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gids/\$i 2>/dev/null)\" \"\$(cat /sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gid_attrs/types/\$i 2>/dev/null)\"; done" >&2 || true
+        for hca in "${worker_hcas[@]}"; do
+            worker_ssh "for i in 0 1 2 3 4 5 6 7; do printf '    worker %s gid%s: %-40s %s\n' '${hca}' \"\$i\" \"\$(cat /sys/class/infiniband/${hca}/ports/1/gids/\$i 2>/dev/null)\" \"\$(cat /sys/class/infiniband/${hca}/ports/1/gid_attrs/types/\$i 2>/dev/null)\"; done" >&2 || true
+        done
         die "set NCCL_IB_GID_INDEX (same index both ranks) or HEAD_GID/WORKER_GID (per rank) in .env to populated indices"
     fi
 
