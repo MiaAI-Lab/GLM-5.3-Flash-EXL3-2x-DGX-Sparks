@@ -448,6 +448,27 @@ validate_numeric_config() {
 # error (wrong path, stale checkout, truncated copy); it is not a
 # tamper-proof manifest. Needs python3 on the head (DGX OS ships it).
 # preflight() re-checks existence later; this is the fail-closed early gate.
+# The chat-template parse below needs jinja2 on the host. The caller's
+# `python3` can be a venv/brew interpreter without it, so probe the caller
+# first, then common system interpreters. An explicit override is the sole
+# candidate (one executable name/path, no arguments); even empty is an error.
+_glm53_template_python() {
+    local candidate
+    local -a candidates=(python3 python3.12 python3.11 /usr/bin/python3)
+    if [ "${GLM53_VALIDATE_PYTHON+x}" = x ]; then
+        candidates=("$GLM53_VALIDATE_PYTHON")
+    fi
+    for candidate in "${candidates[@]}"; do
+        [ -n "$candidate" ] || continue
+        command -v "$candidate" >/dev/null 2>&1 || continue
+        if "$candidate" -c 'import jinja2' >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 validate_overlay_artifacts() {
     # Sentinels that contain quotes live in single-quoted locals.
     local main_guard='    sys.exit(main())'
@@ -511,8 +532,17 @@ validate_overlay_artifacts() {
         echo "chat template missing, unreadable, empty or not a regular file: $CHAT_TEMPLATE_HOST" >&2
         return 2
     fi
-    if ! python3 -c 'from jinja2 import Environment; import sys; Environment(extensions=["jinja2.ext.loopcontrols"]).parse(open(sys.argv[1], encoding="utf-8").read())' "$CHAT_TEMPLATE_HOST" 2>/dev/null; then
-        echo "chat template is invalid or python3 cannot import jinja2: $CHAT_TEMPLATE_HOST" >&2
+    local template_python
+    if ! template_python="$(_glm53_template_python)"; then
+        if [ "${GLM53_VALIDATE_PYTHON+x}" = x ]; then
+            echo "GLM53_VALIDATE_PYTHON must name an executable Python with jinja2 (no fallback): ${GLM53_VALIDATE_PYTHON}" >&2
+        else
+            echo "no host python3 with jinja2 found (chat-template validation; set GLM53_VALIDATE_PYTHON)" >&2
+        fi
+        return 2
+    fi
+    if ! "$template_python" -c 'from jinja2 import Environment; import sys; Environment(extensions=["jinja2.ext.loopcontrols"]).parse(open(sys.argv[1], encoding="utf-8").read())' "$CHAT_TEMPLATE_HOST" 2>/dev/null; then
+        echo "chat template is invalid: $CHAT_TEMPLATE_HOST" >&2
         return 2
     fi
     if ! python3 -c 'import json, sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$SCRIPT_DIR/ablit/LAYER_MAP.json" 2>/dev/null; then
@@ -621,31 +651,40 @@ preflight() {
     worker_ssh "nvidia-smi -L 2>/dev/null | grep -q GB10" \
         || warn "no GB10 GPU visible on worker"
 
-    # Each rank's GID index must name a populated entry on ITS OWN CX7 device.
-    # An empty (all-zero) entry passes every earlier check and then kills that
-    # rank ~60 s in with ibv_modify_qp errno 61 "No data available". The index is
-    # per-NIC, so validate head and worker separately: some pairs share one good
-    # index, others need different ones (HEAD_GID / WORKER_GID).
-    local gid_head gid_worker gid_path
-    gid_path="/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gids/${HEAD_GID}"
-    gid_head=$(cat "$gid_path" 2>/dev/null | tr -d ':0' || true)
-    gid_path="/sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gids/${WORKER_GID}"
-    gid_worker=$(worker_ssh "cat '$gid_path' 2>/dev/null" | tr -d ':0' || true)
+    # Each rank's GID index must be populated on EVERY selected CX7 device.
+    # HEAD_CX7_IB / WORKER_CX7_IB are literal names or comma-separated lists;
+    # pass the original values unchanged to NCCL below.
+    local gid_head=ok gid_worker=ok gid_path hca i
+    local -a head_hcas worker_hcas
+    IFS=, read -r -a head_hcas <<< "$HEAD_CX7_IB"
+    IFS=, read -r -a worker_hcas <<< "$WORKER_CX7_IB"
+    for hca in "${head_hcas[@]}"; do
+        gid_path="/sys/class/infiniband/${hca}/ports/1/gids/${HEAD_GID}"
+        if [ -z "$(cat "$gid_path" 2>/dev/null | tr -d ':0' || true)" ]; then
+            gid_head=""
+            warn "head GID index ${HEAD_GID} is EMPTY on ${hca}"
+        fi
+    done
+    for hca in "${worker_hcas[@]}"; do
+        gid_path="/sys/class/infiniband/${hca}/ports/1/gids/${WORKER_GID}"
+        if [ -z "$(worker_ssh "cat '$gid_path' 2>/dev/null" | tr -d ':0' || true)" ]; then
+            gid_worker=""
+            warn "worker GID index ${WORKER_GID} is EMPTY on ${hca}"
+        fi
+    done
     if [ -z "$gid_head" ] || [ -z "$gid_worker" ]; then
-        if [ -z "$gid_head" ]; then
-            warn "head GID index ${HEAD_GID} is EMPTY on ${HEAD_CX7_IB}"
-        fi
-        if [ -z "$gid_worker" ]; then
-            warn "worker GID index ${WORKER_GID} is EMPTY on ${WORKER_CX7_IB}"
-        fi
         warn "GID tables — pick each node's ::ffff:<ip> entry whose type is RoCE v2;"
         warn "the two indices need not match, and a v1 entry at the same index will not work:"
-        for i in 0 1 2 3 4 5 6 7; do
-            printf '    head   gid%s: %-40s %s\n' "$i" \
-                "$(cat "/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gids/$i" 2>/dev/null)" \
-                "$(cat "/sys/class/infiniband/${HEAD_CX7_IB}/ports/1/gid_attrs/types/$i" 2>/dev/null)" >&2
+        for hca in "${head_hcas[@]}"; do
+            for i in 0 1 2 3 4 5 6 7; do
+                printf '    head   %s gid%s: %-40s %s\n' "$hca" "$i" \
+                    "$(cat "/sys/class/infiniband/${hca}/ports/1/gids/$i" 2>/dev/null)" \
+                    "$(cat "/sys/class/infiniband/${hca}/ports/1/gid_attrs/types/$i" 2>/dev/null)" >&2
+            done
         done
-        worker_ssh "for i in 0 1 2 3 4 5 6 7; do printf '    worker gid%s: %-40s %s\n' \"\$i\" \"\$(cat /sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gids/\$i 2>/dev/null)\" \"\$(cat /sys/class/infiniband/${WORKER_CX7_IB}/ports/1/gid_attrs/types/\$i 2>/dev/null)\"; done" >&2 || true
+        for hca in "${worker_hcas[@]}"; do
+            worker_ssh "for i in 0 1 2 3 4 5 6 7; do printf '    worker %s gid%s: %-40s %s\n' '${hca}' \"\$i\" \"\$(cat /sys/class/infiniband/${hca}/ports/1/gids/\$i 2>/dev/null)\" \"\$(cat /sys/class/infiniband/${hca}/ports/1/gid_attrs/types/\$i 2>/dev/null)\"; done" >&2 || true
+        done
         die "set NCCL_IB_GID_INDEX (same index both ranks) or HEAD_GID/WORKER_GID (per rank) in .env to populated indices"
     fi
 
@@ -1358,7 +1397,9 @@ launch_cluster() {
         -e "TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST"
         -e "FLASHINFER_CUDA_ARCH_LIST=$FLASHINFER_CUDA_ARCH_LIST"
         -e FLASHINFER_DISABLE_VERSION_CHECK=1
-        -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+        # Overridable: the hidden-state KV connector (training windows) refuses
+        # expandable_segments; pass PYTORCH_CUDA_ALLOC_CONF= to disable.
+        -e "PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF-expandable_segments:True}"
         -e "VLLM_ENGINE_READY_TIMEOUT_S=$READY_TIMEOUT"
         # py-cpuinfo JSON-parses empty output on Grace/aarch64; the usage
         # thread then dumps JSONDecodeError. Stats are off on this private kit.
@@ -1379,10 +1420,11 @@ launch_cluster() {
         nccl_common+=(-e "VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA=$GLM53_APC_RETENTION_INTERVAL_SWA")
         log "drafter (SWA) prefix-cache retention interval: ${GLM53_APC_RETENTION_INTERVAL_SWA} (both ranks)"
     fi
-    local worker_nccl="" e
+    local worker_nccl="" e quoted_env
     for e in "${nccl_common[@]}"; do
         [ "$e" = "-e" ] && continue
-        worker_nccl+=" -e $e"
+        printf -v quoted_env '%q' "$e"
+        worker_nccl+=" -e $quoted_env"
     done
 
     local -a head_preload=() worker_preload=""

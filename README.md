@@ -138,6 +138,11 @@ python3 tests/bench_decode.py --phase structured --structured --runs 5 --max-tok
 python3 tests/bench_decode.py --phase prose --runs 5 --max-tokens 400 --skip-coherence --out /tmp/glm53-prose.json
 ```
 
+For keyed servers, export `VLLM_API_KEY` before running the decode benchmark.
+It sends Bearer auth on completion requests; a non-empty `API_KEY` takes
+precedence over `VLLM_API_KEY`. Unset or empty values fall through, and no
+header is sent when both are unset or empty. `/health` and `/metrics` stay keyless.
+
 ## E2 fat-expert prefill — [PR77](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/pull/77) (2026-09-01)
 
 PR77 adds purpose-built direct/scatter CUDA kernels for the routed “fat”
@@ -611,11 +616,23 @@ word lands at char 39 of the prompt, so changing it is a full prefix-cache miss
 on an otherwise-warm conversation, not a partial one.
 `tests/test_chat_template.py` pins that shape.
 
-Needs: Docker (no sudo) on both nodes, python3 with Jinja2 on the head (verifies mounted inputs before `restart` stops anything), passwordless SSH head → worker,
+Needs: Docker (no sudo) on both nodes, python3 on the head plus a host Python with Jinja2 (verifies mounted inputs before `restart` stops anything), passwordless SSH head → worker,
 `hf` / `huggingface-cli` + `curl` + `rsync` on the head, ~180 GiB free per
 node for the first download. The GHCR image is public; login is only needed
 if you hit anonymous pull rate limits (`GHCR_TOKEN` + `GHCR_USER`).
 Mixed OS accounts: set `WORKER_USER` (this kit uses `zurih` on spark2).
+
+Chat-template validation tries `python3` from the caller's `PATH`, then
+`python3.12`, `python3.11`, and `/usr/bin/python3`, selecting the first that can
+import Jinja2. To pin the validator, set `GLM53_VALIDATE_PYTHON` to one executable
+name (resolved on `PATH`) or path, without command-line arguments; paths containing
+spaces are supported. When this variable is set, it is the **only** candidate:
+an empty value, missing/non-executable interpreter, or missing Jinja2 fails closed
+with exit status 2, without falling back. Unset it to restore automatic discovery.
+The selected interpreter must still parse the template successfully, with loop
+controls enabled; parse failures never trigger interpreter fallback. These failures
+abort `start`/`restart` before either rank is stopped. Python-overlay and JSON
+validation still use the caller's `python3`; this knob changes no other checks.
 
 NCCL cannot use the `10.0.0.x` loopback aliases — leave the CX7 pins unless
 your cabling differs. `ncclCommInitRank` hangs without them.
@@ -685,6 +702,7 @@ that are now documented/enforced:
 | `MAX_NUM_BATCHED_TOKENS` | `7168` | current maintainer default at `MAX_NUM_SEQS=4`. MNBT 2048 was the clean PR77 A/B configuration and the best measured balance on an independent `MAX_NUM_SEQS=16` geometry. Tune per deployment; change after a repeated same-kit comparison |
 | `MAX_MODEL_LEN` | `850000` | default context since 2026-09-07 (E3 default; 1M fits again with `EXL3_FAT_GROUPED=0`). 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool. At MNBT 7168 one 1M request needs **14.52 GiB** KV (10.98 GiB at 500k; ~7.4 GiB fixed + 7.1 GiB per 1M); the E3 recipe runs 500k |
 | `GPU_MEM_UTIL` | `0.85` | GB10 UMA budget (default lowered from 0.87 on 2026-09-07: each 0.01 is 1.2 GiB of host headroom, and long prefills need it — see *Cold prefill (E3)*). E3 at 900k / 0.85: pool ~1.05M tokens / 1.17× (0.87: 16.2 GiB / 1,051,648 tokens). Pre-E3 receipts at 1M / 0.87: 1,754,237 tokens / 18.67 GiB (MNBT 2048); 1,243,902 tokens / 1.24× (7168, rightsize, E2) |
+| `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` when unset | TP=2 `start.sh` passes the effective value to both ranks. An explicit empty value disables this option; caller exports, including empty, override `.env`. Changing allocator settings requires a restart and separate memory/connector qualification; TP=4 is unchanged |
 | `KV_CACHE_DTYPE` | `fp8` | packed `fp8_ds_mla`; not `nvfp4`, not bf16 |
 | `GLM53_APC_RETENTION_INTERVAL_SWA` | *(unset)* | TP=2 DFlash2 drafter retention. Empty inherits global retention with ordinary priority; explicit `0` keeps reachable boundaries and enables draft-only eviction priority; positive values must be multiples of 3584, at most 1,000,000. Requires `SPEC_METHOD=dflash` and the hybrid prefix overlay. TP=4 rejects a non-empty value. Qualify retention, branching, and draft acceptance for the chosen global/SWA pair; see [measurements](docs/apc-retention-qualification.md) |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (7168) |
