@@ -382,8 +382,8 @@ def test_recipe_wiring_if_present() -> None:
     dockerfile = ROOT / "Dockerfile"
     if not start.is_file() or not dockerfile.is_file():
         return
-    launcher = start.read_text()
-    image = dockerfile.read_text()
+    launcher = start.read_text(encoding="utf-8")
+    image = dockerfile.read_text(encoding="utf-8")
     assert 'XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-' in launcher
     # Both ranks apply the one pinned list (GLM53_OVERLAY_ORDER) that
     # write_inner_scripts emits into the head and worker inner scripts.
