@@ -85,7 +85,7 @@ curl -s http://localhost:8888/v1/chat/completions \
         * Lower context than 1M -> do not reduce MAX_MODEL_LEN; pool size depends on
           MNBT and graph reservations (README "Context").
         * Vision requests rejected -> LANGUAGE_MODEL_ONLY=1 disables image/video;
-          check --limit-mm-per-prompt shape {image:4,video:1}.
+          check --limit-mm-per-prompt shape {image:100,video:1}.
 -->
 
 ```
