@@ -1,12 +1,30 @@
 # Concurrent agents
 
 Use `GLM53_MIXED_PREFILL_CHUNK=0` for interactive use by multiple agents.
-This restores vLLM's stock chunked-prefill scheduler: decoding requests get
-their tokens and new prompts can use the remaining token budget in the same
-step. `MAX_NUM_SEQS` still limits active sequences, and
+This restores vLLM's stock chunked-prefill scheduler: a decoding peer no
+longer explicitly prevents another prompt from using the remaining token
+budget in the same step. `MAX_NUM_SEQS` still limits active sequences, and
 `MAX_NUM_BATCHED_TOKENS` limits the whole step. A context still needs its full
 prefill before it can emit a first token; this setting does not impose a
 wall-clock latency guarantee or bypass a full KV cache.
+
+The total token budget can still be exhausted by an already-running long
+prefill. If a second prompt waits on capacity while cache and sequence slots
+are available, inspect the per-request allocation as well as the mixed-prefill
+rule. vLLM's existing `--long-prefill-token-threshold` option can cap that
+allocation for both running and waiting prompts. For example, with
+`MAX_NUM_BATCHED_TOKENS=1024`, a threshold of `512` leaves budget for a second
+request (speculative decoding also consumes budget). Add it to `EXTRA_ARGS`
+without removing any existing arguments, then recreate and requalify the
+service. A smaller cap can reduce single-request prefill throughput; test a
+short peer arriving during a cold long prefill and measure both latencies.
+
+`MAX_MODEL_LEN` is a per-request limit, not a promise that every sequence slot
+can hold a context of that size. Compare the engine's startup KV-cache token
+capacity and maximum-concurrency estimate with the combined active contexts.
+Two million-token windows require capacity for both; enabling interleaving
+does not add memory. Agent-side context compression can bound the resident
+history while preserving a session across many hours and requests.
 
 The previous `skip` default gives a new prompt zero prefill tokens whenever a
 peer is decoding. A long generation can therefore starve another agent for
