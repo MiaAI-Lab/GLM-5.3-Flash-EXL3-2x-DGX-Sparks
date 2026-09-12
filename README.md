@@ -110,8 +110,15 @@ Turn on (no rebuild; the patches apply at container start on both nodes):
 GLM53_ADAPTIVE_K=ema
 GLM53_ADAPTIVE_K_SET=2,4,7
 GLM53_DENSE_FP8=dense,kda            # drop this line to keep BF16 dense weights (lossless config)
-EXTRA_ARGS="--cudagraph-capture-sizes 1 2 3 4 5 6 8 9 10 12 15 16 20 24 32 --kv-cache-memory-bytes 15032385536"
+EXTRA_ARGS="--kv-cache-memory-bytes 15032385536"
 ```
+
+For DFlash with adaptive-k enabled (`ema`/`on`/`1`, case-insensitive, surrounding
+whitespace ignored), the launcher supplies the capture-size list automatically.
+It combines stock captures with multiples of the configured `GLM53_ADAPTIVE_K_SET`
+query lengths (`k + 1`, bounded by `DFLASH_TOKENS + 1`), including the full draft
+length, through `MAX_NUM_SEQS`. Explicit `--cudagraph-capture-sizes` in `EXTRA_ARGS`
+always wins; eager mode and non-DFlash capture defaults are unchanged.
 
 then `./start.sh restart`. The capture-size list is required for adaptive-k (multiples of 3, 5 and 8 up to 4 requests; the stock `1 2 4 8 16 24 32` misses the 3- and 5-token shapes). The KV cap turns FP8's freed GPU memory into host headroom instead of a bigger pool: uncapped, the head dropped to ~1.5 GiB MemAvailable at 850k. 14 GiB leaves an 883,552-token pool (1.04x of 850k) and ~5 GiB free; 15 GiB buys 1.11x but measured only 0.8-2.2 GiB free under load, which is not enough margin on this UMA. Do not go much lower at 850k either — the boot refuses a pool that cannot hold one max-length request (13 GiB is ~820k tokens). Verify after boot: `docker logs glm53-exl3-head | grep -a "adaptive-k\|dense fp8"` should show `uniform decode graph query lens: [3, 5, 8]` and `dense fp8 groups: dense,kda`, and with `ABLIT=1` the line `ABLIT_METHOD=auto -> transplant` (a missing `ablit/transplant/` silently falls back to the projection edit, which garbles sampled output). A running server can be retuned without a reboot through `~/.cache/vllm-glm53-flash/glm53_adaptive_k.json` (`{"mode":"ema","set":"2,4,7","margin":1.0}`; `{"mode":"off"}` restores k=7). Live sparkDash prose numbers with both on are in the table above.
 

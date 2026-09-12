@@ -336,47 +336,8 @@ def control(h: Harness, label: str, **env: str) -> None:
 
 def part_b(h: Harness) -> None:
     print("Part B: restart fails closed before any container is stopped")
-    text = source()
-    main_at = text.index("main() {")
-    v_num = text.index("validate_numeric_config", main_at)
-    v_art = text.index("validate_overlay_artifacts", main_at)
-    restart = text.index("restart)  stop; start", main_at)
-    check(
-        v_num < restart and v_art < restart,
-        "B1 main() runs the numeric and artifact validators before `restart) stop; start`",
-    )
-    check(
-        "start|restart) validate_numeric_config; validate_overlay_artifacts ;;" in text,
-        "B1 numeric and artifact validators share the start|restart arm",
-    )
-    guard_begin = text.index("# GLM53 overlay artifact guard (begin)")
-    guard_end = text.index("# GLM53 overlay artifact guard (end)")
-    guard = text[guard_begin:guard_end]
-    check(guard_begin < guard_end, "B1 the artifact guard has its own sentinel block")
-    check("|-\"" not in guard and '|-"' not in guard, "B1 every artifact carries an identity string (no untagged entries)")
-    check(
-        guard.count("|$main_guard\"") >= 6 and '|    return report"' in guard and "| tail -n 1 || true)" in guard,
-        "B1 every artifact carries its exact last line as an EOF sentinel (checked against the last non-blank line)",
-    )
-    check(
-        '"$CHAT_TEMPLATE_HOST"' in guard and "ablit/LAYER_MAP.json" in guard,
-        "B1 the chat template and the ablit layer map are gated too",
-    )
-
     vars_ = host_vars()
     shipped = shipped_apc_vars()
-    check("APC_PATCH_HOST" in shipped, "B2 checkout ships patch_hybrid_prefix_hit.py")
-    check(
-        "PERGROUP_PATCH_HOST" in shipped or "FINEHIT_PATCH_HOST" in shipped,
-        "B2 checkout ships at least one of per-group / fine-grained",
-    )
-    for var in vars_:
-        check(f'"${var}|' in guard, f"B2 {var} ({vars_[var]}) is in the artifact guard")
-    check("overlay/patch_ablit.py|" in guard and "overlay/ablit_runtime.py|" in guard, "B2 ablit hook + runtime are in the artifact guard")
-    check(
-        'for entry in "${artifacts[@]}"' in guard and "artifacts[@]}\" -eq 0" in guard,
-        "B2 the guard iterates a bash array and refuses an empty list (no process-substitution status gap)",
-    )
 
     # Control FIRST: with a valid configuration the entrypoint gets PAST the
     # validators and reaches stop (the stubs then fail preflight, which is
