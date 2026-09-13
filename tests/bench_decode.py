@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-BASE = "http://127.0.0.1:8888"
+BASE = os.environ.get("GLM53_BENCH_BASE", "http://127.0.0.1:8888")
 MODEL = "GLM-5.3-Flash-EXL3"
 BENCH_PROMPT = (
     "Write a detailed step-by-step explanation of how a hash map works, "
