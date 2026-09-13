@@ -87,6 +87,30 @@ this toolchain), and BF16 duplicate weights (unnecessary).
 
 ## Reproducing the serving numbers
 
+Combined upstream-vs-candidate A/B/A2 campaign (2026-09-13, 2x GB10,
+fresh builds from `upstream/main` vs this branch, all other settings
+identical: TP=2, E3 grouped, adaptive-k ema, KV fp8 pinned 14 GiB):
+
+Baseline A/A2: upstream image, `GLM53_DENSE_FP8=off`, both new flags 0.
+Candidate B: this branch, `FAST=1` + `dense,kda` + `FAT=1`.
+
+| case | A (upstream) | B (candidate) | A2 (upstream) | B vs A |
+| --- | --- | --- | --- | --- |
+| C1 code tok/s | 67.2 | 81.2 | 66.3 | **+20.8%** |
+| C3 code agg | 155.9 / 151.0 | 184.2 / 184.3 | — | **+20.6%** |
+| C6 code agg | 307.0 / 306.5 | 361.3 / 363.0 | — | **+18.0%** |
+| C1 prose tok/s | 28.5 (1.94) | 35.5 (2.07) | — | accept-driven |
+| cold prefill 16k | 1497.2 | 1492.6 / 1634.0 | — | volatile, -0 to +9% |
+| cold prefill 100k | 1611.3 | 1659.1 | 1606.5 | **+3.0%** |
+| mixed dec / pre | 56.8 / 662.8 | 76.2 / 794.6 | 61.9 / 695.3 | **+34% / +20%** |
+
+Acceptance 7.0 on all code runs; coherence true both arms; KLD
+candidate-vs-upstream within the validated envelope (flips only at
+p<0.44 low-confidence positions). The 16k prefill sample is noisy
+(single ~12 s runs); 100k replicated. Decode gains combine the EXL3
+(+8.6%) and kda-FP8 (+10.3%) effects measured in the isolated
+campaigns — the combined number above is measured, not added.
+
 ```bash
 GLM53_BENCH_BASE=http://127.0.0.1:8000 python3 tests/bench_decode.py \
   --phase c1-code --structured --runs 3 --max-tokens 200 --out c1.json
