@@ -1250,6 +1250,18 @@ def build_exl3_fused_state(layer: torch.nn.Module, inners: list[dict[str, Any]])
     """Pointer tables + fused temps, once after load. No per-token alloc."""
     import exllamav3_ext
 
+    # Fail closed: an explicitly requested fast thin-decode path must never
+    # silently run the stock kernel on an image built without it.
+    if os.environ.get("GLM53_EXL3_MOE_FAST", "0") == "1":
+        if not hasattr(exllamav3_ext, "glm53_fast_moe_version"):
+            raise RuntimeError(
+                "GLM53_EXL3_MOE_FAST=1 requires the native decode-pipeline "
+                "image (exllamav3_ext.glm53_fast_moe_version); this image "
+                "was built without overlay/patch_exl3_decode_pipeline.py"
+            )
+        if exllamav3_ext.glm53_fast_moe_version() != 1:
+            raise RuntimeError("Unsupported native EXL3 decode-pipeline version")
+
     device = layer.w13_trellis.device
     n_exp = len(inners)
     hidden = int(layer._exl3_hidden_size)
@@ -1273,6 +1285,15 @@ def build_exl3_fused_state(layer: torch.nn.Module, inners: list[dict[str, Any]])
         "down_suh": _ptrs("down", "suh"),
         "down_svh": _ptrs("down", "svh"),
     }
+    # Gate/up SUH equality was verified across every expert at load time
+    # (layer._exl3_shared_w13_suh, torch.equal on the packed tensors),
+    # before weights were released. Aliasing the pointer tables here lets the
+    # native fast path prove the reuse predicate by pointer identity
+    # (gate_ptrs_suh.data_ptr() == up_ptrs_suh.data_ptr()) and skip the
+    # redundant up-input Hadamard. Unequal checkpoints keep both tables and
+    # take the independent-transform fast kernel (or stock when FAST=0).
+    if bool(getattr(layer, "_exl3_shared_w13_suh", False)):
+        layer._exl3_ptrs["up_suh"] = layer._exl3_ptrs["gate_suh"]
     idx = int(device.index) if device.index is not None else 0
     concurrency = int(exllamav3_ext.exl3_moe_max_concurrency(idx))
     if concurrency < 1:
