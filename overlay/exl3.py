@@ -1717,7 +1717,7 @@ class Exl3Config(QuantizationConfig):
         if isinstance(layer, LinearBase):
             group = _glm53_dense_fp8_group(prefix)  # [glm53-dense-fp8]
             if group is not None:
-                return Glm53DenseFp8Method(group)
+                return Glm53DenseFp8Method(group, prefix)
             return UnquantizedLinearMethod()
         return None
 
@@ -1794,16 +1794,46 @@ def _glm53_dense_fp8_group(prefix: str, groups: set[str] | None = None, layer_ty
     return None
 
 
+_GLM53_TP3_UNALIGNED_KDA_SUFFIXES = (
+    ".self_attn.f_b_proj",
+    ".self_attn.g_b_proj",
+)
+
+
+def _glm53_use_marlin(group: str, prefix: str, tp_size: int) -> bool:
+    """Whether this projection's activation layout satisfies Marlin."""
+    # TP=3 f_a/g_a are 128-wide views of an 8,726-wide merged KDA projection.
+    # Their row pitch is not divisible by 8, and f_a's byte offset is not
+    # 16-aligned at capture size 1. Keeping just these two small projections in
+    # BF16 avoids invalid Marlin inputs and allocations inside CUDA graphs.
+    return not (
+        tp_size == 3
+        and group == "kda"
+        and prefix.endswith(_GLM53_TP3_UNALIGNED_KDA_SUFFIXES)
+    )
+
+
 class Glm53DenseFp8Method(UnquantizedLinearMethod):
     """BF16 weight at load time; per-output-channel FP8 e4m3 + Marlin at apply."""
 
-    def __init__(self, group: str) -> None:
+    def __init__(self, group: str, prefix: str) -> None:
         super().__init__()
         self.group = group
+        self.prefix = prefix
         self.ready = False
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+        from vllm.distributed import get_tensor_model_parallel_world_size
+
+        tp_size = get_tensor_model_parallel_world_size()
+        if not _glm53_use_marlin(self.group, self.prefix, tp_size):
+            logger.warning_once(
+                "[glm53-dense-fp8] TP=3 keeps KDA f_b_proj/g_b_proj in BF16 "
+                "because their merged-projection views violate Marlin input "
+                "pitch/alignment requirements"
+            )
+            return
         from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
             prepare_fp8_layer_for_marlin,
         )
