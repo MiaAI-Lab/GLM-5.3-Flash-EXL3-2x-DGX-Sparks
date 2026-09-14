@@ -66,25 +66,29 @@ def main() -> int:
           flush=True)
     if exl3mod._FAT_TRITON_READY[0]:
         xt = torch.randn(48, K, dtype=torch.bfloat16, device=device)
+        xt[0].zero_()
+        xt[1].mul_(1e-14)
         qt = torch.empty((48, K), dtype=torch.float8_e4m3fn, device=device)
         st = torch.empty((48,), dtype=torch.float32, device=device)
         exl3mod._fat_rowquant_kernel[(48,)](xt, qt, st, xt.stride(-2), K, 4096,
                                              num_warps=8)
         torch.cuda.synchronize()
-        amax = xt.float().abs().amax(dim=1, keepdim=True).clamp_min(1e-12)
-        se = (amax / 448.0).to(torch.float32)
+        amax = xt.float().abs().amax(dim=1, keepdim=True)
+        se = (amax / 448.0).clamp_min(1e-12)
         # Triton must match fp32-division eager EXACTLY (proves the
         # float8e4nv encoding is bit-identical to torch fp8_e4m3fn).
         qe32 = (xt.float() / se).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
         check("triton-bitwise", bool(torch.equal(qt, qe32))
               and bool(torch.equal(st, se.view(-1))))
-        # Production eager fallback divides in bf16: only rounding-boundary
-        # flips (<=1 int code) are allowed there.
-        qe = (xt / se.to(xt.dtype)).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
-        code_diff = (qt.view(torch.int8).to(torch.int16)
-                     - qe.view(torch.int8).to(torch.int16)).abs().max()
-        check("eager-fallback-near", bool(int(code_diff) <= 1),
-              f"max_code_diff={int(code_diff)}")
+        # Exercise the production eager fallback, including zero/tiny rows.
+        ready = exl3mod._FAT_TRITON_READY[0]
+        try:
+            exl3mod._FAT_TRITON_READY[0] = False
+            qe, eager_scales = meth._fat_rowquant(xt)
+        finally:
+            exl3mod._FAT_TRITON_READY[0] = ready
+        check("eager-fallback-bitwise", bool(torch.equal(qt, qe))
+              and bool(torch.equal(st, eager_scales.view(-1))))
 
     # Dispatch spies: count fat vs marlin calls across the M boundary.
     calls = {"fat": 0}
