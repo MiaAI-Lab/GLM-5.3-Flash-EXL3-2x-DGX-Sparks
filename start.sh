@@ -265,9 +265,10 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # skip = do not mix; N>0 = cap tokens; 0 = off.
 GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
 # 1 = fine-grained (64-token) prefix-cache hits (overlay patch_apc_fine_grained_hits.py);
-# 0 = upstream 3584-block hits. Default applies only when UNSET; an explicitly
-# empty value is an operator error and validate_numeric_config rejects it.
-GLM53_FINEGRAINED_APC="${GLM53_FINEGRAINED_APC-1}"
+# 0 = upstream 3584-block hits. OPT-IN: default is 0 (off) pending live
+# qualification. Default applies only when UNSET; an explicitly empty value is
+# an operator error and validate_numeric_config rejects it.
+GLM53_FINEGRAINED_APC="${GLM53_FINEGRAINED_APC-0}"
 # Adaptive verification length (overlay/patch_adaptive_k.py). off = stock k=7 every step.
 GLM53_ADAPTIVE_K="${GLM53_ADAPTIVE_K:-off}"
 GLM53_ADAPTIVE_K_SET="${GLM53_ADAPTIVE_K_SET:-2,4,7}"
@@ -452,7 +453,7 @@ validate_numeric_config() {
         echo "GLM53_APC_RETENTION_INTERVAL_SWA requires SPEC_METHOD=dflash (got: $SPEC_METHOD)" >&2
         return 2
     fi
-    _glm53_validate_bool_flag GLM53_FINEGRAINED_APC "${GLM53_FINEGRAINED_APC-1}" || return
+    _glm53_validate_bool_flag GLM53_FINEGRAINED_APC "${GLM53_FINEGRAINED_APC-0}" || return
 }
 # GLM53 numeric config guard (end)
 

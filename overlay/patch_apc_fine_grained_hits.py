@@ -61,8 +61,9 @@ Fail-closed, in both directions
   to block-aligned hits would hide the fact.  The coordinator **refuses to
   start**, raising ``Glm53FineGrainedAPCError`` with a ``[glm53-apc-finegrained]``
   message that names the group, the alignment, and the remedy.
-  ``GLM53_FINEGRAINED_APC=0`` is the documented escape hatch: it restores the
-  upstream (all-managers) veto verbatim and never raises.
+  ``GLM53_FINEGRAINED_APC=0`` -- the default -- restores the upstream
+  (all-managers) veto verbatim and never raises; the refusal only exists for
+  operators who explicitly opt in with ``=1``.
 * **Mixed layout** -- a *participating* blocker AND a bad scratch group at once:
   DISABLE, do not raise.  The participating blocker already forces upstream's
   own safe fallback: alignment stays at ``scheduler_block_size``, no
@@ -91,36 +92,34 @@ Patcher fail-closed / transactional
 * The new text is compiled and re-validated **before** it is written.
 * The write is atomic (temp file in the same directory + ``os.replace``), so an
   interrupted run can never leave a half-patched coordinator.
-* If ``MARK`` is already present the patcher does not just skip: it validates
-  the complete patched state (helper block, gate, kill switch, tag, no
-  surviving upstream veto) and fails closed if anything is missing.
+* If ``MARK`` is already present the patcher does not just skip, and it does
+  not accept marker/sub-string presence either: every patch-owned region --
+  the helper block and the patched gate -- must match the canonical text this
+  patcher would have written, byte for byte, exactly once.  Any drift inside a
+  patch-owned region fails closed **before** the target is touched.
 * **Upstream fixed it** (vLLM main ``e126687a``: the veto is scoped to
   ``KVCacheSpec.prefix_cacheable`` groups, and the scratch invariant lives in
-  ``resolve_kv_cache_block_sizes``'s ``tokens_per_state`` check).  A recipe
-  image rebased onto that vLLM must not fail to boot because our anchor is
-  gone: if the veto block is already scoped on ``prefix_cacheable`` /
-  ``participates_in_prefix_caching``, the patcher prints
-  ``upstream already scopes the veto; nothing to do`` and exits 0 without
-  touching the file.  Detection is structural -- the actual
-  ``if self.enable_partial_hash_hits:`` suite is extracted by indentation and
-  must contain both the ``supports_fine_grained_hash_lookup`` veto and a
-  scoping attribute -- so genuine partial or foreign drift (the anchor merely
-  edited, or the veto deleted outright) still fails closed.
+  ``resolve_kv_cache_block_sizes``'s ``tokens_per_state`` check).  There is no
+  silent no-op for that case: an upstream-fixed coordinator no longer contains
+  the anchor, so the patcher fails closed on anchor drift like any other
+  drifted target.  That build-time failure is the intended signal to retire
+  this overlay when the recipe image rebases onto a vLLM that carries the fix.
 
 Idempotent, MARK/anchor guarded.  Order-independent with respect to
 ``patch_hybrid_prefix_hit.py`` (different anchors; shared helper insert point is
 guarded by name).
 
-Kill switch: ``GLM53_FINEGRAINED_APC=0`` in the engine environment restores the
-upstream (all-managers) veto at runtime without unpatching; ``=1`` (or unset)
-is the fine-grained default.  Nothing else is accepted -- see above.
-``start.sh`` validates the same knob the same way in its
-``# GLM53 numeric config guard`` block, so a typo is a launcher error rather
-than a container that will not boot.
+Kill switch: ``GLM53_FINEGRAINED_APC`` in the engine environment.  ``=1`` opts
+in to fine-grained hits; ``=0`` -- or unset, the default -- restores the
+upstream (all-managers) veto at runtime without unpatching.  Nothing else is
+accepted -- see above.  ``start.sh`` validates the same knob the same way in
+its ``# GLM53 numeric config guard`` block, so a typo is a launcher error
+rather than a container that will not boot.
 """
 
 from __future__ import annotations
 
+import ast
 import os
 import sys
 from pathlib import Path
@@ -138,6 +137,15 @@ HELPER_BEGIN = "# [glm53-finegrained-apc] helper-begin"
 HELPER_END = "# [glm53-finegrained-apc] helper-end"
 HELPER_NEEDLE = "def _validate_prefix_cache_retention_interval(\n"
 IMPORT_ANCHOR = "from abc import ABC, abstractmethod\n"
+
+def has_os_import(text: str) -> bool:
+    """Recognize a real module-level os binding, including commented imports."""
+    return any(
+        alias.name == "os" and alias.asname in (None, "os")
+        for node in ast.parse(text).body
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    )
 
 # Where the helper block goes. ``patch_hybrid_prefix_hit.py`` inserts its own
 # helper before the same upstream needle, so "insert before the needle" makes
@@ -166,7 +174,7 @@ class Glm53FineGrainedAPCError(RuntimeError):
 
     Raised from ``HybridKVCacheCoordinator.__init__`` so the engine refuses to
     start rather than silently serving a layout whose safety argument does not
-    hold.  ``GLM53_FINEGRAINED_APC=0`` restores the upstream gate.
+    hold.  ``GLM53_FINEGRAINED_APC=0`` (the default) restores the upstream gate.
     """
 
 
@@ -291,41 +299,13 @@ def _glm53_finegrained_enabled(value):
         return False
     raise Glm53FineGrainedAPCError(
         f"{GLM53_FG_TAG} GLM53_FINEGRAINED_APC={value!r} is not a valid "
-        "kill-switch value. It must be exactly '1' (fine-grained prefix-cache "
-        "hits ON; also the default when the variable is unset) or '0' (OFF, "
-        "upstream all-managers veto restored). Values such as 'true', 'yes', "
+        "kill-switch value. It must be exactly '1' (opt in to fine-grained "
+        "prefix-cache hits) or '0' (OFF, upstream all-managers veto; also the "
+        "default when the variable is unset). Values such as 'true', 'yes', "
         "'01', ' 0' or '' are REFUSED rather than guessed, because guessing "
         "wrong silently changes the KV-cache hit alignment. Refusing to start. "
-        "Set GLM53_FINEGRAINED_APC=0 to restore the upstream gate."
+        "Set GLM53_FINEGRAINED_APC=0 (or unset it) to restore the upstream gate."
     )
-
-
-def _glm53_connector_receipt():
-    """Boot receipt: is a KV-transfer connector configured?
-
-    ``kv_cache_manager.truncate_computed_blocks`` asserts
-    ``num_computed_tokens % manager.block_size == 0``, which a 64-aligned hit
-    violates for a 3584-block MLA manager.  Its only caller is gated on
-    ``connector is not None and connector.supports_divergent_local_hybrid_hits``,
-    so the assert is unreachable with no ``--kv-transfer-config``.  This line
-    makes that precondition an explicit boot receipt instead of an assumption
-    (see DESIGN R1).  Best effort only: it is a log string, never a gate, and
-    must never be able to break engine init.
-    """
-    try:
-        from vllm.config import get_current_vllm_config
-
-        cfg = get_current_vllm_config()
-        kv_transfer = getattr(cfg, "kv_transfer_config", None)
-        if kv_transfer is None:
-            return "absent (no kv_transfer_config) -- truncate_computed_blocks unreachable"
-        return (
-            "PRESENT ("
-            + repr(getattr(kv_transfer, "kv_connector", kv_transfer))
-            + ") -- see DESIGN R1: truncate_computed_blocks may assert"
-        )
-    except Exception as exc:  # pragma: no cover - diagnostics only
-        return f"unknown ({type(exc).__name__})"
 
 
 def _glm53_finegrained_hit_gate(managers, kv_cache_groups, hash_block_size):
@@ -397,14 +377,15 @@ def _glm53_finegrained_hit_gate(managers, kv_cache_groups, hash_block_size):
             f"{len(managers)} single-type managers vs {len(groups)} KV cache "
             "groups. zip() would silently truncate the fine-grained-hit "
             "validation and skip real blockers, so this layout cannot be "
-            "validated. Refusing to start. Set GLM53_FINEGRAINED_APC=0 to "
-            "restore the upstream (all-managers, block-aligned) gate."
+            "validated. Refusing to start. GLM53_FINEGRAINED_APC=0 (the "
+            "default) restores the upstream (all-managers, block-aligned) "
+            "gate."
         )
     if not managers:
         raise Glm53FineGrainedAPCError(
             f"{GLM53_FG_TAG} no KV cache managers to validate; refusing to "
-            "enable fine-grained prefix-cache hits. Set "
-            "GLM53_FINEGRAINED_APC=0 to restore the upstream gate."
+            "enable fine-grained prefix-cache hits. GLM53_FINEGRAINED_APC=0 "
+            "(the default) restores the upstream gate."
         )
     if _glm53_strict_int(hash_block_size) is None or not isinstance(
         hash_block_size, int
@@ -412,8 +393,8 @@ def _glm53_finegrained_hit_gate(managers, kv_cache_groups, hash_block_size):
         raise Glm53FineGrainedAPCError(
             f"{GLM53_FG_TAG} hash_block_size={hash_block_size!r} is not a "
             "positive integer; the fine-grained hit alignment is undefined. "
-            "Refusing to start. Set GLM53_FINEGRAINED_APC=0 to restore the "
-            "upstream gate."
+            "Refusing to start. GLM53_FINEGRAINED_APC=0 (the default) "
+            "restores the upstream gate."
         )
 
     blockers = []
@@ -426,8 +407,8 @@ def _glm53_finegrained_hit_gate(managers, kv_cache_groups, hash_block_size):
             raise Glm53FineGrainedAPCError(
                 f"{GLM53_FG_TAG} KV cache group {index} (manager {name}) has "
                 "no kv_cache_spec; the fine-grained-hit invariants cannot be "
-                "verified. Refusing to start. Set GLM53_FINEGRAINED_APC=0 to "
-                "restore the upstream gate."
+                "verified. Refusing to start. GLM53_FINEGRAINED_APC=0 (the "
+                "default) restores the upstream gate."
             )
         if getattr(spec, "participates_in_prefix_caching", True):
             block_size = getattr(manager, "block_size", None)
@@ -486,8 +467,8 @@ def _glm53_finegrained_hit_gate(managers, kv_cache_groups, hash_block_size):
             f"{GLM53_FG_TAG} " + " ".join(faults) + " Fine-grained "
             "prefix-cache hits would otherwise be ENABLED on this layout and "
             "no participating manager forces the safe fallback. Refusing to "
-            "start. Set GLM53_FINEGRAINED_APC=0 to fall back to block-aligned "
-            "(scheduler_block_size) hits."
+            "start. GLM53_FINEGRAINED_APC=0 (the default) falls back to "
+            "block-aligned (scheduler_block_size) hits."
         )
     return True, blockers, scratch
 
@@ -532,7 +513,7 @@ GATE_NEW = """        if self.enable_partial_hash_hits:
             # layout that would otherwise ENABLE with an unsafe scratch group
             # RAISES -- see _glm53_finegrained_hit_gate and DESIGN 4.3.
             if _glm53_finegrained_enabled(
-                os.environ.get("GLM53_FINEGRAINED_APC", "1")
+                os.environ.get("GLM53_FINEGRAINED_APC", "0")
             ):
                 _glm53_ok, _glm53_blockers, _glm53_scratch = (
                     _glm53_finegrained_hit_gate(
@@ -554,8 +535,8 @@ GATE_NEW = """        if self.enable_partial_hash_hits:
                 _glm53_blockers = ["GLM53_FINEGRAINED_APC=0 (kill switch)"]
                 _glm53_scratch = {}
                 _glm53_why = (
-                    "GLM53_FINEGRAINED_APC=0 (kill switch): upstream "
-                    "all-managers veto restored"
+                    "GLM53_FINEGRAINED_APC=0 (kill switch; also the default "
+                    "when unset): upstream all-managers veto restored"
                 )
             self.enable_partial_hash_hits = _glm53_ok
             # Effective-value receipt. One line, both ranks, states what is
@@ -570,13 +551,11 @@ GATE_NEW = """        if self.enable_partial_hash_hits:
                     "Fine-grained prefix-cache hits ENABLED: reason=%s; "
                     "effective alignment=%s tokens (hash_block_size; "
                     "scheduler_block_size=%s); "
-                    "scratch groups checked: %s; "
-                    "KV-transfer connector: %s.",
+                    "scratch groups checked: %s.",
                     _glm53_why,
                     hash_block_size,
                     self.scheduler_block_size,
                     _glm53_scratch or {},
-                    _glm53_connector_receipt(),
                 )
             else:
                 logger.warning(  # [glm53-finegrained-apc]
@@ -584,13 +563,11 @@ GATE_NEW = """        if self.enable_partial_hash_hits:
                     "Fine-grained prefix-cache hits DISABLED: reason=%s; "
                     "effective alignment=%s tokens (scheduler_block_size; "
                     "hash_block_size=%s); "
-                    "scratch groups checked: %s; "
-                    "KV-transfer connector: %s.",
+                    "scratch groups checked: %s.",
                     _glm53_why,
                     self.scheduler_block_size,
                     hash_block_size,
                     _glm53_scratch or {},
-                    _glm53_connector_receipt(),
                 )
                 logger.warning_once(
                     "Disabling fine-grained prefix-cache hits because these KV "
@@ -599,114 +576,67 @@ GATE_NEW = """        if self.enable_partial_hash_hits:
                 )
 """
 
-# Every token that must be present in a correctly patched file. Used both to
-# validate what we are about to write and to validate a file that already
-# carries MARK (a pre-existing marker must never be trusted on its own).
-REQUIRED_AFTER = (
-    MARK,
-    HELPER_BEGIN,
-    HELPER_END,
-    RUNTIME_TAG,
-    "class Glm53FineGrainedAPCError(RuntimeError):",
-    "def _glm53_strict_int(",
-    "def _glm53_scratch_alignment(",
-    "def _glm53_finegrained_enabled(",
-    "def _glm53_connector_receipt(",
-    "def _glm53_finegrained_hit_gate(",
-    "GLM53_FINEGRAINED_APC",
-    "Fine-grained prefix-cache hits ENABLED",
-    "Fine-grained prefix-cache hits DISABLED",
-    "scratch groups checked",
-    "manager/group cardinality mismatch",
+# The regions this patch owns in the target file: the helper block and the
+# patched gate.  A file that claims to be patched (MARK present) is accepted
+# only when every patch-owned region matches these canonical texts byte for
+# byte, exactly once -- marker or sub-string presence alone is not proof of a
+# complete patch, and drift inside a patch-owned region must fail before the
+# target is touched.
+PATCH_OWNED_REGIONS = (
+    ("helper block", HELPER),
+    ("patched gate", GATE_NEW),
 )
 
-UNIQUE_AFTER = (
-    HELPER_BEGIN,
-    HELPER_END,
-    "def _glm53_strict_int(",
-    "def _glm53_scratch_alignment(",
-    "def _glm53_finegrained_enabled(",
-    "def _glm53_connector_receipt(",
-    "def _glm53_finegrained_hit_gate(",
-)
-
-
-# Attributes upstream uses to scope the veto to prefix-caching groups.
-# ``prefix_cacheable`` is vLLM main (e126687a); ``participates_in_prefix_caching``
-# is this fork's spelling of the same idea.
-SCOPE_ATTRS = ("prefix_cacheable", "participates_in_prefix_caching")
-
-GATE_HEADER = "if self.enable_partial_hash_hits:"
-
-
-def partial_hit_gate_blocks(text: str) -> list[str]:
-    """Every ``if self.enable_partial_hash_hits:`` suite, by indentation.
-
-    Structural, not a text window: ``cache_blocks`` opens an identical ``if``
-    35 lines later and ``verify_and_split_kv_cache_groups`` mentions
-    ``participates_in_prefix_caching`` ~25 lines after the veto, so any
-    fixed-size window around the veto would read a neighbour's tokens as if
-    they were the veto's own.
-    """
-    lines = text.splitlines(keepends=True)
-    blocks: list[str] = []
-    for index, line in enumerate(lines):
-        if line.strip() != GATE_HEADER:
-            continue
-        indent = len(line) - len(line.lstrip())
-        block = [line]
-        for nxt in lines[index + 1 :]:
-            if nxt.strip() and (len(nxt) - len(nxt.lstrip())) <= indent:
-                break
-            block.append(nxt)
-        blocks.append("".join(block))
-    return blocks
-
-
-def upstream_scoped_veto(text: str) -> tuple[bool, str]:
-    """Has upstream already scoped the fine-grained-hit veto itself?
-
-    True only when the veto suite still exists AND already filters on a
-    prefix-caching attribute. A veto that is merely edited, moved or deleted is
-    NOT "fixed upstream" -- that is drift, and drift must fail closed.
-    """
-    if GATE_OLD in text:
-        return False, "the unscoped upstream veto is still present verbatim"
-    for block in partial_hit_gate_blocks(text):
-        if "supports_fine_grained_hash_lookup" not in block:
-            continue
-        for attr in SCOPE_ATTRS:
-            if attr in block:
-                return True, (
-                    f"the veto suite already filters on {attr}, so "
-                    "non-participating scratch groups can no longer veto "
-                    "fine-grained hits"
-                )
-        return False, (
-            "a fine-grained-hit veto is present but is not scoped to "
-            "prefix-caching groups"
-        )
-    return False, "no fine-grained-hit veto suite found"
+# Derive the owned definitions from the canonical helper, rather than counting
+# spelling-sensitive "def name(" tokens that miss whitespace or rebinding.
+PATCH_OWNED_DEFS = {
+    node.name: ast.dump(node, include_attributes=False)
+    for node in ast.parse(HELPER).body
+    if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+}
 
 
 def patched_problems(text: str) -> list[str]:
-    """Everything wrong with a file that claims to be patched."""
+    """Everything wrong with a file that claims to be patched.
+
+    Canonical validation: each patch-owned region must be present verbatim,
+    exactly once, and each patch-owned defining name must be unique.  A file
+    whose helper or gate body was edited after patching -- even by a single
+    comment -- is drift, not "already patched".
+    """
     problems: list[str] = []
-    for token in REQUIRED_AFTER:
-        if token not in text:
-            problems.append(f"missing {token!r}")
-    for token in UNIQUE_AFTER:
-        n = text.count(token)
+    for label, region in PATCH_OWNED_REGIONS:
+        n = text.count(region)
         if n != 1:
-            problems.append(f"{token!r} appears {n} times (expected 1)")
+            problems.append(
+                f"{label} does not match the canonical patch-owned text "
+                f"verbatim exactly once (found {n}); the region is missing, "
+                "drifted, or duplicated"
+            )
     if "unsupported_partial_hit_managers" in text:
         problems.append("upstream all-managers veto still present")
-    if "\nimport os\n" not in text:
-        problems.append("missing 'import os'")
     try:
-        compile(text, str(P), "exec")
+        tree = ast.parse(text)
+        compile(tree, str(P), "exec")
     except SyntaxError as exc:
         problems.append(f"does not compile: {exc}")
+        return problems
+    for name, expected in PATCH_OWNED_DEFS.items():
+        definitions = [
+            node for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name == name
+        ]
+        if len(definitions) != 1 or ast.dump(definitions[0], include_attributes=False) != expected:
+            problems.append(f"{name} does not have exactly one canonical definition")
+    if any(
+        isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        and node.id in PATCH_OWNED_DEFS
+        for node in ast.walk(tree)
+    ):
+        problems.append("patch-owned helper name is rebound")
+    if not has_os_import(text):
+        problems.append("missing module-level 'os' import binding")
     return problems
 
 
@@ -727,19 +657,14 @@ def pristine_problems(text: str) -> list[str]:
             f"helper insert anchor {anchor!r} is not unique "
             f"(found {text.count(anchor)})"
         )
-    if "\nimport os\n" not in text and text.count(IMPORT_ANCHOR) != 1:
+    if not has_os_import(text) and text.count(IMPORT_ANCHOR) != 1:
         problems.append(
             f"import anchor not unique (found {text.count(IMPORT_ANCHOR)})"
         )
     for stray in (
         HELPER_BEGIN,
         HELPER_END,
-        "def _glm53_strict_int(",
-        "def _glm53_scratch_alignment(",
-        "def _glm53_finegrained_enabled(",
-        "def _glm53_connector_receipt(",
-        "def _glm53_finegrained_hit_gate(",
-        "class Glm53FineGrainedAPCError(",
+        *PATCH_OWNED_DEFS,
     ):
         if stray in text:
             problems.append(
@@ -776,7 +701,8 @@ def main() -> int:
         raise SystemExit(f"missing {P}")
     text = P.read_text()
 
-    # A pre-existing marker is not proof of a complete patch: validate it.
+    # A pre-existing marker is not proof of a complete patch, and neither is
+    # sub-string presence: validate every patch-owned region canonically.
     if MARK in text:
         problems = patched_problems(text)
         if problems:
@@ -788,27 +714,18 @@ def main() -> int:
         print(f"{P.name}: {MARK} already present and complete - skipping")
         return 0
 
-    # Upstream may have landed the same fix (vLLM main e126687a). Rebasing the
-    # recipe image onto that vLLM must be a no-op, not a boot failure: there is
-    # nothing left to scope, and this overlay's whole purpose is already served.
-    scoped, detail = upstream_scoped_veto(text)
-    if scoped:
-        print(
-            f"{RUNTIME_TAG} upstream already scopes the veto; nothing to do "
-            f"({detail}). {P.name} left unmodified; the scratch-alignment "
-            "invariant is upstream's own (resolve_kv_cache_block_sizes / "
-            "tokens_per_state). GLM53_FINEGRAINED_APC has no effect on this "
-            "build."
-        )
-        return 0
-
+    # No silent no-op for an upstream-fixed coordinator: vLLM main e126687a
+    # scopes this veto itself, which removes the anchor below, so the drift
+    # check fails closed. That build-time failure is the intended signal to
+    # retire this overlay rather than carry a dead one.
     problems = pristine_problems(text)
     if problems:
         raise SystemExit(f"{P}: " + "; ".join(problems))
 
     # The patched gate reads os.environ; upstream does not import os here
     # (checked against the live file: only abc/collections/typing + vllm).
-    if "\nimport os\n" not in text:
+    # A commented ``import os`` left by the retention overlay counts too.
+    if not has_os_import(text):
         text = text.replace(IMPORT_ANCHOR, "import os\n" + IMPORT_ANCHOR, 1)
 
     anchor = helper_anchor(text)

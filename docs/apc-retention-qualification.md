@@ -22,7 +22,7 @@ This is a draft contribution for maintainer discussion, not a recommendation
 to make all-zero retention the default. Global and SWA retention remain
 unset by default. Neither the 390-block qualification budget nor the tested
 262,144 context / 2,048 MNBT settings are new launcher defaults. The fine-grained
-lookup proposals in #84 and #125 are not included.
+lookup proposals in #84/#125 (tracked successor: #171) are not included.
 
 ## Measured runtime pair
 

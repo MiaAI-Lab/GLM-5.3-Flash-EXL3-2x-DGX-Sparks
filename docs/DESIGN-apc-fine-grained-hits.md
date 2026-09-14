@@ -55,14 +55,22 @@ So the whole change is: **stop a manager that never participates in prefix cachi
 replace that accidental veto with the invariant it was standing in for** — verified at runtime from the actual
 specs, and refusing to start rather than degrading silently if it does not hold (§4.3). Patch:
 `overlay/patch_apc_fine_grained_hits.py` (one anchor for the gate, one for the helper block, transactional and
-fail-closed in both directions, and a no-op on a vLLM that already carries the fix). Host test:
-`tests/test_apc_fine_grained_hits.py`, 195 checks, all green against the live source. Opt-out:
-`GLM53_FINEGRAINED_APC=0`, restart-only, validated as exactly `0`/`1` by both the launcher and the coordinator.
+fail-closed in both directions). Host test:
+`tests/test_apc_fine_grained_hits.py` (the original revision passed 195 checks against the live source; the
+reviewed revision reworks already-patched validation to canonical region checks and adds drift and
+retention-composition legs — re-run the suite for the current count). **Opt-in, default OFF**:
+`GLM53_FINEGRAINED_APC=1` enables; unset or `0` keeps the upstream veto. The knob is restart-only, validated
+as exactly `0`/`1` by both the launcher and the coordinator.
 
-**Status: not deployed and not measured.** The five blocking live receipts — exact hit length at the 64 grid,
+**Status: opt-in, default OFF; live qualification deferred.** The reviewed opt-in variant ran 292 observational
+requests across four conditions — every condition produced the same 63/73 strict-checker result and the same
+ten failures, so no fine-only checker regression was found — but that is not a fresh-boot BAAB qualification
+and not an internal KV/KDA/CoW/replay numerical oracle, and the earlier acceptance-length concerns remain
+unresolved. The five blocking live receipts — exact hit length at the 64 grid,
 CoW partial-tail durability, kpool tail at zero/nonzero remainders, temp-0 equivalence off-grid vs a
 block-aligned control, and the drafter eagle-peek at the 64 drop unit — are specified with pass criteria in
-**§6.5** and none has been collected.
+**§6.5** and none has been collected on this revision. Fine-grained APC is therefore **not** approved as a
+default: it ships disabled (`GLM53_FINEGRAINED_APC=0` or unset) until §6.5 is run.
 
 Expected gain and its honest bound are in §6 — it is **not** a flat "recompute ≤ 63 tokens"; the producer registers
 only one fine boundary per request, which caps the win in a way the train brief did not anticipate. §6.3 states
@@ -473,8 +481,8 @@ the one place this patch is *less* forgiving than upstream:
 * the safety argument in §2.4 is what licenses excluding the scratch group from the veto at all. On a layout
   where that argument does not hold, the right answer is to stop, not to guess.
 
-The escape hatch is documented and restart-only: **`GLM53_FINEGRAINED_APC=0`** restores the upstream
-(all-managers) veto verbatim and never raises.
+The opt-out is documented and restart-only: **`GLM53_FINEGRAINED_APC=0`** — also the default when the
+variable is unset — restores the upstream (all-managers) veto verbatim and never raises.
 
 The *participating* half of the gate keeps upstream's behaviour exactly — a coarse manager that cannot answer a
 fine lookup **disables** fine hits with upstream's warning, because block-aligned hits are the correct and safe
@@ -516,7 +524,7 @@ Recipe-overlay style, MARK `# [glm53-finegrained-apc]`, fail-closed, idempotent.
 Three edits:
 1. insert `import os` after `from abc import ABC, abstractmethod` (the live file does **not** import `os`);
 2. insert a module-level helper block — `Glm53FineGrainedAPCError`, `_glm53_strict_int`,
-   `_glm53_scratch_alignment`, `_glm53_finegrained_enabled`, `_glm53_connector_receipt`,
+   `_glm53_scratch_alignment`, `_glm53_finegrained_enabled`,
    `_glm53_finegrained_hit_gate` — bracketed by
    `# [glm53-finegrained-apc] helper-begin` / `helper-end` sentinels. Insert point: **before any sibling
    `_glm53_*` helper if one is already present, else before `def _validate_prefix_cache_retention_interval(`**.
@@ -532,27 +540,26 @@ Three edits:
 * **transactional apply** — the result is compiled and fully validated *before* it is written, the write is a
   temp file in the same directory plus `os.replace`, and the bytes on disk are re-validated afterwards. An
   interrupted or failing run can never leave a half-patched coordinator, and never leaves temp litter;
-* **a pre-existing `MARK` is not trusted** — the patcher does not simply skip. It validates the *complete*
-  patched state (helper block sentinels, all four helper defs unique, the runtime tag, the kill switch, the
-  enable-path log line, no surviving upstream veto, and that the file compiles) and fails closed if any of it is
-  missing. A gutted or partially reverted overlay is a hard error, not a silent "already present" (A5);
+* **a pre-existing `MARK` is not trusted — and neither is sub-string presence** — the patcher validates every
+  patch-owned region *canonically*: the helper block and the patched gate must each match the text this patcher
+  writes, byte for byte, exactly once; each patch-owned `def`/`class` name must be unique; the upstream veto
+  must be gone; and the file must compile. A gutted, partially reverted, or *drifted* overlay — even a
+  one-comment edit inside a patch-owned region — is a hard error raised before the target is touched, not a
+  silent "already present" (A5, A5b);
 * **cardinality asserted before iterating** — upstream pairs managers with groups using `zip()`, which silently
   truncates if the two lists ever diverge and would therefore *skip real blockers*. The helper refuses instead
   (B16, B16b);
-* **"upstream already fixed it" is a no-op, not a failure** — vLLM main `e126687a` scopes this very veto to
-  `KVCacheSpec.prefix_cacheable` groups (its scratch invariant being the `tokens_per_state` check in
-  `resolve_kv_cache_block_sizes`). A recipe image rebased onto that vLLM must not fail to boot because our anchor
-  is gone. The patcher extracts the actual `if self.enable_partial_hash_hits:` suite **by indentation** and, if
-  that suite already carries both the `supports_fine_grained_hash_lookup` veto and a scoping attribute
-  (`prefix_cacheable` / `participates_in_prefix_caching`), prints
-  `[glm53-apc-finegrained] upstream already scopes the veto; nothing to do` and exits 0 without touching the
-  file. The extraction is structural precisely so a neighbour cannot be mistaken for the fix: `cache_blocks`
-  opens an identical `if` 35 lines below and `verify_and_split_kv_cache_groups` mentions
-  `participates_in_prefix_caching` ~25 lines below, both of which a fixed-size text window would swallow. A veto
-  that is merely *edited* or *deleted* is drift, not an upstream fix, and still fails closed (A6, A6b, A6c).
+* **an upstream-fixed coordinator is drift, not a silent no-op** — vLLM main `e126687a` scopes this very veto
+  to `KVCacheSpec.prefix_cacheable` groups (its scratch invariant being the `tokens_per_state` check in
+  `resolve_kv_cache_block_sizes`), which removes this patcher's anchor. The patcher therefore fails closed on a
+  rebased coordinator exactly as it does on any other drifted target, leaving the file byte-identical (A6, A6b,
+  A6c). That build-time failure is the intended signal to retire this overlay when the recipe image rebases
+  onto a vLLM that carries the fix — a silent no-op would leave a dead overlay in place with
+  `GLM53_FINEGRAINED_APC` doing nothing.
 
-Kill switch: `GLM53_FINEGRAINED_APC=0` in the engine environment restores upstream behaviour without unpatching —
-important because the launcher exports it to both ranks in `nccl_common` the way it already does for
+Kill switch / opt-in: `GLM53_FINEGRAINED_APC` in the engine environment — `1` enables fine-grained hits,
+`0` (or unset, the default) restores upstream behaviour without unpatching — important because the launcher
+exports it to both ranks in `nccl_common` the way it already does for
 `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`, giving a restart-only rollback. It is accepted as **exactly `0` or `1`**
 at both ends (§4.3): `start.sh` rejects anything else in `validate_numeric_config` (on `start`/`restart`, before
 `stop`), and the coordinator rejects anything else at init.
@@ -562,15 +569,14 @@ Recipe wiring: mounted on both ranks and run in both in-container patch stanzas,
 
 **The effective-value receipt.** One line, emitted on every boot on **both** ranks, stating what is actually in
 force — not what was intended. `enabled/disabled` + `reason` + the alignment hits will really land on + every
-scratch group that was checked + the connector receipt:
+scratch group that was checked:
 
 ```
 INFO [kv_cache_coordinator.py:NNN] [glm53-apc-finegrained] Fine-grained prefix-cache hits ENABLED:
      reason=every participating manager can answer a hash_block_size-granular lookup, and every
      non-participating scratch alignment divides it; effective alignment=64 tokens
      (hash_block_size; scheduler_block_size=3584); scratch groups checked:
-     {'KpoolTailManager': 4}; KV-transfer connector: absent (no kv_transfer_config) --
-     truncate_computed_blocks unreachable.
+     {'KpoolTailManager': 4}.
 ```
 
 The disabled form is the same line with `DISABLED`, `effective alignment=3584 tokens
@@ -579,11 +585,6 @@ blockers by name; upstream's own `Disabling fine-grained prefix-cache hits …` 
 On the mixed layout of §4.3 row 4 the tolerated scratch fault appears in `scratch groups checked` as
 `UNSAFE (…)` / `UNVERIFIABLE (…)`, so "we disabled for reason A while B was also wrong" is on the record. Host
 test B29 asserts every field of all three forms against the shipped gate block.
-
-The connector clause is the boot receipt Codex asked for against R1: it turns "this deployment has no
-`--kv-transfer-config`, so the `truncate_computed_blocks` assert is unreachable" from an assumption into a logged
-fact. It is best-effort and never a gate — if the config cannot be read it logs `unknown (<ExceptionType>)` and
-init continues.
 
 **That log line is the go/no-go gate for the whole change.** If it does not appear, nothing downstream is worth
 measuring.
@@ -595,15 +596,22 @@ Run: `GLM53_KV_COORDINATOR_PY_SRC=<coordinator copy> python3 tests/test_apc_fine
 `GLM53_KV_COORDINATOR_PY_PRISTINE=<unpatched copy>` to get the second composition leg described below; it
 defaults to `/tmp/kv_cache_coordinator_pristine.py` and is skipped with a printed note if absent.
 
-Part A (mechanics): MARK / helper sentinels / all helper defs / `import os` present; patched file compiles;
-second apply is a byte-identical no-op; **fails closed and leaves the file byte-identical when the gate anchor or
-the helper insert point drifts**, with no temp litter; **fails closed when `MARK` is present but the patch is
-incomplete** (helper block gutted, kill switch stripped, upstream veto reintroduced); composes with
-`patch_hybrid_prefix_hit.py` in both orders, over both the live source and a pristine one, producing identical
-bytes, and re-applying both is a no-op; and **A6**: a synthesized coordinator whose veto is already scoped to
-`group.kv_cache_spec.prefix_cacheable` (vLLM main `e126687a`) is a clean exit-0 no-op that leaves the file
-byte-identical and stays a no-op on re-run, while a *deleted* veto (A6b) and a *drifted but unscoped* veto (A6c —
-with `participates_in_prefix_caching` present 25 lines below it, the window-vs-suite trap) both still fail closed.
+Part A (mechanics): MARK / helper sentinels / all helper defs / `import os` present; the helper block and the
+patched gate are present **verbatim, exactly once, matching the patcher's canonical text**; patched file
+compiles; second apply is a byte-identical no-op that itself passes canonical validation; **fails closed and
+leaves the file byte-identical when the gate anchor or the helper insert point drifts**, with no temp litter;
+**fails closed when `MARK` is present but the patch is incomplete** (helper block gutted, kill switch stripped,
+upstream veto reintroduced); **fails closed on canonical drift inside a patch-owned region** — a single
+appended comment inside the helper or gate body, a duplicated region, or a foreign duplicate of a patch-owned
+`def` all keep every marker/sub-string token yet must still fail before the target is touched, byte-identical
+(A5b); composes with `patch_hybrid_prefix_hit.py` in both orders, over both the live source and a pristine one,
+producing identical bytes, and re-applying both is a no-op; **A7** composes with
+`patch_apc_per_group_retention.py` (the #130 overlay sharing the same target file and helper insert point) in
+both orders on a pristine coordinator — AST-identical, idempotent, and the fine-grained regions still
+canonical; and **A6**: a synthesized coordinator whose veto is already scoped to
+`group.kv_cache_spec.prefix_cacheable` (vLLM main `e126687a`) **fails closed** — the anchor is gone, so it is
+drift, not a silent no-op — and is left byte-identical, as are a *deleted* veto (A6b) and a *drifted but
+unscoped* veto (A6c).
 
 > The both-orders check is what caught a real defect. Run only against the *live* coordinator — where
 > `patch_hybrid_prefix_hit.py` is already applied, so re-applying it is a no-op — it was vacuous and passed.
@@ -641,12 +649,11 @@ participating blocker is also present, in which case the safe fallback wins and 
 | B17 | group with no `kv_cache_spec` | **raise**, not `AttributeError` |
 | B18 | `hash_block_size` of `0` / `-64` / `None` / `64.0` | **raise** |
 | B19 | alignment is genuinely read from the spec | source names every agreeing attribute, e.g. `manager.block_size == spec.block_size == spec.index_kpool` |
-| B20 | connector boot receipt with no vLLM importable | returns a string, never raises |
-| B22 | the **patched gate block itself**, lifted out of `__init__` and executed against fakes | `GLM53_FINEGRAINED_APC=0` disables and does **not** raise even on a layout that would otherwise refuse; unset/`1` enables |
+| B22 | the **patched gate block itself**, lifted out of `__init__` and executed against fakes | `GLM53_FINEGRAINED_APC=0` **and unset** disable and do **not** raise even on a layout that would otherwise refuse (default OFF, opt-in); `1` enables |
 | B26 | `_glm53_strict_int` accept/reject table: `4`, `"0004"`, `"+4"` accepted; `4.5`, `4.0`, `"4.5"`, `" 4"`, `"4 "`, `""`, `"0x40"`, `"4_0"`, `True`, Arabic-Indic/superscript digits rejected | every reject is a value `int()` would have taken |
 | B27 | kill-switch parse: `"1"`/`"0"` only; `""`, `" 0"`, `"01"`, `"true"`, `"1.0"`, … **raise** at init, both directly and through the gate block | |
 | B28 | the §4.3 **2×2 matrix**, all four cells, driven through the shipped gate block | enable / raise / disable / disable — and the tolerated fault is still named in the receipt |
-| B29 | the **effective-value receipt**: enabled, kill-switched, and mixed-layout forms | each states enabled/disabled, `reason=`, the effective alignment, the scratch groups checked, and the connector; the disable path still emits upstream's own warning |
+| B29 | the **effective-value receipt**: enabled, kill-switched, unset-default, and mixed-layout forms | each states enabled/disabled, `reason=`, the effective alignment, and the scratch groups checked; the disable path still emits upstream's own warning |
 | B9 | arithmetic: `64 % 4 == 0`; `3584 % 64 == 0`; `896 = 3584/index_kpool` is the indexer *storage* block, not a hit boundary; `lcm(64,4,64,64) = 64` | — |
 | B21 | the §6.5 L1 receipt arithmetic: `P = 31672` → fine hit `31616`, coarse control `28672`, `31616 % 3584 ≠ 0`, `31616 % 4 == 0` | — |
 
@@ -656,10 +663,14 @@ Every `raise` case additionally asserts the message carries the `[glm53-apc-fine
 Part C (launcher knob): sources start.sh's `# GLM53 numeric config guard` block in `bash` — the shipped shell,
 not a paraphrase — and asserts `GLM53_FINEGRAINED_APC` is accepted only as exactly `0`, `1`, or unset (C2, 20
 values); that it is validated inside that guard, which `main()` runs only on `start|restart` and, for `restart`,
-before `stop` (C1); and that the validated value is the one both ranks receive — exported by value inside
-`nccl_common`, with a caller-supplied value captured before `.env` and restored after (C3).
+before `stop` (C1); that the validated value is the one both ranks receive — exported by value inside
+`nccl_common`, with a caller-supplied value captured before `.env` and restored after (C3); and that the flag is
+**opt-in, OFF by default at every layer** — `.env.example`, the launcher fallback, and the guard's unset
+fallback all read `0` (C5).
 
-**Result on the live source, 2026-08-31: all 195 checks pass** (86 before the fix-first round).
+**Result on the live source, 2026-08-31 (original revision): all 195 checks pass** (86 before the fix-first
+round). The reviewed revision — default-off opt-in, canonical region validation, connector receipt and
+upstream-fixed no-op removed — changes the check count; re-run the suite for the current number.
 
 The test is now **invoked** by the recipe, not merely copied: `Dockerfile` runs
 `python3 /opt/glm53/test_apc_fine_grained_hits.py` immediately *before*
@@ -798,6 +809,9 @@ docker logs glm53-exl3-head   2>&1 | grep -c 'Disabling fine-grained prefix-cach
 ssh "$WORKER_SSH" "docker logs glm53-exl3-worker 2>&1 | grep -c 'Disabling fine-grained prefix-cache hits'"
 ```
 
+Qualification runs with the flag **opted in** (`GLM53_FINEGRAINED_APC=1` on both ranks); the default-off path
+is the pre-patch baseline, not this change.
+
 **Pass — all four, and the head is what matters most (it owns the scheduler that takes the hit), but a worker
 that disagrees with it is a hard stop, since the two ranks would be running different KV alignments:**
 
@@ -808,15 +822,16 @@ that disagrees with it is a hard stop, since the two ranks would be running diff
 3. `scratch groups checked: {'KpoolTailManager': 4}` — the verified alignment, from the real spec. Any
    `UNSAFE (…)` / `UNVERIFIABLE (…)` value here means §4.3 row 4 tolerated a fault because something else
    disabled fine hits: record it, and do not treat the run as a test of this change;
-4. `KV-transfer connector: absent (no kv_transfer_config)` (R1), and the old
-   `Disabling fine-grained prefix-cache hits … KpoolTailManager` warning count is `0` on both ranks.
+4. the old `Disabling fine-grained prefix-cache hits … KpoolTailManager` warning count is `0` on both ranks,
+   and the serving command still carries no `--kv-transfer-config` (R1 — verify by inspection, there is no
+   connector receipt line).
 
 If B0 fails, nothing downstream is worth measuring. If the engine instead refuses to start with a
 `[glm53-apc-finegrained]` message, the running layout violates the §2.4 invariant — do **not** work around it
 with `GLM53_FINEGRAINED_APC=0` and carry on measuring; that combination is the pre-patch baseline, not this
-change. If a rank prints `upstream already scopes the veto; nothing to do` at build time, the image was rebased
-onto a vLLM that carries the fix natively (§5.1) and this overlay is inert on it — the measurement is then about
-upstream's implementation, not ours.
+change. If the build instead fails on a missing partial-hit-gate anchor, the image was likely rebased onto a
+vLLM that carries `e126687a` natively (§5.1) — retire this overlay and re-run the receipts against upstream's
+implementation, not ours.
 
 ---
 
@@ -925,13 +940,14 @@ non-negotiable; (b) acceptance warm ≥ **0.85 ×** cold in both arms, missing c
 
 ---
 
-**Rollback.** `GLM53_FINEGRAINED_APC=0` on both ranks restores the upstream all-managers veto and the 3584
-alignment without unpatching or rebuilding; it is a restart, not a redeploy. The recipe plumbs it to both ranks in
+**Rollback.** `GLM53_FINEGRAINED_APC=0` on both ranks — or simply unsetting the opt-in, which defaults to the
+same path — restores the upstream all-managers veto and the 3584 alignment without unpatching or rebuilding; it
+is a restart, not a redeploy. The recipe plumbs it to both ranks in
 `nccl_common`, and the value must be exactly `0` — the launcher rejects anything else before it stops the running
 engine, and the coordinator rejects anything else at init (§4.3). Confirm the rollback the same way as B0: the
 receipt must read `DISABLED`, `reason=GLM53_FINEGRAINED_APC=0 (kill switch)`, `effective alignment=3584 tokens`
 on **both** ranks. Setting it also suppresses the `[glm53-apc-finegrained]` refusal described in §4.3 — which is
-the point: it is the documented way to run a layout this patch will not vouch for.
+the point: it is the default, and the documented way to run a layout this patch will not vouch for.
 
 ---
 
@@ -943,9 +959,9 @@ the point: it is the documented way to run a layout this patch will not vouch fo
   branch guarded by `connector is not None and connector.supports_divergent_local_hybrid_hits`
   (`sched/scheduler.py:541`), and the serving command has no `--kv-transfer-config`. **Blocker for any future PD
   / NIXL deployment** — this is a genuine latent upstream bug that fine-grained hits expose. Flag it in the
-  upstream PR. The precondition is now a **boot receipt**, not an assumption: the enable-path INFO line prints
-  `KV-transfer connector: absent (no kv_transfer_config)` (§5.1). If that clause ever reads `PRESENT`, this
-  deployment has entered the unvalidated path and §6.5 L1–L5 do not cover it.
+  upstream PR. The precondition stays an assumption to verify at deploy time: confirm the serving command has
+  no `--kv-transfer-config` (§1.1) before opting in. If a connector is ever configured, this deployment has
+  entered the unvalidated path and §6.5 L1–L5 do not cover it.
 * **R2 — interaction with `GLM53_APC_RETENTION_INTERVAL=14336` (FIX-PLAN Fix 1).**
   (a) `HybridKVCacheCoordinator.cache_blocks:724-725` stops flooring `num_computed_tokens` to 3584 once partial
   hits are on, so managers cache at their own granularity every step — more block-ids consumed, which is exactly
@@ -997,9 +1013,10 @@ granularity by `scheduler_block_size / hash_block_size` (here 56×).
 
 **Upstream has since landed it.** vLLM main `e126687a` scopes this veto to `KVCacheSpec.prefix_cacheable` groups
 and expresses the scratch invariant as the `tokens_per_state` check in `resolve_kv_cache_block_sizes` — the same
-two commits sketched below, by upstream's own route. The overlay therefore detects an already-scoped coordinator
-and no-ops on it (§5.1, host test A6) rather than failing on a missing anchor, and should be retired when the
-recipe image rebases onto a vLLM that carries that commit (§9.4). What follows is the PR that was going to be
+two commits sketched below, by upstream's own route. The overlay therefore fails closed on an already-scoped
+coordinator (§5.1, host test A6): the anchor is gone, so the build stops rather than silently carrying a dead
+overlay — the intended signal to retire it when the recipe image rebases onto a vLLM that carries that commit
+(§9.4). What follows is the PR that was going to be
 proposed, kept because it is the argument for why upstream's change is right.
 
 **Proposed upstream PR** (two commits, both small):
@@ -1043,21 +1060,20 @@ The `896` alignment proposed in `FIX-PLAN-CACHE-2026-08-31.md` §Fix 3 should be
    switch is only a rollback if the worker sees it too.
 4. **Watch upstream.** vLLM main `e126687a` scopes this veto to `KVCacheSpec.prefix_cacheable` groups and puts
    the scratch invariant in `resolve_kv_cache_block_sizes`'s `tokens_per_state` check — i.e. upstream has landed
-   the same fix, by its own route. The patcher already treats such a coordinator as a no-op (§5.1, host test A6),
-   so a rebased image boots rather than failing on a missing anchor, but the overlay is then **inert**: the
-   `[glm53-apc-finegrained]` receipt will not appear, `GLM53_FINEGRAINED_APC` will have no effect, and the
-   scratch invariant in force will be upstream's `tokens_per_state`, not ours. When the recipe rebases onto a
-   vLLM that carries `e126687a`, re-read §4.3 against upstream's rule, re-run the §6.5 receipts on that build,
-   and retire this overlay rather than carrying a dead one — §8 (upstreamability) is settled by that commit.
+   the same fix, by its own route. The patcher fails closed on such a coordinator (§5.1, host test A6): the
+   anchor is gone, so the build stops rather than silently carrying a dead overlay. When the recipe rebases onto
+   a vLLM that carries `e126687a`, re-read §4.3 against upstream's rule, re-run the §6.5 receipts on that build,
+   and retire this overlay — §8 (upstreamability) is settled by that commit.
 5. Sequence against the FIX-PLAN order: this is Fix 3, currently scheduled after Fix 1 (shipped), Fix 2, Fix 4,
    Fix 5. It should be A/B'd on the Fix 1 baseline with retention both dense and 14336 (R2).
 6. Nothing in this train has been applied to the live boxes. The overlay is in the recipe directory and the host
-   test is green (195 checks against the live coordinator source), but **no receipt in §6.5 has been collected** —
+   test was green on the original revision (195 checks against the live coordinator source; the reviewed
+   revision reworks validation — re-run for the current count), but **no receipt in §6.5 has been collected** —
    L1 through L5 are all outstanding, and B0 has never been observed on a real boot.
 7. Decide the §4.3 refusal policy is what you want *before* the first deploy, not during one. On a layout that
    violates the kpool invariant **and would otherwise have fine-grained hits enabled**, the engine now **fails to
    start** rather than quietly serving at 3584 alignment. That is the intended fail-closed behaviour and
-   `GLM53_FINEGRAINED_APC=0` is the escape hatch, but it converts a silent performance regression into a boot
+   `GLM53_FINEGRAINED_APC=0` (the default) is the opt-out, but it converts a silent performance regression into a boot
    failure — make sure whoever is on call knows the message `[glm53-apc-finegrained]` and the one-env-var remedy.
    Note the deliberate carve-out (§4.3 row 4): if a *participating* manager already disables fine hits, a bad
    scratch group does **not** raise, because that configuration is exactly what upstream would run. The fault is
