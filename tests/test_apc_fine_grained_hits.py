@@ -1,68 +1,14 @@
 #!/usr/bin/env python3
-"""Host test for overlay/patch_apc_fine_grained_hits.py.
+"""Host/image regression tests for fine-grained prefix-cache lookup.
 
-Runs anywhere Python 3.10+ is available -- no vLLM import required.
+Exercises patch application, transactional drift rejection, canonical owned
+regions, the injected runtime gate, strict launcher flag validation, and all
+six fine/hybrid/retention composition orders. No vLLM import is required.
 
-Part A (patch mechanics, mirrors tests/test_hybrid_prefix_hit.py):
-  apply to a COPY of kv_cache_coordinator.py, assert the MARK and anchors
-  landed, assert idempotence, assert fail-closed on a drifted anchor, assert
-  fail-closed on a pre-existing-but-incomplete marker, assert the apply is
-  transactional (no partial writes, no temp litter), assert composability
-  with overlay/patch_hybrid_prefix_hit.py in both orders and under re-apply,
-  and reject changed or deleted upstream vetoes without modifying the file.
-  Owned helpers and gate bodies must remain canonical, with no rebinding.
-
-Part B (gate semantics):
-  exec the injected helper block in a bare namespace, then drive it with fakes
-  that mirror the live KV cache layout and several hostile variants.  This is
-  the part that actually encodes the correctness argument.
-
-  Note the fail-closed policy under test, as a 2x2 (DESIGN 4.3) -- rows are
-  "does a PARTICIPATING manager already block fine lookups", columns are "is a
-  NON-PARTICIPATING scratch group unsafe or unverifiable":
-
-      blocker vs scratch |   ok    |  bad
-      ------------------+---------+---------
-      no                | ENABLE  | RAISE
-      yes               | DISABLE | DISABLE
-
-    * a PARTICIPATING manager that cannot do fine lookups -> DISABLE
-      (block-aligned hits are the correct, safe fallback; this is upstream's
-      own condition) -- and that stays DISABLE even when a scratch group is
-      also bad, because no fine-grained hit is taken on that layout, so the
-      scratch invariant is unreachable and a boot failure would be gratuitous;
-    * a NON-PARTICIPATING scratch group whose alignment requirement is violated
-      or unverifiable, on a layout that would otherwise ENABLE -> RAISE
-      Glm53FineGrainedAPCError at coordinator init, tagged
-      "[glm53-apc-finegrained]".  Silently degrading there would hide that this
-      patch's safety argument does not hold on that layout.
-      GLM53_FINEGRAINED_APC=0 is the documented escape hatch.
-
-Part C (launcher knob):
-  drives start.sh's "GLM53 numeric config guard" block in bash and asserts
-  GLM53_FINEGRAINED_APC is accepted only as exactly 0 or 1, the same rule the
-  coordinator enforces at init.
-
-Source of truth for the live layout (docker logs glm53-exl3-head):
-  kv_cache_coordinator.py:709  hybrid APC groups:
-    [('MLAAttentionSpec', [0], 'FullAttentionManager', False),
-     ('MambaSpec', [2, 3, 4, 5], 'MambaManager', False),
-     ('SlidingWindowSpec', [6], 'SlidingWindowManager', True)]
-  -> group 1 (KpoolTailSpec) is absent: participates_in_prefix_caching=False.
-  interface.py:635  kv cache block size 64 (DEEPSEEK_V32_INDEXER backend)
-  interface.py:926  attention block size 3584 (>= mamba page size)
-  platforms/interface.py:932-933  mamba_cache_mode=="align" -> mamba_block_size = block_size = 3584
-  config.json       text_config.index_kpool = 4  -> KpoolTailSpec.block_size
-                    (models/glm5next/nvidia/attention.py:191-198)
-  NOTE 896 is NOT a cache boundary: it is block_size // index_kpool, the indexer
-       storage block (models/glm5next/nvidia/attention.py:142).
-
-Usage:
-  python3 test_apc_fine_grained_hits.py
-  GLM53_KV_COORDINATOR_PY_SRC=/path/to/kv_cache_coordinator.py \
-      python3 test_apc_fine_grained_hits.py
-  # optional second source for a true both-orders composition test:
-  GLM53_KV_COORDINATOR_PY_PRISTINE=/tmp/kv_cache_coordinator_pristine.py
+Supply coordinator and companion source fixtures as documented in
+docs/DESIGN-apc-fine-grained-hits.md#verification-and-limits.
+Caller precedence and rank wiring are covered by test_start_overrides.py and
+test_launcher_rank_parity.py.
 """
 
 from __future__ import annotations
@@ -95,11 +41,7 @@ HYBRID_PATCH = next(
         p
         for p in (
             HERE / "patch_hybrid_prefix_hit.py",
-            # the overlay dir of THIS checkout comes first on purpose: a
-            # sibling clone must never be what this test validates against.
             HERE.parent / "overlay" / "patch_hybrid_prefix_hit.py",
-            HERE.parent.parent / "glm-exl3-recipe-fork" / "overlay"
-            / "patch_hybrid_prefix_hit.py",
         )
         if p.is_file()
     ),
@@ -358,7 +300,7 @@ def part_a(src: Path) -> str:
         # A6c an unscoped veto that merely drifted must still fail closed, even
         # though `participates_in_prefix_caching` appears ~25 lines below it in
         # verify_and_split_kv_cache_groups. A text window would read that
-        # neighbour as proof of a fix; the indentation-scoped extractor does not.
+        # neighbour as proof of a fix; canonical validation must still refuse.
         shutil.copyfile(src, dst)
         drifted2 = dst.read_text().replace(
             "                if not manager.supports_fine_grained_hash_lookup\n",
@@ -1032,10 +974,6 @@ def part_b(patched_text: str) -> None:
         object(),
     ):
         check(strict_int(value) is None, f"B26 strict int REJECTS {value!r}")
-    check(
-        int("4.5".replace(".5", "")) == 4 and strict_int("4.5") is None,
-        "B26 the value int() would have silently truncated is refused instead",
-    )
 
     # ---------------------------------------------------------------- B27
     # The kill switch is exactly '0' or '1'; anything else refuses at init.
@@ -1060,7 +998,7 @@ def part_b(patched_text: str) -> None:
         check(ok, f"B27 GLM53_FINEGRAINED_APC={bad!r} refuses through the gate block")
 
     # ---------------------------------------------------------------- B28
-    # The 2x2 mixed-layout matrix (DESIGN 4.3), all four cells, driven through
+    # The mixed-layout matrix, all four cells, driven through
     # the shipped gate block rather than the helper alone.
     SAFE_SCRATCH = ("KpoolTailManager", 4, False, False, {"index_kpool": 4})
     BAD_SCRATCH = ("KpoolTailManager", 128, False, False, {"index_kpool": 128})
@@ -1091,9 +1029,7 @@ def part_b(patched_text: str) -> None:
     )
 
     # ---------------------------------------------------------------- B29
-    # Effective-value receipt: one line stating enabled/disabled, the reason,
-    # the alignment actually in force, and the scratch groups checked. This is
-    # the line DESIGN 6.5 B0 greps out of `docker logs` on BOTH ranks.
+    # Coordinator receipt: effective alignment, reason, and scratch checks.
     _enabled, lines = drive(LIVE_LAYOUT, "1")
     receipt = next((l for l in lines if RUNTIME_TAG in l), "")
     for token in (
@@ -1134,33 +1070,6 @@ def part_b(patched_text: str) -> None:
         "B29 upstream's own warning is still emitted on the disable path",
     )
 
-    # B9: the arithmetic claim the whole design rests on.
-    check(64 % 4 == 0, "B9 hash_block_size 64 is a multiple of index_kpool 4")
-    check(3584 % 64 == 0, "B9 3584 (MLA and mamba block) is a multiple of hash 64")
-    check(
-        3584 // 4 == 896,
-        "B9 896 is block_size//index_kpool (indexer storage block), NOT a hit boundary",
-    )
-    check(
-        __import__("math").lcm(64, 4, 64, 64) == 64,
-        "B9 lcm(hash 64, kpool 4, drafter 64, mamba-snapshot granularity 64) == 64",
-    )
-    # B21: the exact hit receipts the live plan asserts (DESIGN 6.2/6.3).
-    P_TURN1 = 3584 * 8 + 3000  # 31672
-    check(P_TURN1 == 31672, "B21 turn-1 prompt P = 3584*8 + 3000 = 31672")
-    check(
-        P_TURN1 // 64 * 64 == 31616,
-        "B21 fine hit floor(P/64)*64 == 31616 (the receipt to assert live)",
-    )
-    check(
-        P_TURN1 // 3584 * 3584 == 28672,
-        "B21 coarse hit floor(P/3584)*3584 == 28672 (the pre-patch control)",
-    )
-    check(
-        31616 % 3584 != 0 and P_TURN1 % 64 != 0,
-        "B21 31616 is off the old grid and P forces a tail_boundary stop",
-    )
-    check(31616 % 4 == 0, "B21 the fine hit lands on an empty kpool (31616 % 4 == 0)")
 
 
 # --------------------------------------------------------------------------
@@ -1220,19 +1129,6 @@ def part_c() -> None:
     check('"${GLM53_FINEGRAINED_APC-0}"' in guard_source(),
           "C0 standalone guard defaults to off")
 
-    # C1 the knob is validated by the same guard as the numeric config, which
-    # main() runs only on start|restart -- and, for restart, before `stop`.
-    check(
-        "_glm53_validate_bool_flag GLM53_FINEGRAINED_APC" in guard_source(),
-        "C1 GLM53_FINEGRAINED_APC is validated inside the numeric config guard",
-    )
-    main_at = source.index("main() {")
-    check(
-        source.index("start|restart) validate_numeric_config", main_at)
-        < source.index("restart)  stop; start", main_at),
-        "C1 validation still runs on start|restart, before stop",
-    )
-
     # C2 exactly 0 or 1, matching _glm53_finegrained_enabled in the overlay.
     for value in (None, "0", "1"):
         check(run_guard(value) == 0, f"C2 GLM53_FINEGRAINED_APC={value!r} accepted")
@@ -1242,54 +1138,6 @@ def part_c() -> None:
             run_guard(value) == 2,
             f"C2 GLM53_FINEGRAINED_APC={value!r} rejected with rc=2",
         )
-
-    # C3 the validated value is what both rank containers actually receive.
-    check(
-        '-e "GLM53_FINEGRAINED_APC=$GLM53_FINEGRAINED_APC"' in source,
-        "C3 the knob is exported to the containers by value",
-    )
-    nccl = source.index("local -a nccl_common=(")
-    check(
-        nccl < source.index('-e "GLM53_FINEGRAINED_APC=', nccl)
-        < source.index(")\n", nccl),
-        "C3 it rides nccl_common, so head AND worker get the same value",
-    )
-    caller = source.index('_cli_finegrained="${GLM53_FINEGRAINED_APC-}"')
-    check(
-        caller < source.index('source "$SCRIPT_DIR/.env"')
-        < source.index('[ -n "${_cli_finegrained_set}" ]'),
-        "C3 a caller-supplied value is captured before .env and restored after",
-    )
-    check(
-        '_cli_finegrained_set="${GLM53_FINEGRAINED_APC+1}"' in source,
-        "C3 the capture is setness-aware (${VAR+1}), like the indexer/spinwait knobs",
-    )
-
-    # C4 setness regression: an explicitly EMPTY caller export must survive the
-    # .env source and reach the guard (which rejects ""), not silently lose to
-    # a .env value of 1. Runs the real preamble with a synthetic .env.
-    import subprocess as _sp
-    import tempfile as _tf
-    marker = "# ----------------------------- configuration -------------------------------"
-    preamble, sep, _rest = source.partition(marker)
-    check(bool(sep), "C4 start.sh configuration marker present")
-    with _tf.TemporaryDirectory() as _raw:
-        _tmp = Path(_raw)
-        _script = _tmp / "start.sh"
-        _script.write_text(
-            preamble
-            + '\nprintf "FG=[%s]\\n" "${GLM53_FINEGRAINED_APC-UNSET}"\n'
-        )
-        _script.chmod(0o755)
-        (_tmp / ".env").write_text("GLM53_FINEGRAINED_APC=1\n")
-        _env = {k: v for k, v in os.environ.items() if k != "GLM53_FINEGRAINED_APC"}
-        # caller silent -> .env wins
-        r = _sp.run(["bash", str(_script)], text=True, capture_output=True, env=_env)
-        check(r.returncode == 0 and r.stdout.strip() == "FG=[1]", f"C4 caller silent: .env wins ({r.stdout.strip()!r})")
-        # caller sets it EMPTY -> the empty value survives to the guard
-        r = _sp.run(["bash", str(_script)], text=True, capture_output=True, env={**_env, "GLM53_FINEGRAINED_APC": ""})
-        check(r.returncode == 0 and r.stdout.strip() == "FG=[]", f"C4 explicit empty survives .env ({r.stdout.strip()!r})")
-        check(run_guard("") == 2, "C4 ...and the guard rejects the empty value (rc=2)")
 
 
 

@@ -59,10 +59,6 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
 fi
 # Caller exports, including explicit empties, must win over .env.
 # Snapshot exports rather than parsing .env: it is sourced as shell code.
-# Setness-aware pair for the fine-grained kill switch: an explicitly empty
-# caller value must reach the guard, not silently lose to a .env value.
-_cli_finegrained_set="${GLM53_FINEGRAINED_APC+1}"
-_cli_finegrained="${GLM53_FINEGRAINED_APC-}"
 _caller_overrides=()
 while IFS= read -r _k; do
     _flags="$(declare -p "$_k")"
@@ -77,8 +73,7 @@ set +a
 # Each entry is NAME=value; quoting preserves whitespace and empty values.
 # shellcheck disable=SC2163
 for _kv in ${_caller_overrides[@]+"${_caller_overrides[@]}"}; do export "$_kv"; done
-[ -n "${_cli_finegrained_set}" ] && GLM53_FINEGRAINED_APC="$_cli_finegrained"
-unset _k _kv _flags _caller_overrides _cli_finegrained_set _cli_finegrained
+unset _k _kv _flags _caller_overrides
 
 # ----------------------------- configuration -------------------------------
 MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"

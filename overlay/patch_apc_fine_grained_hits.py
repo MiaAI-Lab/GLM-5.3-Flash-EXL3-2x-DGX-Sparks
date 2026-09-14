@@ -1,112 +1,15 @@
 #!/usr/bin/env python3
-"""Re-enable fine-grained (hash-block) prefix-cache hits at a kpool-safe alignment.
+"""Opt-in hash-block prefix-cache lookup for participating KV cache groups.
 
-Problem
--------
-``HybridKVCacheCoordinator.__init__`` computes ``enable_partial_hash_hits``, then
-vetoes it if ANY single-type manager reports
-``supports_fine_grained_hash_lookup == False`` while its ``block_size`` differs
-from ``hash_block_size``.  The scan covers **every** manager, including groups
-whose spec sets ``participates_in_prefix_caching = False``.
+KpoolTailManager opts out of prefix caching but vetoes fine lookups in the
+pinned coordinator. Scope that veto to participating groups, and verify that
+every scratch alignment divides hash_block_size before enabling fine hits.
+GLM53_FINEGRAINED_APC accepts exactly 0/1 and defaults to 0.
 
-On this kit that is ``KpoolTailManager`` (``KpoolTailSpec.block_size ==
-index_kpool == 4``), so the boot log says::
-
-    WARNING [kv_cache_coordinator.py:635] Disabling fine-grained prefix-cache
-    hits because these KV cache managers require block-aligned lookups:
-    KpoolTailManager.
-
-The veto is spurious.  ``verify_and_split_kv_cache_groups()`` already skips
-non-participating groups, so ``KpoolTailManager.find_longest_cache_hit`` is
-never called by the coordinator and its
-``supports_fine_grained_hash_lookup`` flag cannot affect any lookup.  The cost
-is real: ``_cache_hit_alignment_tokens`` falls back to
-``scheduler_block_size`` (3584 here) instead of ``hash_block_size`` (64), so
-every warm turn re-prefills up to 3583 already-computed tokens (~1.5-3 s).
-
-What a non-participating scratch group *does* require
------------------------------------------------------
-Mia's rule -- "wrong indexer tail state is fatal" -- is about state, not
-lookups.  ``KpoolTailSpec`` is a one-block circular buffer holding the
-in-progress (incomplete) kpool's raw K + gate score, addressed by
-``pos % kpool``.  A warm hit ending at ``H`` allocates that block fresh and
-prefills only ``[H, N)``, so the ``H % kpool`` raw entries belonging to the
-current in-progress pool are never recomputed.  With
-``index_kpool_always_select_tail = true`` the indexer then compresses garbage.
-
-So the real invariant is ``H % kpool == 0``, i.e. the hit alignment must be a
-multiple of every non-participating group's ``block_size``.  Here
-``hash_block_size (64) % index_kpool (4) == 0``, so 64 is already kpool-safe
-and the required alignment is ``lcm(64, 4) == 64`` -- no change to
-``_cache_hit_alignment_tokens`` itself is needed or wanted (the fine-grained
-lookup paths index the raw hash list positionally and are only sound when
-``alignment_tokens == hash_block_size``; see docs/DESIGN-apc-fine-grained-hits.md §2).
-
-This patch therefore
---------------------
-1. scopes the ``supports_fine_grained_hash_lookup`` check to groups that
-   actually participate in prefix caching; and
-2. replaces the accidental veto with the invariant a scratch group really
-   needs, **verified at runtime from the actual specs**:
-   ``hash_block_size % <scratch alignment> == 0``.
-
-Fail-closed, in both directions
--------------------------------
-* A *participating* manager that cannot answer a fine lookup is upstream's own
-  condition: fine hits are DISABLED and we log upstream's warning.  That is the
-  safe, correct fallback and it is what upstream does.
-* A *non-participating scratch* group whose alignment requirement cannot be
-  verified, or is verified and violated, is a different animal: the safety
-  argument for this patch does not hold on that layout, and silently degrading
-  to block-aligned hits would hide the fact.  The coordinator **refuses to
-  start**, raising ``Glm53FineGrainedAPCError`` with a ``[glm53-apc-finegrained]``
-  message that names the group, the alignment, and the remedy.
-  ``GLM53_FINEGRAINED_APC=0`` is the documented escape hatch: it restores the
-  upstream (all-managers) veto verbatim and never raises.
-* **Mixed layout** -- a *participating* blocker AND a bad scratch group at once:
-  DISABLE, do not raise.  The participating blocker already forces upstream's
-  own safe fallback: alignment stays at ``scheduler_block_size``, no
-  fine-grained hit is ever taken, so the scratch invariant is unreachable.
-  Refusing to boot there would turn an upstream-equivalent configuration into
-  an outage.  The refusal is reserved for the one case where it is
-  load-bearing: fine-grained hits would otherwise be **ENABLED** with an unsafe
-  or unverifiable scratch group.  Full 2x2 in docs §4.3.
-* Alignment sources are cross-checked, never trusted one at a time.  An
-  explicit ``fine_grained_hit_alignment`` capability is checked against
-  ``manager.block_size`` / ``spec.block_size`` / ``spec.index_kpool`` /
-  ``spec.kpool``; ANY contradiction is UNVERIFIABLE (refuse), never "the
-  capability wins".
-* Values are parsed with a strict integer check, never ``int()``: ``int()``
-  truncates ``4.5`` to ``4`` and accepts ``" 4"``, either of which would let a
-  wrong alignment through wearing a verified badge.
-* The kill switch is exactly ``0`` or ``1``.  Any other value (``true``,
-  ``01``, ``""``, ``" 0"``) refuses at init rather than being guessed --
-  guessing it wrong silently changes the KV-cache hit alignment.
-* Manager/group cardinality is asserted before iterating -- upstream's ``zip()``
-  would silently truncate the scan if the two lists ever diverged.
-
-Patcher fail-closed / transactional
------------------------------------
-* Anchors are counted before anything is mutated; drift aborts with no write.
-* The new text is compiled and re-validated **before** it is written.
-* The write is atomic (temp file in the same directory + ``os.replace``), so an
-  interrupted run can never leave a half-patched coordinator.
-* If ``MARK`` is already present the patcher does not just skip: it validates
-  the complete patched state (helper block, gate, kill switch, tag, no
-  surviving upstream veto) and fails closed if anything is missing.
-* A changed or deleted upstream veto is unsupported source drift. Refuse it
-  without modifying the target, including a veto scoped differently upstream.
-
-Idempotent, MARK/anchor guarded.  Order-independent with respect to
-``patch_hybrid_prefix_hit.py`` (different anchors; shared helper insert point is
-guarded by name).
-
-Kill switch: ``GLM53_FINEGRAINED_APC=0`` in the engine environment restores the
-block-aligned gate at runtime without unpatching. Unset defaults to ``0``;
-``=1`` explicitly opts into fine-grained hits.  Nothing else is accepted -- see above.
-``start.sh`` validates the same knob the same way in its
-``# GLM53 numeric config guard`` block, so a typo is a launcher error rather
-than a container that will not boot.
+Patch-owned source regions are validated canonically before accepting an
+existing patch or atomically replacing a pristine file. Unsupported drift fails
+without writing. See docs/DESIGN-apc-fine-grained-hits.md for the contract and
+verification limits.
 """
 
 from __future__ import annotations
@@ -154,28 +57,11 @@ GLM53_FG_TAG = "[glm53-apc-finegrained]"
 
 
 class Glm53FineGrainedAPCError(RuntimeError):
-    """A fine-grained-hit invariant could not be verified, or was violated.
-
-    Raised from ``HybridKVCacheCoordinator.__init__`` so the engine refuses to
-    start rather than silently serving a layout whose safety argument does not
-    hold.  ``GLM53_FINEGRAINED_APC=0`` restores the upstream gate.
-    """
+    """Fine enablement requires a verifiable, compatible scratch alignment."""
 
 
 def _glm53_strict_int(value):
-    """Strict integer parse -- no coercion, no truncation, no trimming.
-
-    ``int()`` is the wrong tool for validating a capability: ``int(4.5)`` is
-    ``4`` and ``int(" 4")`` is ``4``, so a value that is not an integer at all
-    comes back wearing a verified badge and can enable an unsafe alignment.
-
-    Accepts only a real ``int`` (``bool`` is rejected -- ``True`` is not an
-    alignment) or an ASCII decimal string with an optional sign and no
-    surrounding whitespace.  Everything else -- ``4.5``, ``"4.5"``, ``" 4"``,
-    ``"4 "``, ``""``, ``"0x40"``, ``"4_0"``, non-ASCII digits, ``None``,
-    arbitrary objects -- returns ``None``, which every caller treats as
-    UNVERIFIABLE.
-    """
+    """Accept integers or signed ASCII decimal strings without coercion or trimming."""
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
@@ -201,31 +87,11 @@ GLM53_ALIGNMENT_ATTRS = (
 
 
 def _glm53_scratch_alignment(manager, spec):
-    """Token alignment a non-participating (scratch) group requires.
+    """Return (alignment, source), or (None, reason) if unverifiable.
 
-    Read from the ACTUAL manager/spec objects -- never assumed, never
-    defaulted.  Returns ``(alignment, source)``, or ``(None, reason)`` when the
-    group cannot be verified, in which case the caller must refuse.
-
-    **Every** available source is collected and they must all agree:
-    ``fine_grained_hit_alignment`` and ``block_size`` on the manager and on the
-    spec, plus ``index_kpool`` / ``kpool``.  An explicit
-    ``fine_grained_hit_alignment`` capability is NOT authoritative on its own: a
-    capability of 16 on a spec whose ``block_size`` is 128 is a contradiction,
-    and a contradiction is UNVERIFIABLE (refuse), not "the capability wins".
-    Trusting it would enable 64-token hits on a group that needs 128 -- exactly
-    the unsafe mid-pool resume this gate exists to prevent.
-
-    The capability's real job is to let a future scratch manager that exposes no
-    ``block_size`` at all state its requirement; when it is the only source
-    present it stands alone.  With no capability offered, ``spec.block_size`` is
-    required and must be cross-checked against ``manager.block_size``.  For
-    GLM5Next's ``KpoolTailSpec`` every source is ``index_kpool``, which is the
-    quantity the invariant is really about.
-
-    Anything unverifiable -- a missing block_size, a non-integer (strictly
-    parsed: ``4.5`` and ``" 4"`` are NOT integers), or two sources that disagree
-    -- returns ``None`` and is treated as a hard failure.
+    Collect all exposed alignment attributes and require agreement. Without an
+    explicit capability, both spec.block_size and manager.block_size are required.
+    A capability cannot override contradictory manager/spec values.
     """
     candidates = []
     for owner, owner_name in ((manager, "manager"), (spec, "spec")):
@@ -269,14 +135,7 @@ def _glm53_scratch_alignment(manager, spec):
 
 
 def _glm53_finegrained_enabled(value):
-    """Parse the ``GLM53_FINEGRAINED_APC`` kill switch. Exactly ``0`` or ``1``.
-
-    Not ``bool(value)``, not ``value != "0"``: anything but the two accepted
-    strings refuses at init.  A typo'd knob (``true``, ``01``, ``" 0"``, ``""``)
-    must never be silently read as "on" -- it decides the KV-cache hit alignment
-    the whole engine then runs at, and the wrong answer is invisible everywhere
-    except the receipt line.
-    """
+    """Parse the exact 0/1 flag; reject invalid values instead of guessing."""
     if value == "1":
         return True
     if value == "0":
@@ -293,65 +152,17 @@ def _glm53_finegrained_enabled(value):
 
 
 def _glm53_finegrained_hit_gate(managers, kv_cache_groups, hash_block_size):
-    """Decide whether fine-grained (hash-block-aligned) hits are state-safe.
+    """Return (enable, blockers, scratch) for the participating lookup gate.
 
-    Returns ``(enable, blockers, scratch)``.  ``scratch`` maps each
-    non-participating group's manager name to its verified alignment (an int),
-    or to a diagnostic string when that group is unsafe/unverifiable but a
-    participating blocker already forced the safe fallback.  Raises
-    ``Glm53FineGrainedAPCError`` only when fine-grained hits would otherwise be
-    ENABLED on a layout whose scratch invariant cannot be verified or is
-    violated.
+    Participating managers must support hash-granular lookup or already have the
+    hash block size. Their blockers select the coarse fallback. Non-participating
+    scratch groups must instead allow resuming with empty per-request state:
+    hash_block_size must be divisible by each verified scratch alignment.
 
-    Two distinct populations, two distinct questions:
-
-    * Groups with ``participates_in_prefix_caching = True`` are in
-      ``attention_groups`` and DO run ``find_longest_cache_hit``.  They must be
-      able to answer a lookup at ``hash_block_size`` granularity: either the
-      manager advertises ``supports_fine_grained_hash_lookup``, or its
-      ``block_size`` already equals ``hash_block_size`` (nothing finer is
-      asked of it).  This is the upstream check, correctly scoped, and it
-      DISABLES fine hits rather than raising -- block-aligned hits are the
-      correct, safe fallback for that case.
-
-    * Groups with ``participates_in_prefix_caching = False`` (GLM5Next's
-      ``KpoolTailSpec``) are skipped by ``verify_and_split_kv_cache_groups``
-      and never looked up, so their lookup capability is irrelevant.  What
-      they need is that the hit lands where their per-request state is EMPTY.
-      The kpool indexer tail holds an in-progress pool of ``index_kpool``
-      tokens addressed by ``pos % kpool``; a hit at ``H`` leaves
-      ``H % kpool`` raw K/gate entries unrecomputed, which
-      ``index_kpool_always_select_tail`` would then compress.  Require
-      ``hash_block_size % alignment == 0`` so every reachable hit boundary
-      lands on an empty pool.
-
-    Mixed layouts -- the 2x2 (docs/DESIGN-apc-fine-grained-hits.md 4.3)::
-
-        participating blocker | scratch unsafe/unverifiable | outcome
-        ----------------------+-----------------------------+---------
-        no                    | no                          | ENABLE
-        no                    | YES                         | RAISE
-        YES                   | no                          | DISABLE
-        YES                   | YES                         | DISABLE
-
-    The last cell is why scratch faults are collected rather than raised on
-    sight.  A participating blocker already pins the alignment to
-    ``scheduler_block_size``, so no fine-grained hit is ever taken and the
-    scratch invariant is not reachable; that layout behaves exactly as upstream
-    does, and refusing to boot on it would turn an upstream-equivalent
-    configuration into an outage.  The refusal is load-bearing only in the
-    second cell, where the alternative is serving fine-grained hits whose safety
-    argument does not hold.  Faults still travel in ``scratch`` so the receipt
-    line names them either way.
-
-    Structural failures -- cardinality mismatch, a group with no
-    ``kv_cache_spec``, a nonsense ``hash_block_size`` -- raise immediately and
-    are not subject to the matrix: they mean the layout could not be classified
-    at all, so "a participating blocker makes it moot" cannot be established.
-
-    Cardinality is asserted before iterating: upstream pairs these two lists
-    with ``zip()``, which would silently truncate the scan -- and therefore
-    skip real blockers -- if they ever diverged.
+    Collect scratch faults until the participating blockers are known. Raise only
+    if fine hits would otherwise be enabled with unsafe or unverifiable scratch;
+    a coarse fallback makes that invariant unreachable. The scratch result maps
+    manager names to verified alignments or tolerated-fault diagnostics.
     """
     managers = list(managers)
     groups = list(kv_cache_groups)
@@ -478,23 +289,8 @@ GATE_OLD = """        if self.enable_partial_hash_hits:
 """
 
 GATE_NEW = """        if self.enable_partial_hash_hits:
-            # [glm53-finegrained-apc] Upstream scans EVERY manager here,
-            # including groups whose spec sets
-            # participates_in_prefix_caching=False. Those groups are already
-            # skipped by verify_and_split_kv_cache_groups(), so their
-            # supports_fine_grained_hash_lookup flag can never affect a
-            # lookup -- but vetoing on it silently pins every hit to
-            # scheduler_block_size. GLM5Next's KpoolTailManager
-            # (block_size == index_kpool == 4) does exactly that, costing up
-            # to scheduler_block_size-1 recomputed tokens per warm turn.
-            # Scope the flag check to participating groups and enforce the
-            # invariant a scratch group actually needs instead: the hit must
-            # land where its per-request state is empty
-            # (hash_block_size % alignment == 0), verified at runtime from the
-            # actual specs. A participating blocker DISABLES (upstream's own
-            # safe fallback, even if a scratch group is also bad); only a
-            # layout that would otherwise ENABLE with an unsafe scratch group
-            # RAISES -- see _glm53_finegrained_hit_gate and DESIGN 4.3.
+            # [glm53-finegrained-apc] Scope lookup compatibility to participating
+            # groups; verify scratch alignment separately before enabling.
             if _glm53_finegrained_enabled(
                 os.environ.get("GLM53_FINEGRAINED_APC", "0")
             ):
@@ -522,12 +318,8 @@ GATE_NEW = """        if self.enable_partial_hash_hits:
                     "all-managers veto restored"
                 )
             self.enable_partial_hash_hits = _glm53_ok
-            # Effective-value receipt. One line, both ranks, states what is
-            # actually in force -- enabled/disabled, why, the alignment hits
-            # will really land on, and every scratch group that was checked
-            # (value = verified alignment, or the fault that was tolerated
-            # because a participating blocker already disabled fine hits).
-            # DESIGN 6.5 B0 greps this from `docker logs` on head AND worker.
+            # The scheduler-owning coordinator reports effective alignment
+            # and the scratch checks behind its enable/fallback decision.
             if _glm53_ok:
                 logger.info(  # [glm53-finegrained-apc]
                     "[glm53-apc-finegrained] "
