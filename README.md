@@ -207,7 +207,7 @@ same path as the compact-64 fp8 serve (not NVFP4 KV).
 | Tools / reasoning | `--tool-call-parser glm47 --enable-auto-tool-choice --reasoning-parser glm45` |
 | Graphs | on (`ENFORCE_EAGER=0`) — MTP capture `1 2 3 4 6 8 12`; DFlash2 capture `1 2 4 8 16 24 32` |
 | Spec | **DFlash2 k=7** (`incoai/GLM-5.3-Flash-DFlash2`); draft KV `auto`/bf16, draft TP=2, FLASH_ATTN. Rollback `SPEC_METHOD=mtp` |
-| Vision | on (`LANGUAGE_MODEL_ONLY=0`) — image + video, `--limit-mm-per-prompt {image:100,video:1}`, `--skip-mm-profiling` |
+| Vision | on (`LANGUAGE_MODEL_ONLY=0`) — image + video, `--limit-mm-per-prompt {image:48,video:1}`, `--mm-processor-kwargs {max_image_tokens:2048}`, `--mm-processor-cache-gb 1`, `--skip-mm-profiling` |
 | Ablit | **off** (`ABLIT=0`). Stock `o_proj`. Set `ABLIT=1` to enable; see [Abliteration](#abliteration-ablit1) |
 
 Kernels: `TORCH_CUDA_ARCH_LIST=12.1a`. ExLlamaV3 pin `c5d9c657` (0.0.43) exposes
@@ -389,11 +389,29 @@ logged tokens ≈ concurrency × that cap, and the hybrid floor then shrinks the
 pool.
 
 Keep **`SKIP_MM_PROFILING=1`** — a max-size image+video dummy profile OOMs this UMA.
-`LIMIT_MM={"image":100,"video":1}` is a validation ceiling only; nothing is reserved for
-it. The processor emits 16-8000 tokens per image, so the context window is the real
-limit and an over-long prompt is refused as too long. A prompt over the cap fails with
-HTTP 500 `At most N image(s) may be provided in one prompt`, which is why the default is
-generous rather than tight.
+The cost of that is permanent: **nothing is reserved for the vision tower**, so every
+multimodal token is encoded out of memory the model has already spent. `LIMIT_MM` is a
+validation ceiling only, and it has to be a ceiling this kit can actually encode.
+
+On **2026-09-14** it was not. An 11.9 MB video attached in a chat reached vLLM as ~33
+separate full-res *image* items — clients decompose video, and vLLM never splits one
+video into multiple encoder items. At the checkpoint's `max_image_tokens=8000` each
+frame cost ~7.2k tokens, the prompt reached **236,544 tokens** of vision encode, Node 0
+fell to **44 MB free**, and the kernel killed `VLLM::Worker_TP` (`EngineCore encountered
+a fatal error` → engine dead). File size is not the signal: 11.9 MB of H.264 is ~33
+decoded frames, and a frame costs the same as a full-page image.
+
+Three caps bound it, and all three are tunable:
+
+| knob | default | effect |
+|---|---|---|
+| `MM_IMAGE_TOKENS` | `2048` | per-image budget. A 1080p frame measures **2691** tokens uncapped, **2040** at 2048, **1008** at 1024. Also fixes a latent hazard: the checkpoint's 8000 exceeds `MAX_NUM_BATCHED_TOKENS=7168`, which is vLLM's encoder cache size, so a full-res image could not fit the cache. |
+| `LIMIT_MM` | `{"image":48,...}` | worst case 48 × 2048 = **98k** tokens, vs 800k before. Past the cap the API returns HTTP 500 `At most N image(s) may be provided in one prompt` — an error, not a dead engine. |
+| `MM_PROCESSOR_CACHE_GB` | `1` | vLLM holds 4 GiB of host RAM for processed media by default; on UMA that is 4 GiB the model cannot have. `0` disables it. |
+
+A 33-frame attachment now costs **67,320** tokens and serves. Raise `MM_IMAGE_TOKENS`
+toward 7168 if you need document-grade detail from single images, and watch
+`MemAvailable` on the head while you do.
 
 **NVFP4 KV is not available here.** FlashInfer’s SM12x NVFP4 kernels are dense MHA,
 not sparse MLA. Do not confuse that with NVFP4 **weights** (`--moe-backend marlin`).
@@ -714,7 +732,10 @@ that are now documented/enforced:
 | `TRITON_HOST_CACHE` / `TILELANG_HOST_CACHE` | `$CACHE_ROOT/triton` / `tilelang` | persist JIT caches across container recreate |
 | `LANGUAGE_MODEL_ONLY` | `0` | load vision tower (image + video) |
 | `SKIP_MM_PROFILING` | `1` | skip max-size MM dummy at init (OOM otherwise) |
-| `LIMIT_MM` | `{"image":100,"video":1}` | `--limit-mm-per-prompt` (validation ceiling; nothing reserved) |
+| `LIMIT_MM` | `{"image":48,"video":1}` | `--limit-mm-per-prompt` (validation ceiling; nothing reserved) |
+| `MM_IMAGE_TOKENS` | `2048` | `--mm-processor-kwargs {"max_image_tokens":N}`; empty = checkpoint's 8000 |
+| `VIDEO_NUM_FRAMES` | (empty) | `--media-io-kwargs {"video":{"num_frames":N}}`; empty = vLLM's 32 |
+| `MM_PROCESSOR_CACHE_GB` | `1` | `--mm-processor-cache-gb` (vLLM default 4 GiB of host RAM) |
 | `HEAD_CX7_IF` / `WORKER_CX7_IF` | `enp1s0f1np1` / `enp1s0f0np0` | NCCL sockets |
 | `HEAD_CX7_IB` / `WORKER_CX7_IB` | `rocep1s0f1` / `rocep1s0f0` | NCCL HCAs |
 | `USE_HOST_NCCL` | `0` | image nvidia-nccl; host preload duplicates DeepEP |
