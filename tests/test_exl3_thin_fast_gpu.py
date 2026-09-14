@@ -28,11 +28,11 @@ import argparse
 import os
 import sys
 
+from bench_exl3_thin import N_EXP, TOPK, make_routing
+
 
 HIDDEN = 4096
 INTER = 1024
-N_EXP = 8
-TOPK = 8
 SUH_MODES = ("shared", "independent")
 CASE_ROWS = (1, 2, 7, 8, 24, 48, 64, 127, 128)
 ROUTINGS = ("correlated", "uniform", "skewed")
@@ -80,33 +80,6 @@ def build_layer(device, hidden: int, inter: int, shared_suh: bool, seed: int):
     layer = layer.to(device)
     method.process_weights_after_loading(layer)
     return method, layer
-
-
-def make_routing(rows: int, mode: str, seed: int, device):
-    import torch
-
-    g = torch.Generator(device="cpu")
-    g.manual_seed(5000 + seed)
-    if mode == "uniform":
-        ids = torch.randint(0, N_EXP, (rows, TOPK), generator=g)
-    elif mode == "correlated":
-        ids = torch.empty(rows, TOPK, dtype=torch.long)
-        for b in range(0, rows, 8):
-            hot = torch.randperm(N_EXP, generator=g)[:6]
-            pool = torch.cat([hot, torch.tensor([0, 1])]) % N_EXP
-            nb = min(8, rows - b)
-            draws = torch.randint(0, len(pool), (nb, TOPK), generator=g)
-            ids[b:b + nb] = pool[draws]
-    elif mode == "skewed":
-        ids = torch.zeros(rows, TOPK, dtype=torch.long)
-        ids[:, 1:] = 3  # every token touches expert 3; expert 0 via k=0 too
-    else:
-        raise ValueError(mode)
-    gw = torch.Generator(device="cpu")
-    gw.manual_seed(9000 + seed)
-    weights = torch.rand(rows, TOPK, generator=gw).half()
-    weights = weights / weights.sum(dim=1, keepdim=True)
-    return ids.to(device), weights.to(device)
 
 
 def run_case(layer, x, ids, w):

@@ -40,8 +40,8 @@ import time
 DEFAULT_ROWS = (1, 8, 24, 48, 64, 128)
 HIDDEN = 4096
 INTER = 1024  # TP-local intermediate; hidden % 256 == inter % 256 == 0 (N256)
-N_EXP = 8
-TOPK = 8  # decode/spec-verify fan-out per token (K=7 verify + margin)
+N_EXP = 32
+TOPK = 8  # routed experts per token, independent of DFlash verification length
 
 
 def build_layer(device, shared_suh: bool = True):
@@ -98,19 +98,24 @@ def make_routing(rows: int, mode: str, seed: int, device):
     g = torch.Generator(device="cpu")
     g.manual_seed(1000 + seed)
     if mode == "uniform":
-        ids = torch.randint(0, N_EXP, (rows, TOPK), generator=g)
+        ids = torch.stack([
+            torch.randperm(N_EXP, generator=g)[:TOPK] for _ in range(rows)
+        ])
     elif mode == "correlated":
-        # 8-token blocks; each block draws its top-k from a 6-expert hot pool
-        # plus one block-private expert, mimicking speculative verification
-        # where sibling tokens share most of their routed set.
+        # Verification-like eight-token blocks share a distinct routed set.
+        # Sampling with replacement is not top-k: duplicate experts can make
+        # an expert's route count exceed rows and the thin-kernel row cap.
         ids = torch.empty(rows, TOPK, dtype=torch.long)
         for b in range(0, rows, 8):
-            hot = torch.randperm(N_EXP, generator=g)[:6]
-            private = int(torch.randint(0, N_EXP, (1,), generator=g).item())
-            pool = torch.cat([hot, torch.tensor([private, (private + 1) % N_EXP])])
+            pool = torch.randperm(N_EXP, generator=g)[:TOPK]
             nb = min(8, rows - b)
-            draws = torch.randint(0, N_EXP, (nb, TOPK), generator=g)
-            ids[b:b + nb] = pool[draws % len(pool)]
+            order = torch.stack([
+                torch.randperm(TOPK, generator=g) for _ in range(nb)
+            ])
+            ids[b:b + nb] = pool[order]
+    elif mode == "skewed":
+        # Every token selects the same hot experts, each exactly once.
+        ids = torch.arange(TOPK).expand(rows, TOPK).clone()
     else:
         raise ValueError(mode)
     gw = torch.Generator(device="cpu")
