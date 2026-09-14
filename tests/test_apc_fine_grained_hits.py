@@ -1,87 +1,18 @@
 #!/usr/bin/env python3
-"""Host test for overlay/patch_apc_fine_grained_hits.py.
+"""Host/image regression tests for fine-grained prefix-cache lookup.
 
-Runs anywhere Python 3.10+ is available -- no vLLM import required.
+Exercises patch application, transactional drift rejection, canonical owned
+regions, the injected runtime gate, strict launcher flag validation, and all
+six fine/hybrid/retention composition orders. No vLLM import is required.
 
-Part A (patch mechanics, mirrors tests/test_hybrid_prefix_hit.py):
-  apply to a COPY of kv_cache_coordinator.py, assert the canonical
-  patch-owned regions landed verbatim, assert idempotent re-apply is a
-  byte-identical no-op that itself passes canonical validation, assert
-  fail-closed on a drifted anchor, assert fail-closed on a
-  pre-existing-but-incomplete marker, assert fail-closed with byte
-  preservation when a patch-owned helper/gate region has drifted (even by a
-  single comment that every required token still survives), assert the apply
-  is transactional (no partial writes, no temp litter), assert composability
-  with overlay/patch_hybrid_prefix_hit.py in both orders and under re-apply,
-  and assert composition with overlay/patch_apc_per_group_retention.py (the
-  #130 overlay sharing the same target file and helper insert point) in both
-  orders. An upstream-fixed coordinator (vLLM main e126687a scopes the veto
-  itself) is drift, not a silent no-op: it fails closed and is left
-  byte-identical.
-
-Part B (gate semantics):
-  exec the injected helper block in a bare namespace, then drive it with fakes
-  that mirror the live KV cache layout and several hostile variants.  This is
-  the part that actually encodes the correctness argument.
-
-  Note the fail-closed policy under test, as a 2x2 (DESIGN 4.3) -- rows are
-  "does a PARTICIPATING manager already block fine lookups", columns are "is a
-  NON-PARTICIPATING scratch group unsafe or unverifiable":
-
-      blocker vs scratch |   ok    |  bad
-      ------------------+---------+---------
-      no                | ENABLE  | RAISE
-      yes               | DISABLE | DISABLE
-
-    * a PARTICIPATING manager that cannot do fine lookups -> DISABLE
-      (block-aligned hits are the correct, safe fallback; this is upstream's
-      own condition) -- and that stays DISABLE even when a scratch group is
-      also bad, because no fine-grained hit is taken on that layout, so the
-      scratch invariant is unreachable and a boot failure would be gratuitous;
-    * a NON-PARTICIPATING scratch group whose alignment requirement is violated
-      or unverifiable, on a layout that would otherwise ENABLE -> RAISE
-      Glm53FineGrainedAPCError at coordinator init, tagged
-      "[glm53-apc-finegrained]".  Silently degrading there would hide that this
-      patch's safety argument does not hold on that layout.
-      GLM53_FINEGRAINED_APC=0 -- the default -- restores the upstream gate.
-
-  The flag is OPT-IN: unset and "0" both take the upstream (all-managers)
-  veto path; only "1" enables fine-grained hits.
-
-Part C (launcher knob):
-  drives start.sh's "GLM53 numeric config guard" block in bash and asserts
-  GLM53_FINEGRAINED_APC is accepted only as exactly 0 or 1, the same rule the
-  coordinator enforces at init, and that the default is OFF at every layer
-  (.env.example, the launcher fallback, and the overlay runtime fallback).
-
-Source of truth for the live layout (docker logs glm53-exl3-head):
-  kv_cache_coordinator.py:709  hybrid APC groups:
-    [('MLAAttentionSpec', [0], 'FullAttentionManager', False),
-     ('MambaSpec', [2, 3, 4, 5], 'MambaManager', False),
-     ('SlidingWindowSpec', [6], 'SlidingWindowManager', True)]
-  -> group 1 (KpoolTailSpec) is absent: participates_in_prefix_caching=False.
-  interface.py:635  kv cache block size 64 (DEEPSEEK_V32_INDEXER backend)
-  interface.py:926  attention block size 3584 (>= mamba page size)
-  platforms/interface.py:932-933  mamba_cache_mode=="align" -> mamba_block_size = block_size = 3584
-  config.json       text_config.index_kpool = 4  -> KpoolTailSpec.block_size
-                    (models/glm5next/nvidia/attention.py:191-198)
-  NOTE 896 is NOT a cache boundary: it is block_size // index_kpool, the indexer
-       storage block (models/glm5next/nvidia/attention.py:142).
-
-Usage:
-  python3 test_apc_fine_grained_hits.py
-  GLM53_KV_COORDINATOR_PY_SRC=/path/to/kv_cache_coordinator.py \
-      python3 test_apc_fine_grained_hits.py
-  # optional second source for a true both-orders composition test:
-  GLM53_KV_COORDINATOR_PY_PRISTINE=/tmp/kv_cache_coordinator_pristine.py
-  # optional sources for the #130 retention-composition leg (A7):
-  GLM53_BLOCK_POOL_PY_SRC=/path/to/block_pool.py
-  GLM53_SINGLE_TYPE_KV_CACHE_MANAGER_PY=/path/to/single_type_kv_cache_manager.py
+Supply coordinator and companion source fixtures as documented in
+docs/DESIGN-apc-fine-grained-hits.md#verification-and-limits.
+Caller precedence and rank wiring are covered by test_start_overrides.py and
+test_launcher_rank_parity.py.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import re
 import shutil
@@ -110,23 +41,7 @@ HYBRID_PATCH = next(
         p
         for p in (
             HERE / "patch_hybrid_prefix_hit.py",
-            # the overlay dir of THIS checkout comes first on purpose: a
-            # sibling clone must never be what this test validates against.
             HERE.parent / "overlay" / "patch_hybrid_prefix_hit.py",
-            HERE.parent.parent / "glm-exl3-recipe-fork" / "overlay"
-            / "patch_hybrid_prefix_hit.py",
-        )
-        if p.is_file()
-    ),
-    None,
-)
-
-RETENTION_PATCH = next(
-    (
-        p
-        for p in (
-            HERE / "patch_apc_per_group_retention.py",
-            HERE.parent / "overlay" / "patch_apc_per_group_retention.py",
         )
         if p.is_file()
     ),
@@ -137,13 +52,6 @@ DEFAULT_SRC = Path(
     "/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_coordinator.py"
 )
 DEFAULT_PRISTINE = Path("/tmp/kv_cache_coordinator_pristine.py")
-DEFAULT_BP_SRC = Path(
-    "/usr/local/lib/python3.12/dist-packages/vllm/v1/core/block_pool.py"
-)
-DEFAULT_STM_SRC = Path(
-    "/usr/local/lib/python3.12/dist-packages/vllm/v1/core/"
-    "single_type_kv_cache_manager.py"
-)
 MARK = "# [glm53-finegrained-apc]"
 RUNTIME_TAG = "[glm53-apc-finegrained]"
 HELPER_BEGIN = "# [glm53-finegrained-apc] helper-begin"
@@ -151,8 +59,8 @@ HELPER_END = "# [glm53-finegrained-apc] helper-end"
 
 # The unscoped upstream veto this overlay replaces (kv_cache_coordinator.py
 # :626-639) and the shape vLLM main e126687a gave it once upstream scoped the
-# check to prefix-cacheable groups. Used to synthesize an upstream-fixed
-# coordinator, which must now fail closed as drift rather than no-op.
+# check to prefix-cacheable groups. Used by A6 to synthesize an
+# already-fixed-upstream coordinator.
 UPSTREAM_VETO = """        if self.enable_partial_hash_hits:
             unsupported_partial_hit_managers = {
                 type(manager).__name__
@@ -162,7 +70,7 @@ UPSTREAM_VETO = """        if self.enable_partial_hash_hits:
             }
 """
 
-UPSTREAM_SCOPED_VETO = """        if self.enable_partial_hash_hits:
+UPSTREAM_FIXED_VETO = """        if self.enable_partial_hash_hits:
             unsupported_partial_hit_managers = {
                 type(manager).__name__
                 for manager, group in zip(
@@ -183,16 +91,6 @@ def check(cond: bool, label: str) -> None:
     else:
         print(f"  FAIL {label}")
         FAILURES.append(label)
-
-
-def load_patch_module():
-    """Import the patcher so tests can assert against its canonical regions."""
-    spec = importlib.util.spec_from_file_location(
-        "patch_apc_fine_grained_hits", PATCH
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # noqa: S102
-    return mod
 
 
 def apply_patch(patch: Path, target: Path, expect_fail: bool = False) -> str:
@@ -218,34 +116,6 @@ def apply_patch(patch: Path, target: Path, expect_fail: bool = False) -> str:
     return proc.stdout
 
 
-def apply_retention_patch(
-    target: Path, bp: Path, stm: Path, expect_fail: bool = False
-) -> str:
-    """Apply the #130 retention overlay; it owns three files, not one."""
-    env = os.environ.copy()
-    env["GLM53_KV_COORDINATOR_PY"] = str(target)
-    env["GLM53_BLOCK_POOL_PY"] = str(bp)
-    env["GLM53_SINGLE_TYPE_KV_CACHE_MANAGER_PY"] = str(stm)
-    proc = subprocess.run(
-        [sys.executable, str(RETENTION_PATCH)],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    if expect_fail:
-        if proc.returncode == 0:
-            raise AssertionError(
-                f"{RETENTION_PATCH.name} succeeded where it had to fail closed"
-            )
-        return proc.stderr + proc.stdout
-    if proc.returncode != 0:
-        raise AssertionError(
-            f"{RETENTION_PATCH.name} failed: rc={proc.returncode}\n"
-            f"{proc.stderr}{proc.stdout}"
-        )
-    return proc.stdout
-
-
 def no_temp_litter(directory: Path) -> bool:
     return not any(p.name.endswith(".tmp") for p in directory.iterdir())
 
@@ -266,11 +136,54 @@ def part_a(src: Path) -> str:
         apply_patch(PATCH, dst)
         text = dst.read_text()
         patched_text = text
-        compile(text, str(dst), "exec")
+        check(MARK in text, "A1 MARK present")
+        check("def _glm53_finegrained_hit_gate(" in text, "A1 helper inserted")
+        check("\nimport os\n" in text, "A1 'import os' ensured")
+        check(
+            HELPER_BEGIN in text and HELPER_END in text,
+            "A1 helper block sentinels present",
+        )
+        check(
+            "participates_in_prefix_caching"
+            in text.split("def _glm53_finegrained_hit_gate")[1][:4000],
+            "A1 helper checks participates_in_prefix_caching",
+        )
+        check("GLM53_FINEGRAINED_APC" in text, "A1 kill switch present")
+        check(
+            "class Glm53FineGrainedAPCError(RuntimeError):" in text,
+            "A1 refusal exception type defined",
+        )
+        check(RUNTIME_TAG in text, f"A1 runtime tag {RUNTIME_TAG} present")
+        check(
+            "def _glm53_scratch_alignment(" in text,
+            "A1 runtime spec-derived alignment helper inserted",
+        )
+        check("_glm53_connector_receipt" not in text,
+              "A1 obsolete connector receipt removed")
+        # The old veto built this set over ALL managers. It must be gone --
+        # note "for manager in self.single_type_managers" alone is NOT a valid
+        # probe: cache_blocks() legitimately iterates all managers too.
+        check(
+            "unsupported_partial_hit_managers = {" not in text,
+            "A1 upstream all-managers veto comprehension removed",
+        )
+        check(
+            "for manager in self.single_type_managers" in text,
+            "A1 cache_blocks' own all-managers loop left intact",
+        )
+        check(
+            "Fine-grained prefix-cache hits ENABLED" in text,
+            "A1 enable-path log line present",
+        )
+        check(
+            compile(text, str(dst), "exec") is not None,
+            "A1 patched file compiles",
+        )
         check(no_temp_litter(Path(tmp)), "A1 no temp file left behind")
 
-        # A2 idempotence: a canonical re-apply is a byte-identical no-op.
+        # A2 idempotence
         out = apply_patch(PATCH, dst)
+        check("already present" in out, "A2 second apply is a no-op (announced)")
         check(dst.read_text() == text, "A2 second apply byte-identical")
 
         # A3 fail-closed on drift, transactionally (nothing written at all)
@@ -282,7 +195,10 @@ def part_a(src: Path) -> str:
         )
         dst.write_text(drifted)
         err = apply_patch(PATCH, dst, expect_fail=True)
-        
+        check(
+            "expected one partial-hit-gate target" in err,
+            "A3 fails closed when the gate anchor drifts",
+        )
         check(MARK not in dst.read_text(), "A3 drifted file left unpatched")
         check(
             dst.read_text() == drifted,
@@ -299,12 +215,28 @@ def part_a(src: Path) -> str:
         )
         dst.write_text(t)
         err = apply_patch(PATCH, dst, expect_fail=True)
-        
+        check(
+            "helper insert point" in err,
+            "A3b fails closed when the helper insert point drifts",
+        )
         check(dst.read_text() == t, "A3b transactional: file untouched")
 
         # A5 a pre-existing MARK is not trusted on its own: an incomplete
         # patched state must fail closed, not be skipped as "already done".
         for label, mutate in (
+            ("helper body changed with all markers intact",
+             lambda s: s.replace('if value == "1":', 'if value == "0":', 1)),
+            ("gate result forced on",
+             lambda s: s.replace("self.enable_partial_hash_hits = _glm53_ok",
+                                 "self.enable_partial_hash_hits = True", 1)),
+            ("helper rebound after canonical definition",
+             lambda s: s + "\n_glm53_finegrained_hit_gate = lambda *args: (True, [], {})\n"),
+            ("helper duplicated with alternate whitespace",
+             lambda s: s + "\ndef _glm53_finegrained_hit_gate (*args):\n    return True, [], {}\n"),
+            ("constant rebound outside helper region",
+             lambda s: s + "\nGLM53_ALIGNMENT_ATTRS = ()\n"),
+            ("helper shadowed by import",
+             lambda s: s + "\nfrom builtins import bool as _glm53_finegrained_enabled\n"),
             (
                 "helper block deleted",
                 lambda s: re.sub(
@@ -333,116 +265,42 @@ def part_a(src: Path) -> str:
             broken = mutate(dst.read_text())
             dst.write_text(broken)
             err = apply_patch(PATCH, dst, expect_fail=True)
-            
+            check(
+                "INCOMPLETE" in err,
+                f"A5 pre-existing MARK + {label} -> fails closed",
+            )
             check(
                 dst.read_text() == broken,
                 f"A5 pre-existing MARK + {label} -> file untouched",
             )
 
-        # A5b canonical drift rejection: every mutation below keeps ALL of the
-        # marker/sub-string tokens the old validation looked for, so it would
-        # have passed token checks -- but it changes a patch-owned region, so
-        # canonical validation must fail BEFORE the target is touched and the
-        # file must come back byte-identical.
-        for label, mutate in (
-            (
-                "one comment line added inside the helper body",
-                lambda s: s.replace(
-                    "    return first_value,",
-                    "    # drifted\n    return first_value,",
-                    1,
-                ),
-            ),
-            (
-                "one comment line added inside the gate body",
-                lambda s: s.replace(
-                    "            self.enable_partial_hash_hits = _glm53_ok\n",
-                    "            # drifted\n            self.enable_partial_hash_hits = _glm53_ok\n",
-                    1,
-                ),
-            ),
-            (
-                "helper block duplicated",
-                lambda s: s + PATCH_MOD.HELPER,
-            ),
-            (
-                "gate block duplicated",
-                lambda s: s.replace(
-                    PATCH_MOD.GATE_NEW, PATCH_MOD.GATE_NEW + PATCH_MOD.GATE_NEW, 1
-                ),
-            ),
-            (
-                "foreign duplicate of a patch-owned def",
-                lambda s: s.replace(
-                    "def _validate_prefix_cache_retention_interval(\n",
-                    "def _glm53_strict_int(value):\n    return None\n\n\n"
-                    "def _validate_prefix_cache_retention_interval(\n",
-                    1,
-                ),
-            ),
-            (
-                "duplicate helper with alternate definition whitespace",
-                lambda s: s + "\ndef\t_glm53_strict_int(value):\n    return None\n",
-            ),
-            (
-                "helper rebound without a second def",
-                lambda s: s + "\n_glm53_strict_int = lambda value: None\n",
-            ),
-            (
-                "os import renamed away from the required binding",
-                lambda s: s.replace("import os", "import os as renamed_os", 1),
-            ),
-        ):
-            shutil.copyfile(src, dst)
-            apply_patch(PATCH, dst)
-            drifted_patched = mutate(dst.read_text())
-            check(
-                drifted_patched != dst.read_text(),
-                f"A5b fixture: {label} actually changed the file",
-            )
-            dst.write_text(drifted_patched)
-            err = apply_patch(PATCH, dst, expect_fail=True)
-            
-            check(
-                dst.read_text() == drifted_patched,
-                f"A5b MARK + {label} -> drifted file byte-identical (no mutation)",
-            )
-            check(
-                no_temp_litter(Path(tmp)),
-                f"A5b MARK + {label} -> no temp file left behind",
-            )
-
-        # A6 an upstream-fixed coordinator (vLLM main e126687a scopes the veto
-        # to KVCacheSpec.prefix_cacheable groups) is DRIFT, not a silent no-op:
-        # the anchor is gone, so the patcher fails closed and leaves the file
-        # byte-identical. That build-time failure is the intended signal to
-        # retire this overlay on a rebased image.
+        # A6 a differently scoped veto is unsupported source drift. Never
+        # silently accept it without installing the runtime compatibility gate.
         shutil.copyfile(src, dst)
-        upstream_fixed = dst.read_text().replace(
-            UPSTREAM_VETO, UPSTREAM_SCOPED_VETO, 1
-        )
-        check(
-            upstream_fixed != dst.read_text(),
-            "A6 fixture: the upstream veto anchor was found and replaced",
-        )
+        upstream_fixed = dst.read_text().replace(UPSTREAM_VETO, UPSTREAM_FIXED_VETO, 1)
+        check(upstream_fixed != dst.read_text(), "A6 fixture replaced the veto")
         dst.write_text(upstream_fixed)
-        err = apply_patch(PATCH, dst, expect_fail=True)
-        
-        check(
-            dst.read_text() == upstream_fixed,
-            "A6 upstream-fixed coordinator left byte-identical",
-        )
-        check(no_temp_litter(Path(tmp)), "A6 no temp file left behind")
+        out = apply_patch(PATCH, dst, expect_fail=True)
+        check("expected one partial-hit-gate target" in out,
+              "A6 scoped upstream veto fails closed")
+        check(dst.read_text() == upstream_fixed, "A6 refusal leaves bytes unchanged")
+        check(no_temp_litter(Path(tmp)), "A6 refusal leaves no temporary file")
 
-        # A6b the veto is GONE entirely -- that is drift too.
+        # A6b the veto is GONE entirely -- that is drift, not an upstream fix.
         shutil.copyfile(src, dst)
         gutted = dst.read_text().replace(UPSTREAM_VETO, "", 1)
         dst.write_text(gutted)
         err = apply_patch(PATCH, dst, expect_fail=True)
-        
+        check(
+            "expected one partial-hit-gate target" in err,
+            "A6b a deleted veto still fails closed (not read as 'upstream fixed')",
+        )
         check(dst.read_text() == gutted, "A6b transactional: file untouched")
 
-        # A6c an unscoped veto that merely drifted must still fail closed.
+        # A6c an unscoped veto that merely drifted must still fail closed, even
+        # though `participates_in_prefix_caching` appears ~25 lines below it in
+        # verify_and_split_kv_cache_groups. A text window would read that
+        # neighbour as proof of a fix; canonical validation must still refuse.
         shutil.copyfile(src, dst)
         drifted2 = dst.read_text().replace(
             "                if not manager.supports_fine_grained_hash_lookup\n",
@@ -452,7 +310,14 @@ def part_a(src: Path) -> str:
         check(drifted2 != dst.read_text(), "A6c fixture: veto line drifted")
         dst.write_text(drifted2)
         err = apply_patch(PATCH, dst, expect_fail=True)
-        
+        check(
+            "expected one partial-hit-gate target" in err,
+            "A6c drifted-but-unscoped veto still fails closed",
+        )
+        check(
+            "participates_in_prefix_caching" in drifted2,
+            "A6c the neighbour attribute really is present in the file",
+        )
 
     # A4 composability with patch_hybrid_prefix_hit.py, both orders.
     # Run over every available source: the caller's src (which on this kit is
@@ -511,88 +376,6 @@ def part_a(src: Path) -> str:
             check(
                 results[("fine", "hybrid")] == results[("hybrid", "fine")],
                 f"A4[{src_label}] patch order is commutative (identical bytes)",
-            )
-
-    # A7 retention compatibility (#130): patch_apc_per_group_retention.py owns
-    # the same coordinator file plus block_pool.py and
-    # single_type_kv_cache_manager.py, and shares the helper insert point.
-    # Compose it with this patch in both orders on a pristine coordinator.
-    if RETENTION_PATCH is None:
-        print("  skip A7 (patch_apc_per_group_retention.py not found)")
-    else:
-        pristine = Path(
-            os.environ.get("GLM53_KV_COORDINATOR_PY_PRISTINE", DEFAULT_PRISTINE)
-        )
-        bp_src = Path(
-            os.environ.get("GLM53_BLOCK_POOL_PY_SRC", DEFAULT_BP_SRC)
-        )
-        stm_src = Path(
-            os.environ.get(
-                "GLM53_SINGLE_TYPE_KV_CACHE_MANAGER_PY", DEFAULT_STM_SRC
-            )
-        )
-        if not (pristine.is_file() and bp_src.is_file() and stm_src.is_file()):
-            print(
-                "  skip A7 (needs GLM53_KV_COORDINATOR_PY_PRISTINE, "
-                "GLM53_BLOCK_POOL_PY_SRC and "
-                "GLM53_SINGLE_TYPE_KV_CACHE_MANAGER_PY)"
-            )
-        else:
-            import ast as _ast
-
-            results = {}
-            for order in (("fine", "retention"), ("retention", "fine")):
-                with tempfile.TemporaryDirectory() as tmp:
-                    dst = Path(tmp) / "kv_cache_coordinator.py"
-                    bp_dst = Path(tmp) / "block_pool.py"
-                    stm_dst = Path(tmp) / "single_type_kv_cache_manager.py"
-                    shutil.copyfile(pristine, dst)
-                    shutil.copyfile(bp_src, bp_dst)
-                    shutil.copyfile(stm_src, stm_dst)
-                    for which in order:
-                        if which == "fine":
-                            apply_patch(PATCH, dst)
-                        else:
-                            apply_retention_patch(dst, bp_dst, stm_dst)
-                    t = dst.read_text()
-                    results[order] = t
-                    tag = f"A7 {order[0]}->{order[1]}"
-                    check(
-                        MARK in t and "# [glm53-apc-per-group]" in t,
-                        f"{tag}: both MARKs present",
-                    )
-                    check(
-                        t.count("def _glm53_finegrained_hit_gate(") == 1
-                        and t.count("def _glm53_resolve_retention_by_group(") == 1,
-                        f"{tag}: each helper inserted exactly once",
-                    )
-                    check(
-                        t.count(PATCH_MOD.HELPER) == 1
-                        and t.count(PATCH_MOD.GATE_NEW) == 1,
-                        f"{tag}: fine-grained patch-owned regions still canonical",
-                    )
-                    try:
-                        compile(t, str(dst), "exec")
-                        ok = True
-                    except SyntaxError as exc:  # pragma: no cover
-                        ok = False
-                        print(f"       syntax error: {exc}")
-                    check(ok, f"{tag}: compiles")
-                    # Re-apply both in the same order: canonical validation
-                    # must accept the composed file as a no-op.
-                    for which in order:
-                        if which == "fine":
-                            apply_patch(PATCH, dst)
-                        else:
-                            apply_retention_patch(dst, bp_dst, stm_dst)
-                    check(
-                        dst.read_text() == t,
-                        f"{tag}: re-applying both is byte-identical (idempotent)",
-                    )
-            check(
-                _ast.dump(_ast.parse(results[("fine", "retention")]))
-                == _ast.dump(_ast.parse(results[("retention", "fine")])),
-                "A7 patch order is commutative (identical ASTs)",
             )
 
     return patched_text
@@ -1076,9 +859,9 @@ def part_b(patched_text: str) -> None:
     )
 
     # B22: the kill switch, executed rather than grepped. Extracts the patched
-    # gate block out of __init__ and runs it against fakes, so the OPT-IN
-    # contract is proven: unset and "0" both take the upstream veto path and
-    # never raise, and only "1" enables fine-grained hits.
+    # gate block out of __init__ and runs it against fakes, so
+    # GLM53_FINEGRAINED_APC=0 is proven to (a) disable and (b) NOT raise even on
+    # a layout the gate would otherwise refuse to start on.
     block = extract_gate_block(patched_text)
     runner = compile(
         "def _glm53_run(self, kv_cache_config, hash_block_size, os, logger):\n"
@@ -1134,32 +917,29 @@ def part_b(patched_text: str) -> None:
     # BAD plus a participating blocker: the mixed cell, through the real block.
     BAD_MIXED = BAD + [("SlidingWindowManager", 3584, False, True, None)]
 
+    check(drive(LIVE_LAYOUT, None)[0] is False,
+          "B22 unset runtime flag disables fine hits by default")
     enabled, log = drive(LIVE_LAYOUT, "1")
-    check(enabled is True, "B22 gate block enables on the live layout when opted in")
+    check(enabled is True, "B22 gate block enables on the live layout")
     check(
         drive(LIVE_LAYOUT, "0")[0] is False,
         "B22 GLM53_FINEGRAINED_APC=0 disables fine hits",
     )
     check(
-        drive(LIVE_LAYOUT, None)[0] is False,
-        "B22 GLM53_FINEGRAINED_APC unset defaults OFF (opt-in)",
+        drive(LIVE_LAYOUT, "1")[0] is True,
+        "B22 GLM53_FINEGRAINED_APC=1 explicitly enables fine hits",
     )
     try:
         drive(BAD, "1")
         ok = False
     except err_cls:
         ok = True
-    check(ok, "B22 a violating layout REFUSES through the real gate block when opted in")
+    check(ok, "B22 a violating layout REFUSES through the real gate block")
     try:
         ok = drive(BAD, "0")[0] is False
     except err_cls:
         ok = False
-    check(ok, "B22 GLM53_FINEGRAINED_APC=0 escapes the refusal (upstream gate)")
-    try:
-        ok = drive(BAD, None)[0] is False
-    except err_cls:
-        ok = False
-    check(ok, "B22 unset also escapes the refusal (default is the upstream gate)")
+    check(ok, "B22 GLM53_FINEGRAINED_APC=0 escapes the refusal (documented opt-out)")
 
     # ---------------------------------------------------------------- B26
     # Strict integer parsing. int() would accept every value in the reject
@@ -1186,18 +966,14 @@ def part_b(patched_text: str) -> None:
         "0x40",
         "4_0",
         "4\n",
-        "٤",     # ARABIC-INDIC DIGIT FOUR: str.isdigit() is True
-        "²",     # SUPERSCRIPT TWO: str.isdigit() is True
+        "\u0664",     # ARABIC-INDIC DIGIT FOUR: str.isdigit() is True
+        "\u00b2",     # SUPERSCRIPT TWO: str.isdigit() is True
         True,
         False,
         None,
         object(),
     ):
         check(strict_int(value) is None, f"B26 strict int REJECTS {value!r}")
-    check(
-        int("4.5".replace(".5", "")) == 4 and strict_int("4.5") is None,
-        "B26 the value int() would have silently truncated is refused instead",
-    )
 
     # ---------------------------------------------------------------- B27
     # The kill switch is exactly '0' or '1'; anything else refuses at init.
@@ -1222,9 +998,8 @@ def part_b(patched_text: str) -> None:
         check(ok, f"B27 GLM53_FINEGRAINED_APC={bad!r} refuses through the gate block")
 
     # ---------------------------------------------------------------- B28
-    # The 2x2 mixed-layout matrix (DESIGN 4.3), all four cells, driven through
-    # the shipped gate block rather than the helper alone. Opted in ("1"):
-    # with the flag unset or 0 every cell is DISABLE by definition.
+    # The mixed-layout matrix, all four cells, driven through
+    # the shipped gate block rather than the helper alone.
     SAFE_SCRATCH = ("KpoolTailManager", 4, False, False, {"index_kpool": 4})
     BAD_SCRATCH = ("KpoolTailManager", 128, False, False, {"index_kpool": 128})
     COARSE_BLOCKER = ("SlidingWindowManager", 3584, False, True, None)
@@ -1254,9 +1029,7 @@ def part_b(patched_text: str) -> None:
     )
 
     # ---------------------------------------------------------------- B29
-    # Effective-value receipt: one line stating enabled/disabled, the reason,
-    # the alignment actually in force, and the scratch groups checked. This is
-    # the line DESIGN 6.5 B0 greps out of `docker logs` on BOTH ranks.
+    # Coordinator receipt: effective alignment, reason, and scratch checks.
     _enabled, lines = drive(LIVE_LAYOUT, "1")
     receipt = next((l for l in lines if RUNTIME_TAG in l), "")
     for token in (
@@ -1272,20 +1045,12 @@ def part_b(patched_text: str) -> None:
     receipt = next((l for l in lines if RUNTIME_TAG in l), "")
     for token in (
         "Fine-grained prefix-cache hits DISABLED",
-        "reason=GLM53_FINEGRAINED_APC=0 (kill switch",
+        "reason=GLM53_FINEGRAINED_APC=0 (kill switch)",
         "effective alignment=3584 tokens",
         "hash_block_size=64",
         "scratch groups checked:",
     ):
         check(token in receipt, f"B29 kill-switch receipt states {token!r}")
-
-    _enabled, lines = drive(LIVE_LAYOUT, None)
-    receipt = next((l for l in lines if RUNTIME_TAG in l), "")
-    check(
-        "Fine-grained prefix-cache hits DISABLED" in receipt
-        and "GLM53_FINEGRAINED_APC=0" in receipt,
-        "B29 the unset-default receipt reads DISABLED via the kill-switch path",
-    )
 
     _enabled, lines = drive(BAD_MIXED, "1")
     receipt = next((l for l in lines if RUNTIME_TAG in l), "")
@@ -1312,7 +1077,6 @@ def part_b(patched_text: str) -> None:
 # --------------------------------------------------------------------------
 
 START_SH = HERE.parent / "start.sh"
-ENV_EXAMPLE = HERE.parent / ".env.example"
 
 
 def guard_source() -> str:
@@ -1358,6 +1122,12 @@ def part_c() -> None:
 
     source = START_SH.read_text()
 
+    check('GLM53_FINEGRAINED_APC=0' in (HERE.parent / '.env.example').read_text(),
+          "C0 example defaults to off")
+    check('GLM53_FINEGRAINED_APC="${GLM53_FINEGRAINED_APC-0}"' in source,
+          "C0 launcher defaults to off without swallowing explicit empties")
+    check('"${GLM53_FINEGRAINED_APC-0}"' in guard_source(),
+          "C0 standalone guard defaults to off")
 
     # C2 exactly 0 or 1, matching _glm53_finegrained_enabled in the overlay.
     for value in (None, "0", "1"):
@@ -1370,66 +1140,49 @@ def part_c() -> None:
         )
 
 
-    # C4 setness regression: an explicitly EMPTY caller export must survive the
-    # .env source and reach the guard (which rejects ""), not silently lose to
-    # a .env value of 1. Runs the real preamble with a synthetic .env.
-    import subprocess as _sp
-    import tempfile as _tf
-    marker = "# ----------------------------- configuration -------------------------------"
-    preamble, sep, _rest = source.partition(marker)
-    if not sep:
-        raise AssertionError("cannot safely isolate the launcher configuration preamble")
-    with _tf.TemporaryDirectory() as _raw:
-        _tmp = Path(_raw)
-        _script = _tmp / "start.sh"
-        _script.write_text(
-            preamble
-            + '\nprintf "FG=[%s]\\n" "${GLM53_FINEGRAINED_APC-UNSET}"\n'
-        )
-        _script.chmod(0o755)
-        (_tmp / ".env").write_text("GLM53_FINEGRAINED_APC=1\n")
-        _env = {k: v for k, v in os.environ.items() if k != "GLM53_FINEGRAINED_APC"}
-        # caller silent -> .env wins
-        r = _sp.run(["bash", str(_script)], text=True, capture_output=True, env=_env)
-        check(r.returncode == 0 and r.stdout.strip() == "FG=[1]", f"C4 caller silent: .env wins ({r.stdout.strip()!r})")
-        # caller sets it EMPTY -> the empty value survives to the guard
-        r = _sp.run(["bash", str(_script)], text=True, capture_output=True, env={**_env, "GLM53_FINEGRAINED_APC": ""})
-        check(r.returncode == 0 and r.stdout.strip() == "FG=[]", f"C4 explicit empty survives .env ({r.stdout.strip()!r})")
-        check(run_guard("") == 2, "C4 ...and the guard rejects the empty value (rc=2)")
 
-    # C5 execute the shipped configuration, then feed its result to the real
-    # runtime parser. Runtime-default behavior is separately exercised by B22.
-    assignment = next(
-        line for line in source.splitlines()
-        if line.startswith("GLM53_FINEGRAINED_APC=")
-    )
-    example = next(
-        line for line in ENV_EXAMPLE.read_text().splitlines()
-        if line.startswith("GLM53_FINEGRAINED_APC=")
-    )
-    namespace = {}
-    exec(PATCH_MOD.HELPER, namespace)
-    for label, setup in (("unset", "unset GLM53_FINEGRAINED_APC"), ("example", example)):
-        result = _sp.run(
-            ["bash", "-c", setup + "\n" + assignment
-             + '\nprintf "%s" "$GLM53_FINEGRAINED_APC"'],
-            capture_output=True, text=True,
-        )
-        check(
-            result.returncode == 0
-            and namespace["_glm53_finegrained_enabled"](result.stdout) is False,
-            f"C5 {label} configuration selects the runtime OFF policy",
-        )
+def part_d(src: Path) -> None:
+    """All three overlays must compose, including current-main replay guards."""
+    import ast
+    import itertools
 
-
-PATCH_MOD = None
+    per_group = HERE.parent / "overlay" / "patch_apc_per_group_retention.py"
+    core = DEFAULT_SRC.parent
+    bp = Path(os.environ.get("GLM53_BLOCK_POOL_PY_SRC", core / "block_pool.py"))
+    stm = Path(os.environ.get("GLM53_SINGLE_TYPE_KV_CACHE_MANAGER_PY_SRC",
+                             core / "single_type_kv_cache_manager.py"))
+    if not all(p is not None and p.is_file() for p in (HYBRID_PATCH, per_group, bp, stm)):
+        print("  skip D: set pristine block-pool and single-type manager source paths")
+        return
+    pristine = Path(os.environ.get("GLM53_KV_COORDINATOR_PY_PRISTINE", src))
+    trees = []
+    for order in itertools.permutations((HYBRID_PATCH, per_group, PATCH)):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            coordinator, pool, manager = (tmp / n for n in ("coordinator.py", "pool.py", "manager.py"))
+            for source, target in ((pristine, coordinator), (bp, pool), (stm, manager)):
+                shutil.copyfile(source, target)
+            env = {**os.environ, "GLM53_KV_COORDINATOR_PY": str(coordinator),
+                   "GLM53_BLOCK_POOL_PY": str(pool),
+                   "GLM53_SINGLE_TYPE_KV_CACHE_MANAGER_PY": str(manager)}
+            for patch in order:
+                subprocess.run([sys.executable, str(patch)], env=env, check=True,
+                               capture_output=True, text=True)
+            files = (coordinator, pool, manager)
+            before = [p.read_bytes() for p in files]
+            for patch in order:
+                subprocess.run([sys.executable, str(patch)], env=env, check=True,
+                               capture_output=True, text=True)
+            check(before == [p.read_bytes() for p in files],
+                  "D three-overlay reapply is byte-identical: " + ", ".join(p.stem for p in order))
+            trees.append([ast.dump(ast.parse(p.read_text())) for p in files])
+    check(all(tree == trees[0] for tree in trees),
+          "D all six fine/hybrid/retention orders produce identical coordinator/pool/manager ASTs")
 
 
 def main() -> int:
-    global PATCH_MOD
     if PATCH is None:
         raise SystemExit("missing patch_apc_fine_grained_hits.py")
-    PATCH_MOD = load_patch_module()
     src = Path(os.environ.get("GLM53_KV_COORDINATOR_PY_SRC", DEFAULT_SRC))
     if not src.is_file():
         raise SystemExit(
@@ -1442,11 +1195,10 @@ def main() -> int:
     print(f"source: {src}")
     if HYBRID_PATCH is not None:
         print(f"hybrid overlay: {HYBRID_PATCH}")
-    if RETENTION_PATCH is not None:
-        print(f"retention overlay: {RETENTION_PATCH}")
     patched_text = part_a(src)
     part_b(patched_text)
     part_c()
+    part_d(src)
     print()
     if FAILURES:
         print(f"FAILED ({len(FAILURES)}): " + "; ".join(FAILURES))

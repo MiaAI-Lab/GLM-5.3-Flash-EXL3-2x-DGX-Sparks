@@ -59,10 +59,6 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
 fi
 # Caller exports, including explicit empties, must win over .env.
 # Snapshot exports rather than parsing .env: it is sourced as shell code.
-# Setness-aware pair for the fine-grained kill switch: an explicitly empty
-# caller value must reach the guard, not silently lose to a .env value.
-_cli_finegrained_set="${GLM53_FINEGRAINED_APC+1}"
-_cli_finegrained="${GLM53_FINEGRAINED_APC-}"
 _caller_overrides=()
 while IFS= read -r _k; do
     _flags="$(declare -p "$_k")"
@@ -77,8 +73,7 @@ set +a
 # Each entry is NAME=value; quoting preserves whitespace and empty values.
 # shellcheck disable=SC2163
 for _kv in ${_caller_overrides[@]+"${_caller_overrides[@]}"}; do export "$_kv"; done
-[ -n "${_cli_finegrained_set}" ] && GLM53_FINEGRAINED_APC="$_cli_finegrained"
-unset _k _kv _flags _caller_overrides _cli_finegrained_set _cli_finegrained
+unset _k _kv _flags _caller_overrides
 
 # ----------------------------- configuration -------------------------------
 MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"
@@ -283,9 +278,8 @@ GLM53_SUPPRESS_STOPS_IN_REASONING="${GLM53_SUPPRESS_STOPS_IN_REASONING:-1}"
 # skip = do not mix; N>0 = cap tokens; 0 = off.
 GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"
 # 1 = fine-grained (64-token) prefix-cache hits (overlay patch_apc_fine_grained_hits.py);
-# 0 = upstream 3584-block hits. OPT-IN: default is 0 (off) pending live
-# qualification. Default applies only when UNSET; an explicitly empty value is
-# an operator error and validate_numeric_config rejects it.
+# 0 = upstream 3584-block hits. Default applies only when UNSET; an explicitly
+# empty value is an operator error and validate_numeric_config rejects it.
 GLM53_FINEGRAINED_APC="${GLM53_FINEGRAINED_APC-0}"
 # Adaptive verification length (overlay/patch_adaptive_k.py). off = stock k=7 every step.
 GLM53_ADAPTIVE_K="${GLM53_ADAPTIVE_K:-off}"
