@@ -38,6 +38,20 @@ def policy_tests(helper_src: str) -> None:
             os.environ.update(old)
         return inst
 
+    # docker -e VAR= (empty) must not crash; Python getenv default is skipped
+    p = make({
+        "GLM53_ADAPTIVE_K": "ema",
+        "GLM53_ADAPTIVE_K_ALPHA": "",
+        "GLM53_ADAPTIVE_K_MARGIN": "",
+        "GLM53_ADAPTIVE_K_MIN_STEPS": "",
+        "GLM53_ADAPTIVE_K_SET": "",
+        "GLM53_ADAPTIVE_K_SATURATE": "",
+        "GLM53_ADAPTIVE_K_HIST": "",
+    })
+    assert p.enabled and p.alpha == 0.25 and p.margin == 1.0
+    assert p.min_steps == 4 and p.k_set == [2, 4, 7]
+    assert p.saturate == "max" and p.hist_every == 200
+
     # default off: never trims
     p = make({"GLM53_ADAPTIVE_K": "off"})
     r = _Req("a")
