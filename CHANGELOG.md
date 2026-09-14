@@ -1,28 +1,21 @@
 # Changelog
 
-## 2026-09-11 — `Reasoning Effort:` directive moved before the last user message (cache-safe effort changes)
+## Unreleased — opt-in before-last-user reasoning-effort placement
 
-`files/chat_template.jinja` now emits `<|system|>Reasoning Effort: <Low|High|Max>` once, immediately before the
-**last** `<|user|>` turn, only when thinking is on and a generation prompt is requested (a conversation with no
-user message falls back to the tail). Everything before that point is byte-identical across thinking off / low /
-high / max, so a per-request `reasoning_effort` change or a thinking toggle re-prefills only the final user turn.
-Before, the directive sat at char ~39 and every change was a full prefix-cache miss (#63 kept it unconditional
-for that reason; a5cc004 re-gated it on thinking for output quality, at the cost of the cache).
+`files/chat_template.jinja` keeps main's head placement by default. The
+`reasoning_effort_placement="before_last_user"` template kwarg opts into moving
+the directive immediately before the final user turn when rendering a
+generation prompt. History renders and conversations without a user retain
+head placement; invalid placement values are rejected.
 
-- Cache proof (~16.5k-token prompt, 3584-token pages): low → high → low keeps **14,336 / 16,579** cached tokens on
-  every call, TTFT ~2.5 s; head placement: **0** cached on each change, TTFT ~15 s. At ~47k / ~152k tokens an
-  effort change costs **0.9 s / 2.1 s** (46,592 / 150,528 cached) against **28.8 s / 92 s** at the head.
-- Tool-call conversations (tool block + prior call + result + follow-up user): 12/12 correct calls at low/high/max
-  at either position; streaming `reasoning` deltas still arrive before `content`, nothing leaks into `content`.
-- Tail placement (after the last user turn, just before `<|assistant|>`) also keeps the cache but was **rejected**:
-  at `high` on a one-shot code fixture the model emitted a second `</think>` and a duplicated code block 10/22
-  times. Before-last-user matched head 14/14 there and on the JSON and math fixtures.
-- Caveat: at `max` on that code fixture before-last-user reasons ~6× longer than head (1,196 vs 192 tokens; every
-  answer correct). `high` and `low` reasoning lengths are unchanged.
-- Thinking-off output is byte-identical to the previous template. History renders (`add_generation_prompt=false`)
-  carry no directive.
-- `tests/test_chat_template.py` pins the new shape (10 tests; 5 fail on the old template).
-  `tests/bench_effort_placement.py` is the live A/B used for the numbers above.
+CPU checks cover rendering boundaries, literal role-marker text and real
+HEAD/PRE benchmark rendering. Default and explicit-head output match main
+byte-for-byte across 224 rendering cases.
+
+Earlier GPU/cache measurements concern the prior candidate, not qualification
+of this revision. The latest completed TheGrill must still check correctness,
+tool/stream behavior, cached tokens, reasoning cost and latency before this
+option is recommended or made default.
 
 ## 2026-09-07 — E3 grouped fat-expert MoE prefill (`EXL3_FAT_GROUPED`, now the default)
 

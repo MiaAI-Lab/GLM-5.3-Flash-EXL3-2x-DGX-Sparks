@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Where should the `Reasoning Effort:` directive live? HEAD vs TAIL vs PRE vs NONE.
 
-Runs against a live server. Nothing is persisted server-side and no template
-is changed: the server renders the prompt once (via /tokenize + /detokenize),
-the directive is moved by string surgery, each arm is re-tokenized and sent as
-token ids through /v1/completions at temperature 0, so every byte of every arm
-is controlled and the arms share one code path.
+Requires the candidate template with the experimental placement option. HEAD
+and PRE are rendered by the server from structured messages, not by searching
+marker-looking text in user data. TAIL and NONE remain synthetic historical
+controls. All arms are re-tokenized and sent through /v1/completions.
+Use the completed TheGrill version for integration qualification; this
+exploratory harness does not replace raw/chat/continuation and cost gates.
 
-  head  directive at char ~39, right after [gMASK]<sop>   (template before this change)
-  pre   directive immediately before the LAST <|user|>    (template after this change)
+  head  directive immediately after [gMASK]<sop>          (default)
+  pre   directive before the last actual user message    (experimental opt-in)
   tail  directive after the last user turn, just before <|assistant|>  (rejected)
   none  no directive at all (thinking on, effort unspecified)
 
@@ -46,7 +47,6 @@ MODEL = "GLM-5.3-Flash-EXL3"
 API_KEY_ENV = "API_KEY"
 RESULTS_DIR = Path(__file__).resolve().parents[1] / "results"
 
-EFFORT_RE = re.compile(r"<\|system\|>Reasoning Effort: (Low|High|Max)")
 GEN_TAIL = "<|assistant|><think>"
 
 _cfg = {"base": BASE, "model": MODEL, "api_key": ""}
@@ -65,37 +65,32 @@ def tokenize_text(text):
     return post("/tokenize", {"model": _cfg["model"], "prompt": text, "add_special_tokens": False})["tokens"]
 
 
-def server_tokens(messages, tier, tools=None):
+def server_tokens(messages, tier, tools=None, placement="head"):
     body = {"model": _cfg["model"], "messages": messages, "add_generation_prompt": True,
-            "chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": tier}}
+            "chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": tier,
+                                     "reasoning_effort_placement": placement}}
     if tools:
         body["tools"] = tools
     return post("/tokenize", body)["tokens"]
 
 
-def render_server(messages, tier, tools=None):
-    """The server's own rendering as text, whatever placement its template uses."""
-    text = post("/detokenize", {"model": _cfg["model"], "tokens": server_tokens(messages, tier, tools)})["prompt"]
-    assert len(EFFORT_RE.findall(text)) == 1, "expected exactly one effort directive: " + text[:120]
+def render_server(messages, tier, tools=None, placement="head"):
+    """Render the actual candidate mode without interpreting marker-like data."""
+    text = post("/detokenize", {"model": _cfg["model"], "tokens": server_tokens(messages, tier, tools, placement)})["prompt"]
     assert text.endswith(GEN_TAIL), "unexpected tail: " + text[-40:]
     return text
 
 
-def make_variants(server_text):
-    """Return {arm: text} for head / tail / pre / none, all from one rendering."""
-    m = EFFORT_RE.search(server_text)
-    line = m.group(0)
-    stripped = server_text.replace(line, "", 1)
-    assert not EFFORT_RE.search(stripped)
-    assert stripped.startswith("[gMASK]<sop>")
-    head = "[gMASK]<sop>" + line + stripped[len("[gMASK]<sop>"):]
+def make_variants(messages, tier, tools=None):
+    """Render real HEAD/PRE modes; derive only the historical controls."""
+    head = render_server(messages, tier, tools, "head")
+    pre = render_server(messages, tier, tools, "before_last_user")
+    prefix = "[gMASK]<sop>"
+    line = f"<|system|>Reasoning Effort: {tier.capitalize()}"
+    assert head.startswith(prefix + line), "head placement was not rendered"
+    stripped = prefix + head[len(prefix + line):]
     tail = stripped[: -len(GEN_TAIL)] + line + GEN_TAIL
-    k = stripped.rfind("<|user|>")
-    pre = stripped[:k] + line + stripped[k:]
-    variants = {"head": head, "tail": tail, "none": stripped, "pre": pre}
-    # which arm is the server's own placement? (round-trip guard uses it)
-    server_arm = next(a for a, t in variants.items() if t == server_text)
-    return variants, server_arm
+    return {"head": head, "tail": tail, "none": stripped, "pre": pre}, "head"
 
 
 def complete(ids, max_tokens, seed=0):
@@ -211,8 +206,8 @@ def phase0(out, sizes):
         filler = " ".join(_record(i) for i in range(1, n))
         msgs = [{"role": "system", "content": SYS + "\n\n" + filler},
                 {"role": "user", "content": "Reply with the single word OK."}]
-        v_low, _ = make_variants(render_server(msgs, "low"))
-        v_high, _ = make_variants(render_server(msgs, "high"))
+        v_low, _ = make_variants(msgs, "low")
+        v_high, _ = make_variants(msgs, "high")
         for arm in [a for a in ARMS if a != "none"]:
             seq = []
             for tier, v in (("low", v_low), ("high", v_high), ("low", v_low)):
@@ -251,7 +246,7 @@ def phase1(out, reps, max_tokens, conc):
     for name, fx in FIXTURES.items():
         msgs, checker, tools = (fx + (None,))[:3]
         for tier in TIERS:
-            variants, server_arm = make_variants(render_server(msgs, tier, tools))
+            variants, server_arm = make_variants(msgs, tier, tools)
             for arm in ARMS:
                 ids = tokenize_text(variants[arm])
                 if arm == server_arm:

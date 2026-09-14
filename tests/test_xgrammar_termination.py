@@ -385,7 +385,12 @@ def test_recipe_wiring_if_present() -> None:
     launcher = start.read_text()
     image = dockerfile.read_text()
     assert 'XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-' in launcher
-    assert launcher.count("python3 /opt/glm53/patch_xgrammar_termination.py") == 2
+    # Both ranks apply the one pinned list (GLM53_OVERLAY_ORDER) that
+    # write_inner_scripts emits into the head and worker inner scripts.
+    order = launcher[launcher.index("GLM53_OVERLAY_ORDER=(") : launcher.index(")", launcher.index("GLM53_OVERLAY_ORDER=("))]
+    assert "\n    patch_xgrammar_termination.py\n" in order
+    assert 'emit_overlay_block >> "$HEAD_SCRIPT"' in launcher
+    assert 'emit_overlay_block >> "$WORKER_SCRIPT"' in launcher
     assert (
         "-v '/tmp/patch_xgrammar_termination.py:"
         "/opt/glm53/patch_xgrammar_termination.py:ro'" in launcher

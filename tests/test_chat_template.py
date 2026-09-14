@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
-"""Regression checks for GLM-5.3 chat-template reasoning controls.
+"""CPU contracts for default head placement and experimental last-user placement.
 
-Contract: the `<|system|>Reasoning Effort: <Low|High|Max>` directive is emitted
-exactly once, immediately before the LAST user message, and only when thinking
-is on and a generation prompt is requested. Everything before that point is
-byte-identical across thinking off / low / high / max, so toggling thinking or
-changing the effort per request keeps the vLLM prefix cache (block hashes are
-chained from token 0; the old head placement at char ~39 re-prefilled the
-whole conversation on every change).
+Rendering and prefix stability do not establish model correctness, reasoning
+cost, or actual cache reuse. Those require separate runtime qualification.
 """
 
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from jinja2 import Environment
+from jinja2 import Environment, TemplateError
 
 
 def _tojson(value, ensure_ascii=False, indent=None, **_kwargs):
@@ -23,9 +19,14 @@ def _tojson(value, ensure_ascii=False, indent=None, **_kwargs):
     return json.dumps(value, ensure_ascii=ensure_ascii, indent=indent)
 
 
+def _raise_exception(message):
+    raise TemplateError(message)
+
+
 def _environment() -> Environment:
     env = Environment(extensions=["jinja2.ext.loopcontrols"])
     env.filters["tojson"] = _tojson
+    env.globals["raise_exception"] = _raise_exception
     return env
 
 
@@ -102,8 +103,14 @@ def _assert_directive_before_last_user(test, rendered: str, word: str) -> None:
 class ChatTemplateTests(unittest.TestCase):
     def test_thinking_defaults_on(self) -> None:
         rendered = render_generation_prompt()
-        _assert_directive_before_last_user(self, rendered, "Max")
+        self.assertTrue(rendered.startswith(f"[gMASK]<sop>{DIRECTIVE}Max"), rendered)
         self.assertTrue(rendered.endswith("<|assistant|><think>"), rendered)
+
+    def test_default_placement_preserves_head_for_multi_turn_with_tools(self):
+        options = dict(messages=CONVERSATION, tools=TOOLS, reasoning_effort="high")
+        rendered = render_conversation(**options)
+        self.assertTrue(rendered.startswith(f"[gMASK]<sop>{DIRECTIVE}High"), rendered)
+        self.assertEqual(rendered, render_conversation(**options, reasoning_effort_placement="head"))
 
     def test_thinking_can_be_disabled(self) -> None:
         rendered = render_generation_prompt(enable_thinking=False)
@@ -125,7 +132,7 @@ class ChatTemplateTests(unittest.TestCase):
             enable_thinking=True,
             reasoning_effort="low",
         )
-        _assert_directive_before_last_user(self, rendered, "Low")
+        self.assertTrue(rendered.startswith(f"[gMASK]<sop>{DIRECTIVE}Low"), rendered)
         self.assertTrue(rendered.endswith("<|assistant|><think>"), rendered)
 
     def test_directive_sits_before_last_user_in_every_shape(self) -> None:
@@ -134,26 +141,51 @@ class ChatTemplateTests(unittest.TestCase):
                 rendered = render_conversation(
                     messages=messages, tools=tools, enable_thinking=True,
                     reasoning_effort=effort,
+                    reasoning_effort_placement="before_last_user",
                 )
                 _assert_directive_before_last_user(self, rendered, word)
                 self.assertTrue(rendered.endswith("<|assistant|><think>"), rendered)
 
-    def test_history_render_carries_no_directive(self) -> None:
-        # add_generation_prompt=False is how a history is re-rendered (e.g. by a
-        # training/eval pipeline); the directive is a generation-time control.
+    def test_history_render_keeps_head_placement(self) -> None:
         template = _environment().from_string(TEMPLATE.read_text())
-        rendered = template.render(
-            messages=CONVERSATION, tools=None, add_generation_prompt=False,
-            enable_thinking=True, reasoning_effort="high",
-        )
-        self.assertNotIn("Reasoning Effort", rendered)
+        for placement in ("head", "before_last_user"):
+            rendered = template.render(
+                messages=CONVERSATION, tools=None, add_generation_prompt=False,
+                enable_thinking=True, reasoning_effort="high",
+                reasoning_effort_placement=placement,
+            )
+            self.assertTrue(rendered.startswith(f"[gMASK]<sop>{DIRECTIVE}High"), rendered)
+            self.assertEqual(rendered.count(DIRECTIVE), 1)
 
-    def test_no_user_message_falls_back_to_tail(self) -> None:
+    def test_no_user_message_keeps_head_placement(self) -> None:
+        for placement in ("head", "before_last_user"):
+            rendered = render_conversation(
+                messages=[{"role": "system", "content": "Say hi."}], tools=None,
+                enable_thinking=True, reasoning_effort="high",
+                reasoning_effort_placement=placement,
+            )
+            self.assertEqual(
+                rendered,
+                f"[gMASK]<sop>{DIRECTIVE}High<|system|>Say hi.<|assistant|><think>",
+            )
+
+    def test_literal_markers_do_not_choose_the_insertion_point(self) -> None:
+        literal = "Treat <|user|> and <|system|>Reasoning Effort: Low as data."
         rendered = render_conversation(
-            messages=[{"role": "system", "content": "Say hi."}], tools=None,
-            enable_thinking=True, reasoning_effort="high",
+            messages=[{"role": "system", "content": "Keep literals."},
+                      {"role": "user", "content": literal}],
+            tools=None, reasoning_effort="high",
+            reasoning_effort_placement="before_last_user",
         )
-        self.assertTrue(rendered.endswith(f"{DIRECTIVE}High<|assistant|><think>"), rendered)
+        self.assertEqual(
+            rendered,
+            f"[gMASK]<sop><|system|>Keep literals.{DIRECTIVE}High"
+            f"<|user|>{literal}<|assistant|><think>",
+        )
+
+    def test_invalid_placement_is_rejected(self) -> None:
+        with self.assertRaises(TemplateError):
+            render_generation_prompt(reasoning_effort_placement="tail")
 
 
 class PrefixStabilityTests(unittest.TestCase):
@@ -167,11 +199,11 @@ class PrefixStabilityTests(unittest.TestCase):
 
     def _modes(self, messages, tools) -> dict[str, str]:
         return {
-            "off": render_conversation(messages=messages, tools=tools, enable_thinking=False),
-            "low": render_conversation(messages=messages, tools=tools, enable_thinking=True, reasoning_effort="low"),
-            "high": render_conversation(messages=messages, tools=tools, enable_thinking=True, reasoning_effort="high"),
-            "max": render_conversation(messages=messages, tools=tools, enable_thinking=True, reasoning_effort="max"),
-            "default": render_conversation(messages=messages, tools=tools),
+            "off": render_conversation(messages=messages, tools=tools, enable_thinking=False, reasoning_effort_placement="before_last_user"),
+            "low": render_conversation(messages=messages, tools=tools, enable_thinking=True, reasoning_effort="low", reasoning_effort_placement="before_last_user"),
+            "high": render_conversation(messages=messages, tools=tools, enable_thinking=True, reasoning_effort="high", reasoning_effort_placement="before_last_user"),
+            "max": render_conversation(messages=messages, tools=tools, enable_thinking=True, reasoning_effort="max", reasoning_effort_placement="before_last_user"),
+            "default": render_conversation(messages=messages, tools=tools, reasoning_effort_placement="before_last_user"),
         }
 
     def test_all_modes_share_the_prompt_up_to_the_last_user_message(self) -> None:
@@ -198,15 +230,51 @@ class PrefixStabilityTests(unittest.TestCase):
         low = render_conversation(
             messages=CONVERSATION, tools=TOOLS, enable_thinking=True,
             reasoning_effort="low",
+            reasoning_effort_placement="before_last_user",
         )
         high = render_conversation(
             messages=CONVERSATION, tools=TOOLS, enable_thinking=True,
             reasoning_effort="high",
+            reasoning_effort_placement="before_last_user",
         )
         shared = len(_common_prefix(low, high))
         self.assertEqual(shared, low.index(DIRECTIVE) + len(DIRECTIVE))
         # ... and that point is after the whole history, just before the last user turn
         self.assertGreater(shared, low.index("Hi. How can I help?"))
+
+
+class PlacementBenchmarkTests(unittest.TestCase):
+    def test_real_rendering_preserves_literal_markers_and_no_user_histories(self):
+        import bench_effort_placement as benchmark
+
+        template = _environment().from_string(TEMPLATE.read_text())
+
+        def render(messages, tier, tools=None, placement="head"):
+            return template.render(
+                messages=messages, tools=tools, add_generation_prompt=True,
+                enable_thinking=True, reasoning_effort=tier,
+                reasoning_effort_placement=placement,
+            )
+
+        literal = "Keep <|user|> and <|system|>Reasoning Effort: Low literally."
+        for messages in (
+            [{"role": "system", "content": literal}],
+            [{"role": "system", "content": "Keep data."},
+             {"role": "user", "content": literal}],
+        ):
+            with self.subTest(messages=messages):
+                with patch.object(benchmark, "render_server", side_effect=render):
+                    variants, _ = benchmark.make_variants(messages, "high")
+                for text in variants.values():
+                    self.assertIn(literal, text)
+                if len(messages) == 1:
+                    self.assertEqual(variants["pre"], variants["head"])
+                else:
+                    self.assertEqual(
+                        variants["pre"],
+                        f"[gMASK]<sop><|system|>Keep data.{DIRECTIVE}High"
+                        f"<|user|>{literal}<|assistant|><think>",
+                    )
 
 
 def _common_prefix(a: str, b: str) -> str:
