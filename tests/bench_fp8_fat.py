@@ -37,9 +37,10 @@ MS_FULL = (1, 2, 4, 8, 16, 32, 64, 96, 128, 192, 256, 384, 512,
 def qwen_quant_act(x: torch.Tensor) -> tuple:
     """Per-token FP8 e4m3 quant of BF16 activations (torch fallback; a fused
     kernel would only be faster — production cost is bounded above by this)."""
-    amax = x.float().abs().amax(dim=1, keepdim=True).clamp_min(1e-12)
-    scale = (amax / 448.0).to(torch.float32)
-    xq = (x / scale.to(x.dtype)).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    xf = x.float()
+    amax = xf.abs().amax(dim=1, keepdim=True)
+    scale = (amax / 448.0).clamp_min(1e-12)
+    xq = (xf / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
     return xq, scale
 
 

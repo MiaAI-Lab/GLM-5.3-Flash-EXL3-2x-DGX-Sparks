@@ -1,7 +1,13 @@
 # SM121 performance paths (EXL3 decode, KDA FP8 prefill)
 
-Two independently guarded, opt-in optimizations for GB10 / SM121. Both
-default off and fail closed to the stock paths.
+Two independently guarded, opt-in optimizations for GB10 / SM121. Both default
+off. An explicitly requested EXL3 fast implementation must load successfully;
+unsupported KDA-fat retention falls back to Marlin.
+
+Performance, compiler and GPU-numerical results below are author-reported
+measurements of an earlier candidate. CPU hardening does not requalify them.
+The updated candidate still needs the latest completed TheGrill for native
+builds, kernel/graph parity, serving correctness, latency and memory capacity.
 
 ## 1. EXL3 thin-decode fast path — `GLM53_EXL3_MOE_FAST=1`
 
@@ -21,7 +27,13 @@ N256, eight blocks per expert) is unchanged.
   after an all-expert `torch.equal` proof on the packed scales. Anything
   else keeps the stock kernel, including the E3 fat-prefill path.
 * Fail-closed: requesting the flag on an image built without the patch
-  raises at model load instead of silently running stock.
+  raises at model load instead of silently running stock. The same
+  failure surfaces when the fused `exl3_moe` path itself is unavailable
+  (EXL3_FUSED_MOE=0, missing symbol, or any fused-state build error):
+  FAST=1 never degrades to the Python loop. Both optimization flags require
+  literal `0` or `1`: the launcher rejects other values, including explicit
+  empty and surrounding whitespace, before stopping services. Load-time
+  validation also remains in place.
 * Compiler effect (SM121 `ptxas -v`): 128 regs / 84 B spill stores /
   188 B spill loads / 88 B stack → 127 regs / zero spills / 16 B stack.
 * Measured (2x GB10 serving, same image, flag-only switch): C1 code
@@ -41,21 +53,25 @@ and routes large-M prefill of the KDA `in_proj` through torch native FP8
 
 * Dispatch (`Glm53DenseFp8Method.apply`, no sync — M is tensor metadata):
   retained fat weights present (load-time proof below), no bias,
-  matching K, `M > 64` → fat path; otherwise Marlin. Per-capture-size
+  matching K, flattened `M = numel/K > 64` → fat path; otherwise Marlin. Per-capture-size
   CUDA graphs bake the branch taken at capture. `o_proj`/`f_b`/`g_b` and
   dense projections stay Marlin by measurement.
 * Boundary evidence (SM121): Marlin wins every measured M ≤ 64; the fat
   path wins every measured M ≥ 65 (1.5x at 65, 2.7x at 220, 3.2–3.8x at
   1536–3683). Serving Ms split cleanly (decode ≤ 220, prefill ≥ 1536).
 * Load-time retention (fail-closed): only for `kda` group layers with the
-  measured `[12576, 4096]` geometry on SM121 with a working `_scaled_mm`;
+  measured `[12576, 4096]` geometry on SM121 with a `_scaled_mm` proven
+  by a real M=65 production-branch launch probe on each retained layer at
+  load (has-operator is not working-kernel);
   keeps the raw `[N,K]` e4m3 tensor plus fp32 per-channel scales (~51.6 MB
   per layer-rank, ~1.75 GB/rank over 34 KDA layers). The retained
   row-major transpose is exactly the col-major operand `_scaled_mm`
   requires — zero copy, no runtime repacking.
-* Activation quantization: fused Triton rowwise kernel compiled once at
-  load (bit-exact vs fp32 reference); eager torch fallback if Triton is
-  unavailable. No new dependency.
+* Activation quantization: the fused Triton kernel requires contiguous last
+  dimensions. The eager fallback handles strided inputs and uses the same
+  fp32 division and scale floor `max(row_amax / 448, 1e-12)`, including zero
+  and tiny rows. CPU tensor-value checks cover the eager path. Updated GPU
+  parity assertions require bit identity; that GPU check is still deferred.
 * Measured (same image, flag-only switch): decode within ±1.5% of Marlin
   (M≤64 never leaves Marlin); cold prefill +20% at 16k and 100k; mixed
   decode +4.9%, mixed prefill +8.1%. Hybrid-vs-Marlin KL ≤ 5.4e-3 with
@@ -63,10 +79,18 @@ and routes large-M prefill of the KDA `in_proj` through torch native FP8
 * Memory cost: ~1.75 GB/rank (~3.5 GB cluster) of retained FP8; KV
   capacity, max context, and concurrency unchanged in the tested
   configuration (KV stays pinned).
-* Tests: `tests/test_kda_fp8_fat.py` (CPU: flag/shape/threshold/dispatch
-  guards), `tests/test_kda_fp8_fat_gpu.py` (retention, dispatch spies,
-  numerics, graphs), `tests/bench_kda_fp8.py` (KLD panel),
+* Tests: `tests/test_kda_fp8_fat.py` (CPU dispatch/retention guards and actual
+  CPU tensor values), `tests/test_kda_fp8_fat_gpu.py` (device retention,
+  numerics and graphs), `tests/test_kda_logprob_compare.py` (CPU screening
+  correctness), `tests/bench_kda_fp8.py` (shared-top-k screening panel),
   `tests/bench_fp8_fat.py` (kernel crossover bench).
+
+The logprob panel now requires matching teacher-forced prompt fingerprints,
+matching record/position coverage and usable distributions. Empty data,
+generation-fallback receipts, malformed probabilities and missing support
+return an unqualified result rather than a clean panel. The top-1 NLL delta
+sign is corrected. Old receipts need fresh collection; passing shared-top-k
+KL/argmax screening alone is not full numerical or model qualification.
 
 ## Serving flags
 

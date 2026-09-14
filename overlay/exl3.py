@@ -1246,13 +1246,26 @@ def apply_exl3_grouped_fat(
     _EXL3_FAT_DIAG["grouped_calls"] += 1
 
 
+def exl3_moe_fast_requested() -> bool:
+    """Opt-in SM121 K4/N256 thin-decode dispatch (default off).
+
+    Mirrors the native dispatcher's validation: anything other than 0/1
+    raises at load instead of surfacing as a native TORCH_CHECK on the
+    first decode call.
+    """
+    raw = os.environ.get("GLM53_EXL3_MOE_FAST", "0")
+    if raw not in ("0", "1"):
+        raise RuntimeError("GLM53_EXL3_MOE_FAST must be 0 or 1")
+    return raw == "1"
+
+
 def build_exl3_fused_state(layer: torch.nn.Module, inners: list[dict[str, Any]]) -> None:
     """Pointer tables + fused temps, once after load. No per-token alloc."""
     import exllamav3_ext
 
     # Fail closed: an explicitly requested fast thin-decode path must never
     # silently run the stock kernel on an image built without it.
-    if os.environ.get("GLM53_EXL3_MOE_FAST", "0") == "1":
+    if exl3_moe_fast_requested():
         if not hasattr(exllamav3_ext, "glm53_fast_moe_version"):
             raise RuntimeError(
                 "GLM53_EXL3_MOE_FAST=1 requires the native decode-pipeline "
@@ -1822,7 +1835,7 @@ def kda_fp8_fat_enabled() -> bool:
     FP8 _scaled_mm on the retained raw FP8 weights. Anything else raises
     loudly instead of silently running Marlin under a fat label.
     """
-    raw = os.environ.get("GLM53_KDA_FP8_FAT", "0").strip()
+    raw = os.environ.get("GLM53_KDA_FP8_FAT", "0")
     if raw not in ("0", "1"):
         raise RuntimeError("GLM53_KDA_FP8_FAT must be 0 or 1")
     return raw == "1"
@@ -1946,6 +1959,27 @@ class Glm53DenseFp8Method(UnquantizedLinearMethod):
             return
         if tuple(int(v) for v in cap) != (12, 1):
             return
+        # has-operator is not working-kernel: prove a real _scaled_mm launch
+        # on this device/dtype/layout before retaining anything. Failure
+        # leaves no trace and the layer stays on Marlin.
+        probe_m = KDA_FP8_FAT_M_MAX_MARLIN + 1
+        try:
+            torch.ops.aten._scaled_mm(
+                torch.zeros((probe_m, k), dtype=fp8.dtype, device=fp8.device),
+                fp8.t(),
+                torch.ones((probe_m, 1), dtype=torch.float32, device=fp8.device),
+                torch.ones((1, n), dtype=torch.float32, device=fp8.device),
+                None,
+                None,
+                getattr(layer, "orig_dtype", torch.bfloat16),
+                False,
+            )
+            torch.cuda.synchronize(fp8.device)
+        except Exception as exc:
+            logger.warning(
+                "kda fp8-fat: _scaled_mm probe failed (%r); staying on Marlin", exc
+            )
+            return
         layer.glm53_fat_w = fp8
         layer.glm53_fat_s = scales.to(torch.float32)
         layer.glm53_fat_wt = fp8.t()  # col-major [K,N] view, zero copy
@@ -1965,15 +1999,23 @@ class Glm53DenseFp8Method(UnquantizedLinearMethod):
         measured-winning at large M). Returns (xq [M,K] fp8, sa [M,1] fp32).
         """
         m, k = x2.shape
-        if _FAT_TRITON_AVAILABLE and _FAT_TRITON_READY[0]:
+        # The kernel indexes rows contiguously (stride(-1) == 1 assumed);
+        # non-contiguous-last-dim views take the stride-safe eager path.
+        if (
+            _FAT_TRITON_AVAILABLE
+            and _FAT_TRITON_READY[0]
+            and x2.stride(-1) == 1
+        ):
             xq = torch.empty((m, k), dtype=torch.float8_e4m3fn, device=x2.device)
             sa = torch.empty((m,), dtype=torch.float32, device=x2.device)
             _fat_rowquant_kernel[(m,)](x2, xq, sa, x2.stride(-2), k, 4096,
                                        num_warps=8)
             return xq, sa.view(m, 1)
-        amax = x2.float().abs().amax(dim=1, keepdim=True).clamp_min(1e-12)
-        sa = (amax / 448.0).to(torch.float32)
-        xq = (x2 / sa.to(x2.dtype)).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+        xf = x2.float()
+        amax = xf.abs().amax(dim=1, keepdim=True)
+        sa = (amax / 448.0).clamp_min(1e-12)
+        # Match the kernel's fp32 division and post-division scale floor.
+        xq = (xf / sa).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
         return xq, sa
 
     def _apply_fat(self, layer: torch.nn.Module, x2: torch.Tensor) -> torch.Tensor:
@@ -1997,14 +2039,15 @@ class Glm53DenseFp8Method(UnquantizedLinearMethod):
         # stays Marlin (measured win), anything else falls through to Marlin.
         # Per-capture-size CUDA graphs bake the branch taken at capture.
         wt = getattr(layer, "glm53_fat_wt", None)
+        k = int(layer.glm53_fp8_k)
         if (
             wt is not None
             and bias is None
             and x.dim() >= 2
-            and int(x.shape[-1]) == int(layer.glm53_fp8_k)
-            and int(x.shape[-2]) > KDA_FP8_FAT_M_MAX_MARLIN
+            and int(x.shape[-1]) == k
+            and x.numel() // k > KDA_FP8_FAT_M_MAX_MARLIN
         ):
-            out = self._apply_fat(layer, x.reshape(-1, int(layer.glm53_fp8_k)))
+            out = self._apply_fat(layer, x.reshape(-1, k))
             return out.reshape(x.shape[:-1] + (int(layer.glm53_fp8_n),))
         from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
             apply_fp8_marlin_linear,
@@ -2239,6 +2282,16 @@ class Exl3MoEMethod(FusedMoEMethodBase):
             except Exception as exc:
                 fused_err = repr(exc)
                 layer._exl3_ptrs = None
+        if exl3_moe_fast_requested() and not fused_ok:
+            # Fail closed: an explicitly requested fast thin-decode path must
+            # never silently run the stock kernel or the Python loop. The
+            # version gate inside build_exl3_fused_state raises through the
+            # same path; this also covers fused disabled / exl3_moe missing.
+            raise RuntimeError(
+                "GLM53_EXL3_MOE_FAST=1 requires the fused exl3_moe path on an "
+                "image built with overlay/patch_exl3_decode_pipeline.py; "
+                f"load-time setup failed: {fused_err or 'EXL3_FUSED_MOE=0'}"
+            )
         if not self._logged:
             if fused_ok:
                 logger.info(

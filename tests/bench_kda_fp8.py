@@ -6,16 +6,17 @@ Self-contained fixed text set; no external fixtures.
     GLM53_BENCH_BASE=http://127.0.0.1:8000 python3 tests/bench_kda_fp8.py capture --out kda_fp8.json
     python3 tests/bench_kda_fp8.py compare a.json b.json
 
-Capture tries prompt_logprobs (echo, max_tokens=1) and falls back to
-generation logprobs (max_tokens=64, logprobs=5) when the server does not
-return prompt distributions. Compare reports, per text: positions, mean
-KL(A||B) over the shared top-k support (nats), argmax agreement, and the
-top-1 NLL delta. All sourcing is temperature-0 deterministic.
+Capture requires teacher-forced prompt_logprobs on the fixed text set.
+Generation-logprob fallback receipts are not comparable after histories
+diverge and are not accepted. Compare reports shared-top-k KL(A||B),
+argmax agreement, and top-1 NLL delta (B - A; positive = less top-1 mass).
+This is a screening panel, not full numerical qualification.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -68,29 +69,17 @@ def _post(path: str, body: dict, timeout: float = 600.0):
 def capture(out: str) -> int:
     res: dict = {"base": BASE, "model": MODEL, "texts": {}}
     for name, text in TEXTS.items():
-        rec: dict = {"prompt_chars": len(text)}
+        rec: dict = {"prompt_chars": len(text), "prompt_sha256": hashlib.sha256(text.encode()).hexdigest()}
         st, d = _post("/v1/completions", {
             "model": MODEL, "prompt": text, "max_tokens": 1, "temperature": 0,
             "echo": True, "logprobs": 1, "prompt_logprobs": 20,
         })
         pl = (d["choices"][0].get("prompt_logprobs") or []) if st == 200 else []
-        if pl and any(pl):
-            rec["mode"] = "prompt_logprobs"
-            rec["positions"] = pl
-        else:
-            st2, d2 = _post("/v1/completions", {
-                "model": MODEL, "prompt": text, "max_tokens": 64,
-                "temperature": 0, "logprobs": 5,
-            })
-            lg = (d2["choices"][0].get("logprobs") or {}) if st2 == 200 else {}
-            toks = lg.get("tokens") or []
-            tops = lg.get("top_logprobs") or []
-            rec["mode"] = "generation_logprobs"
-            rec["positions"] = [
-                {"rank1": {"token": t, "logprob": 0.0}, **(tp or {})}
-                for t, tp in zip(toks, tops)
-            ]
-            rec["generated_text"] = "".join(toks)
+        if not isinstance(pl, list) or len(pl) < 2 or not any(pl):
+            print(f"{name}: prompt_logprobs unavailable; capture is unqualified", file=sys.stderr)
+            return 2
+        rec["mode"] = "prompt_logprobs"
+        rec["positions"] = pl
         n = len(rec["positions"])
         print(f"{name}: mode={rec['mode']} positions={n}", flush=True)
         res["texts"][name] = rec
@@ -101,48 +90,79 @@ def capture(out: str) -> int:
 
 
 def _dist(pos: dict) -> tuple[dict, str]:
+    if not isinstance(pos, dict) or not pos:
+        raise ValueError("missing position distribution")
     probs = {}
-    for k, v in pos.items():
-        if isinstance(v, dict) and "logprob" in v:
-            probs[k] = math.exp(v["logprob"])
-        elif isinstance(v, dict) and "token" in v:
-            pass
-    top = max(probs.items(), key=lambda kv: kv[1])[0] if probs else ""
-    return probs, top
+    for token, value in pos.items():
+        logprob = value.get("logprob") if isinstance(value, dict) else value
+        if isinstance(logprob, bool) or not isinstance(logprob, (int, float)):
+            raise ValueError("invalid log probability")
+        if not math.isfinite(logprob) or logprob > 0:
+            raise ValueError("invalid log probability")
+        probs[token] = math.exp(logprob)
+    return probs, max(probs, key=probs.get)
 
 
 def compare(a_path: str, b_path: str) -> int:
-    a = json.load(open(a_path))["texts"]
-    b = json.load(open(b_path))["texts"]
-    bad = 0
+    with open(a_path) as source:
+        a_receipt = json.load(source)
+    with open(b_path) as source:
+        b_receipt = json.load(source)
+    a, b = a_receipt.get("texts"), b_receipt.get("texts")
+    if (
+        not isinstance(a, dict) or not a or not isinstance(b, dict)
+        or a.keys() != b.keys()
+        or not a_receipt.get("model")
+        or a_receipt.get("model") != b_receipt.get("model")
+    ):
+        print("UNQUALIFIED: empty or incompatible receipt sets")
+        return 2
+    bad, invalid = 0, False
     print(f"{'text':12s} {'mode':20s} {'pos':>5s} {'meanKL':>9s} {'argmax':>7s} {'dNLL':>9s}")
     for name in a:
-        pa, pb = a[name]["positions"], b[name]["positions"]
-        kls, agree, n, dnll = [], 0, 0, []
-        for x, y in zip(pa[1:], pb[1:]):
-            if not x or not y:
-                continue
-            ax, ta = _dist(x)
-            by, tb = _dist(y)
-            keys = set(ax) & set(by)
-            if not keys:
-                continue
-            za, zb = sum(ax[k] for k in keys), sum(by[k] for k in keys)
-            if za <= 0 or zb <= 0:
-                continue
-            kl = sum((ax[k] / za) * math.log((ax[k] / za) / (by[k] / zb)) for k in keys)
-            kls.append(kl)
-            agree += ta == tb
-            n += 1
-            la = max((v.get("logprob", -1e9) for v in x.values() if isinstance(v, dict)), default=0.0)
-            lb = max((v.get("logprob", -1e9) for v in y.values() if isinstance(v, dict)), default=0.0)
-            dnll.append(-la - -lb)
-        mean_kl = sum(kls) / max(1, len(kls))
-        print(f"{name:12s} {a[name]['mode']:20s} {n:5d} {mean_kl:9.2e} "
-              f"{agree / max(1, n):7.3f} {sum(dnll) / max(1, len(dnll)):9.2e}")
-        if mean_kl > 0.01 or (n and agree / n < 0.99):
+        left, right = a[name], b[name]
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            print(f"{name}: UNQUALIFIED record")
+            invalid = True
+            continue
+        pa, pb = left.get("positions"), right.get("positions")
+        fingerprint = left.get("prompt_sha256")
+        if (
+            left.get("mode") != "prompt_logprobs" or right.get("mode") != "prompt_logprobs"
+            or not isinstance(fingerprint, str) or len(fingerprint) != 64
+            or fingerprint != right.get("prompt_sha256")
+            or not isinstance(pa, list) or not isinstance(pb, list)
+            or len(pa) < 2 or len(pa) != len(pb)
+        ):
+            print(f"{name}: UNQUALIFIED context or position mismatch")
+            invalid = True
+            continue
+        kls, dnll, agree = [], [], 0
+        try:
+            for x, y in zip(pa[1:], pb[1:]):
+                ax, ta = _dist(x)
+                by, tb = _dist(y)
+                keys = ax.keys() & by.keys()
+                if not keys or any(ax[k] <= 0 or by[k] <= 0 for k in keys):
+                    raise ValueError("no usable shared probability support")
+                za, zb = sum(ax[k] for k in keys), sum(by[k] for k in keys)
+                kls.append(sum((ax[k] / za) * math.log((ax[k] / za) / (by[k] / zb)) for k in keys))
+                agree += ta == tb
+                dnll.append(math.log(max(ax.values())) - math.log(max(by.values())))
+        except ValueError as exc:
+            print(f"{name}: UNQUALIFIED: {exc}")
+            invalid = True
+            continue
+        n = len(kls)
+        mean_kl = sum(kls) / n
+        print(f"{name:12s} {left['mode']:20s} {n:5d} {mean_kl:9.2e} "
+              f"{agree / n:7.3f} {sum(dnll) / n:9.2e}")
+        if mean_kl > 0.01 or agree / n < 0.99:
             bad += 1
-    print("FLAG" if bad else "PANEL CLEAN")
+    if invalid:
+        print("UNQUALIFIED")
+        return 2
+    print("FLAG" if bad else "WITHIN KL/ARGMAX THRESHOLDS (shared top-k screening only)")
     return 1 if bad else 0
 
 
