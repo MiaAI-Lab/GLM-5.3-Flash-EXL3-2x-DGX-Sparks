@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — omitted-only output-token defaults
+
+`DEFAULT_MAX_NEW_TOKENS` now changes only omitted request limits, including
+legacy completion requests whose protocol default is 16. Explicit limits
+override this default; independent server/platform and context caps remain.
+Empty values preserve stock behavior and caller exports override `.env`.
+Malformed values fail before restart stops services.
+
+CPU checks exercise the pinned limiter and completion call, both rank argument
+blocks, configuration precedence and pre-stop rejection. Live API/streaming
+qualification remains deferred to the latest completed TheGrill.
+
 ## Unreleased — conservative fine-grained APC candidate
 
 Fine-grained APC remains opt-in. Canonical patch-region and AST checks reject
