@@ -994,6 +994,8 @@ that are now documented/enforced:
 | `HEAD_CX7_IF` / `WORKER_CX7_IF` | `enp1s0f1np1` / `enp1s0f0np0` | NCCL sockets |
 | `HEAD_CX7_IB` / `WORKER_CX7_IB` | `rocep1s0f1` / `rocep1s0f0` | NCCL HCAs |
 | `USE_HOST_NCCL` | `0` | image nvidia-nccl; host preload duplicates DeepEP |
+| `GLM53_EXL3_MOE_FAST` | `0` | experimental native thin-decode kernels; `1` requires the rebuilt native extension |
+| `GLM53_KDA_FP8_FAT` | `0` | experimental KDA FP8 prefill; requires KDA in `GLM53_DENSE_FP8`; retains additional FP8 weights and changes activation numerics |
 
 `DEFAULT_MAX_NEW_TOKENS` preserves omitted completion limits through Pydantic normalization; an explicit `max_tokens: null` retains the pinned runtime's native normalization to 16. The overlay validates the limiter, completion caller, and protocol validator before writing any target. The CPU regression (`python3 tests/test_gen_defaults.py`) requires Pydantic v2 and exercises its real before-validator, not fabricated field-set metadata.
 
@@ -1101,6 +1103,14 @@ docker build -t glm53-flash-sm121:local .
 `./start.sh` **rebuilds** from this Dockerfile when the image label `glm53.recipe.stamp` does not match the current overlay/Dockerfile hash — that is what makes a `git pull` pick up `exl3_fat_gemm` instead of staying on the public GHCR tag (which predates E2). `SKIP_BUILD=1` keeps GHCR. `BUILD=1` forces a rebuild. `SKIP_PULL=1` skips `docker pull` only.
 
 After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap layer so they do not rebuild `exllamav3_ext`.
+
+Native thin-kernel qualification uses `tests/test_exl3_thin_fast_gpu.py` and
+`tests/compare_thin_fast.py` with stock/candidate/stock receipts before timing
+`tests/bench_exl3_thin.py`. The fixtures route each token to eight distinct experts
+from a 32-expert pool. Uniform, correlated and hot-expert cases must never route a
+token to the same expert twice; `tests/test_exl3_routing.py` checks this on CPU.
+Receipts from the older with-replacement fixtures do not establish parity for
+valid top-k routing. These checks alone do not qualify full-model quality or speed.
 
 | Path | Role |
 |---|---|
