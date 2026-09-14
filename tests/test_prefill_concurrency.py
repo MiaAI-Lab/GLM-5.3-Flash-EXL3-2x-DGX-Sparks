@@ -112,6 +112,85 @@ class PrefillProgressTests(unittest.TestCase):
         self.assertIsNone(self.policy([peer], newcomer))
 
 
+class PatchIntegrityTests(unittest.TestCase):
+    def pristine(self):
+        return (
+            OVERLAY["IMPORT_OLD"]
+            + "from vllm.compilation.cuda_graph import CUDAGraphStat\n\n"
+            + "class Scheduler:\n"
+            + "    def schedule(self):\n"
+            + "        for request in self.running:\n"
+            + OVERLAY["RUNNING_OLD"]
+            + "            pass\n"
+            + "        while True:\n"
+            + "            if True:\n"
+            + "                if True:\n"
+            + OVERLAY["WAITING_OLD"]
+            + "                    pass\n"
+        )
+
+    def apply_source(self, source, *, succeeds=True):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "scheduler.py"
+            target.write_text(source)
+            result = subprocess.run(
+                [sys.executable, str(PATCH)],
+                env={**os.environ, "GLM53_SCHEDULER_PY": str(target)},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode == 0, succeeds, result.stdout + result.stderr)
+            updated = target.read_text()
+            if not succeeds:
+                self.assertEqual(updated, source)
+            return updated
+
+    def test_pristine_legacy_and_current_versions_allow_progress(self):
+        patched = self.apply_source(self.pristine())
+        legacy = patched.replace(
+            'os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "0")',
+            'os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "skip")',
+        )
+        upgraded = self.apply_source(legacy)
+        self.assertEqual(upgraded, patched)
+        self.assertEqual(self.apply_source(upgraded), upgraded)
+        with patch.dict(os.environ):
+            os.environ.pop("GLM53_MIXED_PREFILL_CHUNK", None)
+            self.assertIsNone(policy_from(upgraded)(
+                [request("peer", 100, 200)], request("new", 1000)))
+
+    def test_changed_helper_is_rejected_without_mutation(self):
+        patched = self.apply_source(self.pristine())
+        changed = patched.replace(
+            OVERLAY["HELPER"], OVERLAY["HELPER"].replace("return None", "return 0", 1))
+        self.apply_source(changed, succeeds=False)
+
+    def test_changed_running_gate_is_rejected_without_mutation(self):
+        patched = self.apply_source(self.pristine())
+        changed = patched.replace(
+            OVERLAY["RUNNING_NEW"],
+            OVERLAY["RUNNING_NEW"].replace("min(num_new_tokens, mixed_cap)", "num_new_tokens"))
+        self.apply_source(changed, succeeds=False)
+
+    def test_missing_waiting_gate_is_rejected_without_mutation(self):
+        patched = self.apply_source(self.pristine())
+        self.apply_source(
+            patched.replace(OVERLAY["WAITING_NEW"], OVERLAY["WAITING_OLD"]),
+            succeeds=False,
+        )
+
+    def test_duplicate_helper_is_rejected_without_mutation(self):
+        patched = self.apply_source(self.pristine())
+        self.apply_source(patched + OVERLAY["HELPER"], succeeds=False)
+
+    def test_decorated_helper_is_rejected_without_mutation(self):
+        patched = self.apply_source(self.pristine())
+        changed = patched.replace(
+            "def _glm53_mixed_prefill_policy(",
+            "@unexpected_wrapper\ndef _glm53_mixed_prefill_policy(",
+        )
+        self.apply_source(changed, succeeds=False)
+
+
 class InstalledSchedulerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -143,18 +222,6 @@ class InstalledSchedulerTests(unittest.TestCase):
                 self.assertIsNone(policy_from(updated)([request("peer", 100, 200)], request("new", 1000)))
             self.apply(dst)
             self.assertEqual(dst.read_text(), updated)
-            self.assertEqual(updated.count(OVERLAY["MARK"]), 2)
-
-    def test_ambiguous_legacy_upgrade_fails_without_writing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            dst = Path(tmp) / "scheduler.py"
-            legacy = self.source.replace(
-                'os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "0")',
-                'os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "skip")')
-            ambiguous = legacy + '\nother = os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "skip")\n'
-            dst.write_text(ambiguous)
-            self.apply(dst, succeeds=False)
-            self.assertEqual(dst.read_text(), ambiguous)
 
 
 if __name__ == "__main__":

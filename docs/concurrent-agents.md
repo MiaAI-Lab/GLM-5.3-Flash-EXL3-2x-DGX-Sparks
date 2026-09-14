@@ -57,6 +57,13 @@ GLM53_SCHEDULER_PY_SRC=/path/to/scheduler.py python3 tests/test_prefill_concurre
 GLM53_SCHEDULER_PY_SRC=/path/to/scheduler.py python3 tests/test_scheduler_decode_floor.py
 ```
 
+Reapplication accepts only the complete known current or legacy patch: the
+policy helper and both scheduler gates are validated before any write. A
+partial patch, changed helper (including decorators), duplicate helper, or
+altered gate fails without modifying the scheduler. A validated legacy patch
+is upgraded from the old default to stock scheduling. These CPU checks prove
+patch integrity and policy behavior, not live request latency or KV capacity.
+
 After the deployment and recipe are approved, run one live canary:
 
 ```bash

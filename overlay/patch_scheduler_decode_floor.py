@@ -21,6 +21,7 @@ Fail closed if the vLLM scheduler anchors drift.
 """
 from __future__ import annotations
 
+import ast
 import os
 import sys
 from pathlib import Path
@@ -119,18 +120,40 @@ def main() -> int:
     if not P.is_file():
         raise SystemExit(f"missing {P}")
     text = P.read_text()
-    if MARK in text:
-        # Existing images already contain this patch. Upgrade its known old
-        # default as well; otherwise an idempotent reapply keeps starvation
-        # enabled when the launcher does not supply an explicit value.
-        old_default = 'os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "skip")'
-        new_default = 'os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "0")'
-        if old_default in text:
-            text = replace_once(text, old_default, new_default, "legacy mixed-prefill default")
-            P.write_text(text)
+    if MARK in text or "_glm53_mixed_prefill_policy" in text:
+        legacy_helper = HELPER.replace(
+            'os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "0")',
+            'os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "skip")',
+        )
+        # Validate every owned helper/gate before upgrading or writing.
+        helpers = [
+            node for node in ast.parse(text).body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_glm53_mixed_prefill_policy"
+        ]
+        canonical_helpers = {
+            ast.dump(ast.parse(body).body[0], include_attributes=False)
+            for body in (HELPER, legacy_helper)
+        }
+        helper_count = text.count(HELPER) + text.count(legacy_helper)
+        if (
+            helper_count != 1
+            or text.count("def _glm53_mixed_prefill_policy(") != 1
+            or text.count(MARK) != 2
+            or text.count(RUNNING_NEW) != 1
+            or len(helpers) != 1
+            or ast.dump(helpers[0], include_attributes=False) not in canonical_helpers
+            or text.count("_glm53_mixed_prefill_policy") != 3
+            or text.count(WAITING_NEW) != 1
+        ):
+            raise SystemExit(f"{P}: mixed-prefill patch regions drifted")
+        updated = text.replace(legacy_helper, HELPER, 1)
+        compile(updated, str(P), "exec")
+        if updated != text:
+            P.write_text(updated)
             print(f"{P.name}: upgraded mixed-prefill default to stock scheduling")
-            return 0
-        print(f"{P.name}: {MARK} already present — skipping")
+        else:
+            print(f"{P.name}: {MARK} already present — validated")
         return 0
     if "import os\n" not in text.split("import time\n", 1)[0]:
         text = replace_once(text, IMPORT_OLD, IMPORT_NEW, "import os")
@@ -141,6 +164,7 @@ def main() -> int:
         text = text.replace(needle, HELPER + needle, 1)
     text = replace_once(text, RUNNING_OLD, RUNNING_NEW, "running-prefill")
     text = replace_once(text, WAITING_OLD, WAITING_NEW, "waiting-prefill")
+    compile(text, str(P), "exec")
     P.write_text(text)
     cap = os.environ.get("GLM53_MIXED_PREFILL_CHUNK", "0")
     print(f"patched {P.name} (mixed prefill policy={cap})")
