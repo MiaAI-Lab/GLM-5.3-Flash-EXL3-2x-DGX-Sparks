@@ -9,9 +9,8 @@ Part A (patch mechanics, mirrors tests/test_hybrid_prefix_hit.py):
   fail-closed on a pre-existing-but-incomplete marker, assert the apply is
   transactional (no partial writes, no temp litter), assert composability
   with overlay/patch_hybrid_prefix_hit.py in both orders and under re-apply,
-  and assert the "upstream already fixed it" path (A6): a coordinator whose
-  veto is already scoped to prefix_cacheable groups (vLLM main e126687a) is a
-  clean no-op exit 0, while a merely drifted or deleted veto still fails closed.
+  and reject changed or deleted upstream vetoes without modifying the file.
+  Owned helpers and gate bodies must remain canonical, with no rebinding.
 
 Part B (gate semantics):
   exec the injected helper block in a bare namespace, then drive it with fakes
@@ -217,14 +216,8 @@ def part_a(src: Path) -> str:
             "def _glm53_scratch_alignment(" in text,
             "A1 runtime spec-derived alignment helper inserted",
         )
-        check(
-            "def _glm53_connector_receipt(" in text,
-            "A1 connector boot receipt helper inserted",
-        )
-        check(
-            "_glm53_connector_receipt()" in text.split("Fine-grained prefix-cache hits ENABLED")[1][:800],
-            "A1 connector receipt emitted on the enable path",
-        )
+        check("_glm53_connector_receipt" not in text,
+              "A1 obsolete connector receipt removed")
         # The old veto built this set over ALL managers. It must be gone --
         # note "for manager in self.single_type_managers" alone is NOT a valid
         # probe: cache_blocks() legitimately iterates all managers too.
@@ -289,6 +282,19 @@ def part_a(src: Path) -> str:
         # A5 a pre-existing MARK is not trusted on its own: an incomplete
         # patched state must fail closed, not be skipped as "already done".
         for label, mutate in (
+            ("helper body changed with all markers intact",
+             lambda s: s.replace('if value == "1":', 'if value == "0":', 1)),
+            ("gate result forced on",
+             lambda s: s.replace("self.enable_partial_hash_hits = _glm53_ok",
+                                 "self.enable_partial_hash_hits = True", 1)),
+            ("helper rebound after canonical definition",
+             lambda s: s + "\n_glm53_finegrained_hit_gate = lambda *args: (True, [], {})\n"),
+            ("helper duplicated with alternate whitespace",
+             lambda s: s + "\ndef _glm53_finegrained_hit_gate (*args):\n    return True, [], {}\n"),
+            ("constant rebound outside helper region",
+             lambda s: s + "\nGLM53_ALIGNMENT_ATTRS = ()\n"),
+            ("helper shadowed by import",
+             lambda s: s + "\nfrom builtins import bool as _glm53_finegrained_enabled\n"),
             (
                 "helper block deleted",
                 lambda s: re.sub(
@@ -326,36 +332,17 @@ def part_a(src: Path) -> str:
                 f"A5 pre-existing MARK + {label} -> file untouched",
             )
 
-        # A6 upstream landed the same fix (vLLM main e126687a scopes the veto
-        # to KVCacheSpec.prefix_cacheable groups; its scratch invariant is the
-        # tokens_per_state check in resolve_kv_cache_block_sizes). A recipe
-        # image rebased onto that vLLM must be a clean no-op, not a boot
-        # failure from a missing anchor.
+        # A6 a differently scoped veto is unsupported source drift. Never
+        # silently accept it without installing the runtime compatibility gate.
         shutil.copyfile(src, dst)
-        upstream_fixed = dst.read_text().replace(
-            UPSTREAM_VETO, UPSTREAM_FIXED_VETO, 1
-        )
-        check(
-            upstream_fixed != dst.read_text(),
-            "A6 fixture: the upstream veto anchor was found and replaced",
-        )
+        upstream_fixed = dst.read_text().replace(UPSTREAM_VETO, UPSTREAM_FIXED_VETO, 1)
+        check(upstream_fixed != dst.read_text(), "A6 fixture replaced the veto")
         dst.write_text(upstream_fixed)
-        out = apply_patch(PATCH, dst)
-        check(
-            "upstream already scopes the veto; nothing to do" in out,
-            "A6 upstream-fixed coordinator -> no-op, announced",
-        )
-        check(RUNTIME_TAG in out, f"A6 the no-op message carries {RUNTIME_TAG}")
-        check(
-            dst.read_text() == upstream_fixed,
-            "A6 upstream-fixed coordinator left byte-identical",
-        )
-        check(no_temp_litter(Path(tmp)), "A6 no temp file left behind")
-        out = apply_patch(PATCH, dst)
-        check(
-            "nothing to do" in out and dst.read_text() == upstream_fixed,
-            "A6 re-running on an upstream-fixed coordinator is still a no-op",
-        )
+        out = apply_patch(PATCH, dst, expect_fail=True)
+        check("expected one partial-hit-gate target" in out,
+              "A6 scoped upstream veto fails closed")
+        check(dst.read_text() == upstream_fixed, "A6 refusal leaves bytes unchanged")
+        check(no_temp_litter(Path(tmp)), "A6 refusal leaves no temporary file")
 
         # A6b the veto is GONE entirely -- that is drift, not an upstream fix.
         shutil.copyfile(src, dst)
@@ -929,15 +916,6 @@ def part_b(patched_text: str) -> None:
         "B19 spec without index_kpool still verified via block_size",
     )
 
-    # B20: the connector receipt never raises, even with no vLLM present.
-    receipt = ns["_glm53_connector_receipt"]
-    try:
-        value = receipt()
-        ok = isinstance(value, str) and value != ""
-    except Exception:  # pragma: no cover
-        ok, value = False, "raised"
-    check(ok, f"B20 connector boot receipt is non-fatal -> {value!r}")
-
     # B22: the kill switch, executed rather than grepped. Extracts the patched
     # gate block out of __init__ and runs it against fakes, so
     # GLM53_FINEGRAINED_APC=0 is proven to (a) disable and (b) NOT raise even on
@@ -997,7 +975,9 @@ def part_b(patched_text: str) -> None:
     # BAD plus a participating blocker: the mixed cell, through the real block.
     BAD_MIXED = BAD + [("SlidingWindowManager", 3584, False, True, None)]
 
-    enabled, log = drive(LIVE_LAYOUT, None)
+    check(drive(LIVE_LAYOUT, None)[0] is False,
+          "B22 unset runtime flag disables fine hits by default")
+    enabled, log = drive(LIVE_LAYOUT, "1")
     check(enabled is True, "B22 gate block enables on the live layout")
     check(
         drive(LIVE_LAYOUT, "0")[0] is False,
@@ -1005,10 +985,10 @@ def part_b(patched_text: str) -> None:
     )
     check(
         drive(LIVE_LAYOUT, "1")[0] is True,
-        "B22 GLM53_FINEGRAINED_APC=1 is the default (enabled)",
+        "B22 GLM53_FINEGRAINED_APC=1 explicitly enables fine hits",
     )
     try:
-        drive(BAD, None)
+        drive(BAD, "1")
         ok = False
     except err_cls:
         ok = True
@@ -1097,14 +1077,14 @@ def part_b(patched_text: str) -> None:
     ]
     for label, layout, expected in matrix:
         try:
-            enabled, lines = drive(layout, None)
+            enabled, lines = drive(layout, "1")
             got = "enable" if enabled else "disable"
         except err_cls:
             got = "raise"
             lines = []
         check(got == expected, f"B28 matrix {label} -> {got}")
     # and the cell the reviewer flagged keeps the diagnosis in the receipt
-    _enabled, lines = drive(BAD_MIXED, None)
+    _enabled, lines = drive(BAD_MIXED, "1")
     check(
         any("UNSAFE" in line and "128" in line for line in lines),
         "B28 the tolerated scratch fault is still named in the receipt",
@@ -1114,7 +1094,7 @@ def part_b(patched_text: str) -> None:
     # Effective-value receipt: one line stating enabled/disabled, the reason,
     # the alignment actually in force, and the scratch groups checked. This is
     # the line DESIGN 6.5 B0 greps out of `docker logs` on BOTH ranks.
-    _enabled, lines = drive(LIVE_LAYOUT, None)
+    _enabled, lines = drive(LIVE_LAYOUT, "1")
     receipt = next((l for l in lines if RUNTIME_TAG in l), "")
     for token in (
         "Fine-grained prefix-cache hits ENABLED",
@@ -1122,7 +1102,6 @@ def part_b(patched_text: str) -> None:
         "effective alignment=64 tokens",
         "scheduler_block_size=3584",
         "scratch groups checked: {'KpoolTailManager': 4}",
-        "KV-transfer connector:",
     ):
         check(token in receipt, f"B29 enabled receipt states {token!r}")
 
@@ -1137,7 +1116,7 @@ def part_b(patched_text: str) -> None:
     ):
         check(token in receipt, f"B29 kill-switch receipt states {token!r}")
 
-    _enabled, lines = drive(BAD_MIXED, None)
+    _enabled, lines = drive(BAD_MIXED, "1")
     receipt = next((l for l in lines if RUNTIME_TAG in l), "")
     for token in (
         "Fine-grained prefix-cache hits DISABLED",
@@ -1234,6 +1213,13 @@ def part_c() -> None:
 
     source = START_SH.read_text()
 
+    check('GLM53_FINEGRAINED_APC=0' in (HERE.parent / '.env.example').read_text(),
+          "C0 example defaults to off")
+    check('GLM53_FINEGRAINED_APC="${GLM53_FINEGRAINED_APC-0}"' in source,
+          "C0 launcher defaults to off without swallowing explicit empties")
+    check('"${GLM53_FINEGRAINED_APC-0}"' in guard_source(),
+          "C0 standalone guard defaults to off")
+
     # C1 the knob is validated by the same guard as the numeric config, which
     # main() runs only on start|restart -- and, for restart, before `stop`.
     check(
@@ -1306,6 +1292,46 @@ def part_c() -> None:
         check(run_guard("") == 2, "C4 ...and the guard rejects the empty value (rc=2)")
 
 
+
+def part_d(src: Path) -> None:
+    """All three overlays must compose, including current-main replay guards."""
+    import ast
+    import itertools
+
+    per_group = HERE.parent / "overlay" / "patch_apc_per_group_retention.py"
+    core = DEFAULT_SRC.parent
+    bp = Path(os.environ.get("GLM53_BLOCK_POOL_PY_SRC", core / "block_pool.py"))
+    stm = Path(os.environ.get("GLM53_SINGLE_TYPE_KV_CACHE_MANAGER_PY_SRC",
+                             core / "single_type_kv_cache_manager.py"))
+    if not all(p is not None and p.is_file() for p in (HYBRID_PATCH, per_group, bp, stm)):
+        print("  skip D: set pristine block-pool and single-type manager source paths")
+        return
+    pristine = Path(os.environ.get("GLM53_KV_COORDINATOR_PY_PRISTINE", src))
+    trees = []
+    for order in itertools.permutations((HYBRID_PATCH, per_group, PATCH)):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            coordinator, pool, manager = (tmp / n for n in ("coordinator.py", "pool.py", "manager.py"))
+            for source, target in ((pristine, coordinator), (bp, pool), (stm, manager)):
+                shutil.copyfile(source, target)
+            env = {**os.environ, "GLM53_KV_COORDINATOR_PY": str(coordinator),
+                   "GLM53_BLOCK_POOL_PY": str(pool),
+                   "GLM53_SINGLE_TYPE_KV_CACHE_MANAGER_PY": str(manager)}
+            for patch in order:
+                subprocess.run([sys.executable, str(patch)], env=env, check=True,
+                               capture_output=True, text=True)
+            files = (coordinator, pool, manager)
+            before = [p.read_bytes() for p in files]
+            for patch in order:
+                subprocess.run([sys.executable, str(patch)], env=env, check=True,
+                               capture_output=True, text=True)
+            check(before == [p.read_bytes() for p in files],
+                  "D three-overlay reapply is byte-identical: " + ", ".join(p.stem for p in order))
+            trees.append([ast.dump(ast.parse(p.read_text())) for p in files])
+    check(all(tree == trees[0] for tree in trees),
+          "D all six fine/hybrid/retention orders produce identical coordinator/pool/manager ASTs")
+
+
 def main() -> int:
     if PATCH is None:
         raise SystemExit("missing patch_apc_fine_grained_hits.py")
@@ -1324,6 +1350,7 @@ def main() -> int:
     patched_text = part_a(src)
     part_b(patched_text)
     part_c()
+    part_d(src)
     print()
     if FAILURES:
         print(f"FAILED ({len(FAILURES)}): " + "; ".join(FAILURES))
