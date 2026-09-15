@@ -422,8 +422,8 @@ not sparse MLA. Do not confuse that with NVFP4 **weights** (`--moe-backend marli
 `--enable-prefix-caching` is on. The OpenAI API is **stateless**: the client
 resends the full history each turn; vLLM hashes that prefix. Concurrent chats
 do **not** mix activations. `--max-num-seqs 4` is four **in-flight** generations,
-not four parked sessions. MLA `KpoolTailManager` disables **fine-grained**
-hits — only **block-aligned** tokens count (3584-token hybrid align).
+not four parked sessions. By default, MLA `KpoolTailManager` disables
+**fine-grained** hits — only **block-aligned** tokens count (3584-token hybrid align).
 `KpoolTail` already opts out of the hybrid min (1-block circular scratch).
 
 `dflash` is `use_eagle()`. GLM never sets `is_eagle_group` (that annotator is
@@ -470,11 +470,20 @@ Re-measure (see also `tests/bench_prefix_cache.py`):
 python3 tests/bench_prefix_cache.py --runs 3
 ```
 
-Note the page math: hits are **block-aligned to the 3584-token hybrid MLA
+Note the default page math: hits are **block-aligned to the 3584-token hybrid MLA
 page**, so a warm prompt only ever reuses `floor(tokens / 3584) × 3584`
 tokens — the 7168 / 10752 / 14336 hit rows above are exactly 2 / 3 / 4 full
 pages. And since this build exposes **no cache-reset endpoint**, the bench
 salts its filler content per invocation so every cold is genuinely cold.
+
+### Optional fine-grained prefix-cache hits
+
+`GLM53_FINEGRAINED_APC=1` opts the TP=2 launcher into 64-token lookup boundaries
+after restart. The default is `0`; only exact `0`/`1` values are accepted.
+The runtime checks scratch alignment, and DFlash replay/retention can still
+force an earlier hit. Benefits depend on the workload; draft-acceptance and
+internal state qualification remain incomplete. See the
+[mechanism, verification, and limits](docs/DESIGN-apc-fine-grained-hits.md).
 
 ### Optional sparse retention and DFlash replay
 
@@ -848,6 +857,7 @@ that are now documented/enforced:
 | `KV_CACHE_DTYPE` | `fp8` | packed `fp8_ds_mla`; not `nvfp4`, not bf16 |
 | `DEFAULT_MAX_NEW_TOKENS` | `65536` | Omitted-only output-token default (`1..1000000`) for chat and completion requests, implemented by `overlay/patch_default_max_new_tokens.py`. Explicit `max_tokens`/`max_completion_tokens` overrides this default; independent server, platform and remaining-context caps still apply. Empty preserves stock model/server defaults and caps. Does not reserve admission capacity or fix long-prefill contention; admission is chunk-based. Caller exports (including empty) override `.env`. TP=2 launcher only; `start-tp4.sh` is unchanged. |
 | `GLM53_APC_RETENTION_INTERVAL_SWA` | *(unset)* | TP=2 DFlash2 drafter retention. Empty inherits global retention with ordinary priority; explicit `0` keeps reachable boundaries and enables draft-only eviction priority; positive values must be multiples of 3584, at most 1,000,000. Requires `SPEC_METHOD=dflash` and the hybrid prefix overlay. TP=4 rejects a non-empty value. Qualify retention, branching, and draft acceptance for the chosen global/SWA pair; see [measurements](docs/apc-retention-qualification.md) |
+| `GLM53_FINEGRAINED_APC` | `0` | TP=2 opt-in 64-token prefix-cache lookup; exact `0`/`1`, restart required. Runtime scratch-alignment and DFlash replay checks apply. See [scope and limits](docs/DESIGN-apc-fine-grained-hits.md) |
 | `GLM53_MIXED_PREFILL_CHUNK` | `skip` | do not mix a peer prefill into a decode step (issue #6). `N>0` = cap tokens; `0` = off. Solo prefill stays MNBT (7168) |
 | `GLM53_SUPPRESS_STOPS_IN_REASONING` | `1` | ignore client `stop` strings until `</think>` (thinking-on default) |
 | `GLM53_DEFAULT_REASONING_EFFORT` | *(empty)* | `low` / `high` / `max` via `--default-chat-template-kwargs` on both ranks. Empty sends no flag, so omitted effort renders Max. Per-request `chat_template_kwargs.reasoning_effort` overrides the default; `medium` is rejected because the template maps it to Max |
@@ -893,6 +903,7 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `overlay/patch_model_overrides.py` | `"exl3"` in ModelConfig overrides |
 | `tests/test_exl3_overlay.py` | registry, TP shard, `sm_121a` cubin, fused vs loop GEMM, `EXL3_FUSED_MOE=0`, E2 diag schema, E3 grouped tables/parity/graph-replay/fallback checks |
 | `tests/test_apc_per_group_retention.py` | host: overlay apply/idempotence, min-exemption derivation, routing, env validation, composition with `patch_hybrid_prefix_hit.py` in both orders, id-cost/capacity arithmetic (needs `GLM53_KV_COORDINATOR_PY_SRC` + `_PRISTINE` copies of the fork's coordinator) |
+| `tests/test_apc_fine_grained_hits.py` | host/image: canonical patch validation, runtime lookup/scratch gate, strict flag handling, and fine/hybrid/retention composition in all six orders; source fixtures described in the [feature note](docs/DESIGN-apc-fine-grained-hits.md#verification-and-limits) |
 | `tests/test_launcher_rank_parity.py` | launcher (CPU-only, docker/ssh stubbed): retention validation, pre-stop artifact checks, ordered hybrid/per-group overlays, and matching rank environments and mounts |
 | `tests/bench_decode.py` | streaming decode + coherence; `--structured` is the count-1→200 median |
 | `tests/test_start_overrides.py` | CPU-only caller precedence: `.env` keys, empty exports, shell assignments, and child inheritance |

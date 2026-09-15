@@ -598,7 +598,7 @@ def part_d(h: Harness) -> None:
         if wires_swa() and env.get(SWA, ""):
             required["VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA"] = env[SWA]
         if wires_fg():
-            required[FG] = env.get(FG, "1")
+            required[FG] = env.get(FG, "0")
         issues = parity_issues(head, worker, scp, required)
         check(not issues, f"D2 [{label}] rank parity: " + ("; ".join(issues) if issues else "no differences"))
         for name in CONTAINER_NAMES:
