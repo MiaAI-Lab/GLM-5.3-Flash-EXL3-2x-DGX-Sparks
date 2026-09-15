@@ -83,21 +83,44 @@ def capture(out_path):
             d = json.loads(resp.read().decode())
         pl = d["choices"][0].get("prompt_logprobs") or []
         res[name] = pl
-        nll = [
-            -max(v["logprob"] for v in pos.values() if v.get("rank") == 1)
-            for pos in pl[1:] if pos
-        ]
-        print(name, "positions", len(pl), "mean top1 nll", round(sum(nll) / max(1, len(nll)), 5))
-    json.dump(res, open(out_path, "w"))
+        nll, empty, unscorable = [], 0, 0
+        for pos in pl[1:]:
+            if not pos:
+                empty += 1
+                continue
+            top1 = [v["logprob"] for v in pos.values() if v.get("rank") == 1]
+            if not top1:
+                unscorable += 1
+                continue
+            nll.append(-max(top1))
+        mean = f"{sum(nll) / len(nll):.5f}" if nll else "unavailable"
+        print(name, "positions", len(pl), "scored", len(nll), "empty", empty,
+              "unscorable", unscorable, "mean top1 nll", mean)
+    with open(out_path, "w") as fh:
+        json.dump(res, fh)
 
 
 def compare(a_path, b_path):
-    A = json.load(open(a_path))
-    B = json.load(open(b_path))
-    print(f"{'text':12s} {'pos':>6} {'mean_KL':>10} {'argmax_agree':>13}")
+    with open(a_path) as fh:
+        A = json.load(fh)
+    with open(b_path) as fh:
+        B = json.load(fh)
+    for label, absent in (("B", sorted(set(A) - set(B))), ("A", sorted(set(B) - set(A)))):
+        if absent:
+            print(f"not compared (missing from {label}): {', '.join(absent)}")
+    print("legend: mean_cond_KL = mean over each position's shared top-20 tokens, renormalised"
+          " on that overlap; it is not a full-distribution KL")
+    print("        excl = positions excluded (an empty side, or no shared token);"
+          " unavailable = nothing comparable")
+    print(f"{'text':12s} {'pos':>6} {'excl':>5} {'mean_cond_KL':>13} {'argmax_agree':>13}")
     for name in A:
+        if name not in B:
+            continue
         pa, pb = A[name], B[name]
-        kls, agree, n = [], 0, 0
+        if len(pa) != len(pb):
+            print(f"{name:12s} unavailable: capture lengths differ (A={len(pa)} B={len(pb)})")
+            continue
+        kl_sum, agree, n = 0.0, 0, 0
         for x, y in zip(pa[1:], pb[1:]):
             if not x or not y:
                 continue
@@ -108,12 +131,14 @@ def compare(a_path, b_path):
                 continue
             za = sum(ax[k] for k in keys)
             zb = sum(by[k] for k in keys)
-            kls.append(sum((ax[k] / za) * math.log((ax[k] / za) / (by[k] / zb)) for k in keys))
+            kl_sum += sum((ax[k] / za) * math.log((ax[k] / za) / (by[k] / zb)) for k in keys)
             ta = max(x.items(), key=lambda kv: kv[1]["logprob"])[0]
             tb = max(y.items(), key=lambda kv: kv[1]["logprob"])[0]
             agree += ta == tb
             n += 1
-        print(f"{name:12s} {n:6d} {sum(kls)/max(1,len(kls)):10.4f} {agree/max(1,n):13.3f}")
+        kl = f"{kl_sum / n:13.4f}" if n else f"{'unavailable':>13}"
+        ag = f"{agree / n:13.3f}" if n else f"{'unavailable':>13}"
+        print(f"{name:12s} {n:6d} {len(pa) - 1 - n:5d} {kl} {ag}")
 
 
 if __name__ == "__main__":

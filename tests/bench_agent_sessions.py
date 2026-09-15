@@ -22,11 +22,13 @@ QRY_RE = re.compile(r"^vllm:prefix_cache_queries_total(?:\{[^}]*\})?\s+(\S+)", r
 SALT = secrets.token_hex(8)
 
 
-def metrics() -> dict:
-    raw = urllib.request.urlopen(BASE + "/metrics", timeout=10).read().decode()
+def metrics() -> dict[str, float | None]:
+    with urllib.request.urlopen(BASE + "/metrics", timeout=10) as resp:
+        raw = resp.read().decode()
+    hits, queries = HITS_RE.search(raw), QRY_RE.search(raw)
     return {
-        "hits": float(HITS_RE.search(raw).group(1)),
-        "queries": float(QRY_RE.search(raw).group(1)),
+        "hits": float(hits.group(1)) if hits else None,
+        "queries": float(queries.group(1)) if queries else None,
     }
 
 
@@ -85,12 +87,16 @@ def main() -> int:
             rows.append(r)
         hit = sum(r["cached_tokens"] for r in results)
         prom = sum(r["prompt_tokens"] for r in results)
-        gq = after["queries"] - before["queries"]
-        gh = after["hits"] - before["hits"]
+        if None in (before["hits"], before["queries"], after["hits"], after["queries"]):
+            glob = "unavailable (no prefix-cache counters in /metrics)"
+        elif after["queries"] == before["queries"]:
+            glob = "unavailable (no cache queries this turn)"
+        else:
+            glob = f"{(after['hits'] - before['hits']) / (after['queries'] - before['queries']):.3f}"
+        ratio = f"{hit / prom:.3f}" if prom else "unavailable"
         print(
             f"{args.label} turn {turn}: prompt={prom} cached={hit} "
-            f"ratio={hit/prom if prom else 0:.3f} "
-            f"global={(gh/gq if gq else float('nan')):.3f} "
+            f"ratio={ratio} global={glob} "
             f"max_wall={max(r['wall_s'] for r in results):.1f}s "
             f"sum_wall={sum(r['wall_s'] for r in results):.1f}s",
             flush=True,

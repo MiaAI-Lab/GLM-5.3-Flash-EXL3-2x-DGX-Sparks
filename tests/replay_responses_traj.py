@@ -40,7 +40,7 @@ def response_indices(messages):
     return [i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("object") == "response"]
 
 
-def call(idx: int, input_items: list, timeout: float = 900) -> dict:
+def call(input_items: list, timeout: float = 900) -> dict:
     body = {
         "model": MODEL,
         "input": input_items,
@@ -71,13 +71,14 @@ def main() -> int:
     ap.add_argument("--calls", default="0,1,2,3,4,5")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
-    d = json.load(open(args.trajectory))
+    with open(args.trajectory) as fh:
+        d = json.load(fh)
     messages = d["messages"]
     ridx = response_indices(messages)
     out = {"trajectory": args.trajectory, "calls": []}
     for c in (int(x) for x in args.calls.split(",")):
         prefix = prepare(messages[: ridx[c]])
-        r = call(c, prefix)
+        r = call(prefix)
         r["call"] = c
         print(json.dumps(r), flush=True)
         out["calls"].append(r)
