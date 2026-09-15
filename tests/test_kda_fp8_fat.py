@@ -290,7 +290,7 @@ class ApplyDispatchTests(unittest.TestCase):
         self.fat_calls = []
         env = _load_method_class(_fake_torch())
         self.cls = env["Glm53DenseFp8Method"]
-        self.meth = self.cls("kda")
+        self.meth = self.cls("kda", "model.layers.0.self_attn.in_proj_qkvbfg_a")
         self.meth.ready = True
 
         def spy(layer, x2):
@@ -346,7 +346,7 @@ class RowquantTests(unittest.TestCase):
         env = _load_method_class(
             _fake_torch(), triton_available=True, triton_ready=ready,
             rowquant_kernel=kernel)
-        meth = env["Glm53DenseFp8Method"]("kda")
+        meth = env["Glm53DenseFp8Method"]("kda", "model.layers.0.self_attn.in_proj_qkvbfg_a")
         return meth
 
     def test_triton_used_for_contiguous(self):
@@ -399,7 +399,8 @@ class EagerCpuTensorTests(unittest.TestCase):
 
     def test_zero_and_tiny_rows_use_the_kernel_scale_floor(self):
         torch = self.torch
-        method = _load_method_class(torch)["Glm53DenseFp8Method"]("kda")
+        method = _load_method_class(torch)["Glm53DenseFp8Method"](
+            "kda", "model.layers.0.self_attn.in_proj_qkvbfg_a")
         x = torch.zeros((3, _K), dtype=torch.bfloat16, device="cpu")
         x[1].fill_(1e-13)
         x[2].fill_(-1e-13)
@@ -421,7 +422,8 @@ class EagerCpuTensorTests(unittest.TestCase):
             torch, triton_available=True, triton_ready=True,
             rowquant_kernel=ForbiddenKernel(),
         )
-        method = environment["Glm53DenseFp8Method"]("kda")
+        method = environment["Glm53DenseFp8Method"](
+            "kda", "model.layers.0.self_attn.in_proj_qkvbfg_a")
         storage = torch.full((2, _K * 2), 1000, dtype=torch.bfloat16, device="cpu")
         storage[:, ::2] = 1
         quantized, scales = method._fat_rowquant(storage[:, ::2])
@@ -442,7 +444,8 @@ class RetentionTests(unittest.TestCase):
         env = _load_method_class(tf)
         env["_warm_fat_triton"] = lambda device: setattr(
             self, "warmed", True)
-        return env["Glm53DenseFp8Method"]("kda"), tf
+        return env["Glm53DenseFp8Method"](
+            "kda", "model.layers.0.self_attn.in_proj_qkvbfg_a"), tf
 
     def _retain(self, meth, n=_N, k=_K, group_layer=None):
         layer = group_layer or types.SimpleNamespace(orig_dtype="bf16")
@@ -494,7 +497,7 @@ class RetentionTests(unittest.TestCase):
             layer = self._retain(meth)
         self.assertFalse(hasattr(layer, "glm53_fat_wt"))
         env = _load_method_class(tf)
-        dense = env["Glm53DenseFp8Method"]("dense")
+        dense = env["Glm53DenseFp8Method"]("dense", "model.layers.0.mlp.down_proj")
         with unittest.mock.patch.dict(os.environ, {"GLM53_KDA_FP8_FAT": "1"}):
             layer = self._retain(dense)
         self.assertFalse(hasattr(layer, "glm53_fat_wt"))

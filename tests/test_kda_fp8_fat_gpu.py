@@ -22,7 +22,7 @@ def build_real_layer(device, group="kda", seed=5):
     import torch
     from vllm.model_executor.layers.quantization.exl3 import Glm53DenseFp8Method
 
-    meth = Glm53DenseFp8Method(group)
+    meth = Glm53DenseFp8Method(group, "model.layers.0.self_attn.in_proj_qkvbfg_a")
     layer = torch.nn.Module()
     g = torch.Generator(device="cpu")
     g.manual_seed(seed)
