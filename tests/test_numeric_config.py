@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -130,12 +131,22 @@ def test_spinwait_numeric_contract() -> None:
         assert "GLM53_SPINWAIT_MS must" in result.stderr, bad
 
 
-def test_restart_validates_before_stop() -> None:
-    source = START.read_text()
-    main = source.index("main() {")
-    validation = source.index("start|restart) validate_numeric_config", main)
-    restart = source.index("restart)  stop; start", main)
-    assert validation < restart
+def test_optimization_flags_validate_before_host_actions() -> None:
+    from test_launcher_rank_parity import Harness
+
+    with tempfile.TemporaryDirectory() as directory:
+        harness = Harness(Path(directory))
+        for knob in ("GLM53_EXL3_MOE_FAST", "GLM53_KDA_FP8_FAT"):
+            for value in ("0", "1"):
+                result = harness.run(
+                    "validate_numeric_config", entry="start.fn.sh", **{knob: value})
+                assert result.returncode == 0, (knob, value, result.stderr)
+                assert not harness.host_touching_calls()
+            for value in ("", "yes", " 1", "1 ", "2"):
+                result = harness.run("restart", **{knob: value})
+                assert result.returncode == 2, (knob, value, result.stderr)
+                assert knob in result.stderr
+                assert not harness.host_touching_calls(), (knob, value, harness.calls())
 
 
 def test_tp4_rejects_retention_override() -> None:
@@ -157,9 +168,6 @@ def test_tp4_rejects_retention_override() -> None:
             )
             assert result.returncode == expected, (value, result.stderr)
 
-    source = START_TP4.read_text()
-    assert '_cli_apc_swa_set="${GLM53_APC_RETENTION_INTERVAL_SWA+1}"' in source
-    assert '[ -n "${_cli_apc_swa_set}" ] && GLM53_APC_RETENTION_INTERVAL_SWA="$_cli_apc_swa"' in source
 
 
 if __name__ == "__main__":
@@ -167,6 +175,6 @@ if __name__ == "__main__":
     test_decimal_normalization()
     test_indexer_workspace_enum()
     test_spinwait_numeric_contract()
-    test_restart_validates_before_stop()
+    test_optimization_flags_validate_before_host_actions()
     test_tp4_rejects_retention_override()
     print("numeric config tests: PASS")

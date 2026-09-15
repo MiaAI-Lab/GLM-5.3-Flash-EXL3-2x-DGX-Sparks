@@ -1246,9 +1246,34 @@ def apply_exl3_grouped_fat(
     _EXL3_FAT_DIAG["grouped_calls"] += 1
 
 
+def exl3_moe_fast_requested() -> bool:
+    """Opt-in SM121 K4/N256 thin-decode dispatch (default off).
+
+    Mirrors the native dispatcher's validation: anything other than 0/1
+    raises at load instead of surfacing as a native TORCH_CHECK on the
+    first decode call.
+    """
+    raw = os.environ.get("GLM53_EXL3_MOE_FAST", "0")
+    if raw not in ("0", "1"):
+        raise RuntimeError("GLM53_EXL3_MOE_FAST must be 0 or 1")
+    return raw == "1"
+
+
 def build_exl3_fused_state(layer: torch.nn.Module, inners: list[dict[str, Any]]) -> None:
     """Pointer tables + fused temps, once after load. No per-token alloc."""
     import exllamav3_ext
+
+    # Fail closed: an explicitly requested fast thin-decode path must never
+    # silently run the stock kernel on an image built without it.
+    if exl3_moe_fast_requested():
+        if not hasattr(exllamav3_ext, "glm53_fast_moe_version"):
+            raise RuntimeError(
+                "GLM53_EXL3_MOE_FAST=1 requires the native decode-pipeline "
+                "image (exllamav3_ext.glm53_fast_moe_version); this image "
+                "was built without overlay/patch_exl3_decode_pipeline.py"
+            )
+        if exllamav3_ext.glm53_fast_moe_version() != 1:
+            raise RuntimeError("Unsupported native EXL3 decode-pipeline version")
 
     device = layer.w13_trellis.device
     n_exp = len(inners)
@@ -1273,6 +1298,15 @@ def build_exl3_fused_state(layer: torch.nn.Module, inners: list[dict[str, Any]])
         "down_suh": _ptrs("down", "suh"),
         "down_svh": _ptrs("down", "svh"),
     }
+    # Gate/up SUH equality was verified across every expert at load time
+    # (layer._exl3_shared_w13_suh, torch.equal on the packed tensors),
+    # before weights were released. Aliasing the pointer tables here lets the
+    # native fast path prove the reuse predicate by pointer identity
+    # (gate_ptrs_suh.data_ptr() == up_ptrs_suh.data_ptr()) and skip the
+    # redundant up-input Hadamard. Unequal checkpoints keep both tables and
+    # take the independent-transform fast kernel (or stock when FAST=0).
+    if bool(getattr(layer, "_exl3_shared_w13_suh", False)):
+        layer._exl3_ptrs["up_suh"] = layer._exl3_ptrs["gate_suh"]
     idx = int(device.index) if device.index is not None else 0
     concurrency = int(exllamav3_ext.exl3_moe_max_concurrency(idx))
     if concurrency < 1:
@@ -1794,6 +1828,75 @@ def _glm53_dense_fp8_group(prefix: str, groups: set[str] | None = None, layer_ty
     return None
 
 
+def kda_fp8_fat_enabled() -> bool:
+    """Opt-in large-M FP8 dispatch for the KDA in_proj (default off).
+
+    Small M keeps FP8-Marlin; M > KDA_FP8_FAT_M_MAX_MARLIN uses torch native
+    FP8 _scaled_mm on the retained raw FP8 weights. Anything else raises
+    loudly instead of silently running Marlin under a fat label.
+    """
+    raw = os.environ.get("GLM53_KDA_FP8_FAT", "0")
+    if raw not in ("0", "1"):
+        raise RuntimeError("GLM53_KDA_FP8_FAT must be 0 or 1")
+    return raw == "1"
+
+
+# Dispatch boundary from SM121 microbenchmarks on in_proj [12576x4096]:
+# Marlin wins every measured M <= 64 (_scaled_mm is 0.78-0.81x there);
+# _scaled_mm wins every measured M >= 65 (1.46-3.9x). Serving Ms split
+# cleanly (decode <= 220 with the 65-220 band favoring scaled; prefill
+# chunks >= 1536). Single threshold, no table.
+KDA_FP8_FAT_M_MAX_MARLIN = 64
+# Only projection shape the fat path is validated for (TP2-local KDA
+# in_proj_qkvbfg_a). o_proj/f_b/g_b/dense stay Marlin by measurement.
+KDA_FP8_FAT_SHAPES = frozenset({(12576, 4096)})
+
+try:
+    import triton
+    import triton.language as _fat_tl
+
+    @triton.jit
+    def _fat_rowquant_kernel(x_ptr, q_ptr, s_ptr, stride_m, K: _fat_tl.constexpr, BLOCK: _fat_tl.constexpr):
+        pid = _fat_tl.program_id(axis=0)
+        base = pid * stride_m
+        offs = base + _fat_tl.arange(0, BLOCK)
+        mask = _fat_tl.arange(0, BLOCK) < K
+        v = _fat_tl.load(x_ptr + offs, mask=mask, other=0.0).to(_fat_tl.float32)
+        mx = _fat_tl.max(_fat_tl.abs(v), axis=0)
+        sc = _fat_tl.maximum(mx / 448.0, 1e-12)
+        q = _fat_tl.clamp(v / sc, -448.0, 448.0).to(_fat_tl.float8e4nv)  # bit-identical to torch fp8_e4m3fn
+        _fat_tl.store(q_ptr + offs, q, mask=mask)
+        _fat_tl.store(s_ptr + pid, sc)
+
+    _FAT_TRITON_AVAILABLE = True
+except Exception:  # noqa: BLE001  (triton missing or SM-neutral import issue)
+    _FAT_TRITON_AVAILABLE = False
+
+_FAT_TRITON_READY: list = [None]  # None = untested, True/False = verdict
+
+
+def _warm_fat_triton(device: torch.device) -> None:
+    """One-time compile of the fused rowwise-quant kernel, hidden in model
+    load. Any failure (import, compile, run) pins the verdict to False and
+    the fat path permanently uses the eager torch fallback."""
+    if not _FAT_TRITON_AVAILABLE or _FAT_TRITON_READY[0] is not None:
+        return
+    try:
+        import torch as _torch
+
+        x = _torch.zeros((1, 4096), dtype=_torch.bfloat16, device=device)
+        q = _torch.empty((1, 4096), dtype=_torch.float8_e4m3fn, device=device)
+        s = _torch.empty((1,), dtype=_torch.float32, device=device)
+        _fat_rowquant_kernel[(1,)](x, q, s, x.stride(-2), 4096, 4096,
+                                   num_warps=8)
+        _torch.cuda.synchronize()
+        _FAT_TRITON_READY[0] = True
+        logger.info("kda fp8-fat: fused triton rowquant ready")
+    except Exception as exc:  # noqa: BLE001
+        _FAT_TRITON_READY[0] = False
+        logger.warning("kda fp8-fat: triton rowquant unavailable (%r); eager fallback", exc)
+
+
 _GLM53_TP3_UNALIGNED_KDA_SUFFIXES = (
     ".self_attn.f_b_proj",
     ".self_attn.g_b_proj",
@@ -1853,11 +1956,129 @@ class Glm53DenseFp8Method(UnquantizedLinearMethod):
         layer.weight_block_size = None
         prepare_fp8_layer_for_marlin(layer, size_k_first=False)
         layer.glm53_fp8_n, layer.glm53_fp8_k = n, k
+        self._retain_fat_weights(layer, fp8, scales, n, k)
         self.ready = True
+
+    def _retain_fat_weights(
+        self,
+        layer: torch.nn.Module,
+        fp8: torch.Tensor,
+        scales: torch.Tensor,
+        n: int,
+        k: int,
+    ) -> None:
+        """Load-time retention for the opt-in large-M FP8 path (option 2).
+
+        Keeps the SAME logical FP8 weights (raw [N,K] e4m3 + fp32 per-channel
+        scales) the Marlin prep consumed, plus zero-copy views for aten
+        _scaled_mm (col-major [K,N] weight view, [1,N] scale view). Only for
+        the measured in_proj shape on SM121 with a working _scaled_mm;
+        anything else leaves no trace (fail-closed to Marlin). Cost when
+        enabled: ~51.6 MB per layer-rank for in_proj.
+        """
+        if not (
+            kda_fp8_fat_enabled()
+            and self.group == "kda"
+            and (n, k) in KDA_FP8_FAT_SHAPES
+            and hasattr(torch.ops.aten, "_scaled_mm")
+        ):
+            return
+        try:
+            cap = torch.cuda.get_device_capability(fp8.device)
+        except Exception:
+            return
+        if tuple(int(v) for v in cap) != (12, 1):
+            return
+        # has-operator is not working-kernel: prove a real _scaled_mm launch
+        # on this device/dtype/layout before retaining anything. Failure
+        # leaves no trace and the layer stays on Marlin.
+        probe_m = KDA_FP8_FAT_M_MAX_MARLIN + 1
+        try:
+            torch.ops.aten._scaled_mm(
+                torch.zeros((probe_m, k), dtype=fp8.dtype, device=fp8.device),
+                fp8.t(),
+                torch.ones((probe_m, 1), dtype=torch.float32, device=fp8.device),
+                torch.ones((1, n), dtype=torch.float32, device=fp8.device),
+                None,
+                None,
+                getattr(layer, "orig_dtype", torch.bfloat16),
+                False,
+            )
+            torch.cuda.synchronize(fp8.device)
+        except Exception as exc:
+            logger.warning(
+                "kda fp8-fat: _scaled_mm probe failed (%r); staying on Marlin", exc
+            )
+            return
+        layer.glm53_fat_w = fp8
+        layer.glm53_fat_s = scales.to(torch.float32)
+        layer.glm53_fat_wt = fp8.t()  # col-major [K,N] view, zero copy
+        layer.glm53_fat_sb = layer.glm53_fat_s.view(1, n)
+        _warm_fat_triton(fp8.device)
+        logger.info(
+            "kda fp8-fat retained for %s [%dx%d] (+%.1f MiB/rank)",
+            self.group, n, k,
+            (fp8.numel() + 4 * n) / 2**20,
+        )
+
+    def _fat_rowquant(
+        self, x2: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-token FP8 quant of BF16 activations. Fused Triton kernel when
+        it compiled at load; eager torch fallback otherwise (slower but still
+        measured-winning at large M). Returns (xq [M,K] fp8, sa [M,1] fp32).
+        """
+        m, k = x2.shape
+        # The kernel indexes rows contiguously (stride(-1) == 1 assumed);
+        # non-contiguous-last-dim views take the stride-safe eager path.
+        if (
+            _FAT_TRITON_AVAILABLE
+            and _FAT_TRITON_READY[0]
+            and x2.stride(-1) == 1
+        ):
+            xq = torch.empty((m, k), dtype=torch.float8_e4m3fn, device=x2.device)
+            sa = torch.empty((m,), dtype=torch.float32, device=x2.device)
+            _fat_rowquant_kernel[(m,)](x2, xq, sa, x2.stride(-2), k, 4096,
+                                       num_warps=8)
+            return xq, sa.view(m, 1)
+        xf = x2.float()
+        amax = xf.abs().amax(dim=1, keepdim=True)
+        sa = (amax / 448.0).clamp_min(1e-12)
+        # Match the kernel's fp32 division and post-division scale floor.
+        xq = (xf / sa).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+        return xq, sa
+
+    def _apply_fat(self, layer: torch.nn.Module, x2: torch.Tensor) -> torch.Tensor:
+        xq, sa = self._fat_rowquant(x2)
+        return torch.ops.aten._scaled_mm(
+            xq,
+            layer.glm53_fat_wt,
+            sa,
+            layer.glm53_fat_sb,
+            None,
+            None,
+            x2.dtype,
+            False,
+        )
 
     def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         if not self.ready:
             return super().apply(layer, x, bias)
+        # Hybrid dispatch: M is tensor metadata (no sync). Retained fat
+        # weights exist only when every load-time predicate passed; M<=64
+        # stays Marlin (measured win), anything else falls through to Marlin.
+        # Per-capture-size CUDA graphs bake the branch taken at capture.
+        wt = getattr(layer, "glm53_fat_wt", None)
+        k = int(layer.glm53_fp8_k)
+        if (
+            wt is not None
+            and bias is None
+            and x.dim() >= 2
+            and int(x.shape[-1]) == k
+            and x.numel() // k > KDA_FP8_FAT_M_MAX_MARLIN
+        ):
+            out = self._apply_fat(layer, x.reshape(-1, k))
+            return out.reshape(x.shape[:-1] + (int(layer.glm53_fp8_n),))
         from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
             apply_fp8_marlin_linear,
         )
@@ -2091,6 +2312,16 @@ class Exl3MoEMethod(FusedMoEMethodBase):
             except Exception as exc:
                 fused_err = repr(exc)
                 layer._exl3_ptrs = None
+        if exl3_moe_fast_requested() and not fused_ok:
+            # Fail closed: an explicitly requested fast thin-decode path must
+            # never silently run the stock kernel or the Python loop. The
+            # version gate inside build_exl3_fused_state raises through the
+            # same path; this also covers fused disabled / exl3_moe missing.
+            raise RuntimeError(
+                "GLM53_EXL3_MOE_FAST=1 requires the fused exl3_moe path on an "
+                "image built with overlay/patch_exl3_decode_pipeline.py; "
+                f"load-time setup failed: {fused_err or 'EXL3_FUSED_MOE=0'}"
+            )
         if not self._logged:
             if fused_ok:
                 logger.info(

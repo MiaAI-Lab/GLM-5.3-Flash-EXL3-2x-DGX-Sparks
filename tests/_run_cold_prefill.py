@@ -8,6 +8,7 @@ unique salt per cold request, one-at-a-time, TTFT = first content token.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import time
 import urllib.error
@@ -15,7 +16,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-BASE = "http://127.0.0.1:8888"
+BASE = os.environ.get("GLM53_BENCH_BASE", "http://127.0.0.1:8888")
 SERVED = "GLM-5.3-Flash-EXL3"
 FILLER = "the "
 TASK = "Reply with OK."
@@ -232,6 +233,15 @@ def delta_metrics(before: dict, after: dict) -> dict:
 
 
 def main() -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--only", default="",
+                      help="run a single ladder rung (e.g. '~16k'); default runs the full ladder")
+    ap.add_argument("--out", default="",
+                      help="receipt path; default keeps OUT_JSON")
+    args = ap.parse_args()
+    out_path = Path(args.out) if args.out else OUT_JSON
     st, body = http_get("/health")
     print(f"GET /health -> {st} {body!r}", flush=True)
     if st != 200:
@@ -255,6 +265,8 @@ def main() -> int:
     eightk_assistant = None
 
     for i, (name, target, timeout) in enumerate(LADDER):
+        if args.only and name != args.only:
+            continue
         salt = unique_salt()
         print(f"\n=== {name} cold target={target} timeout={timeout}s ===", flush=True)
         n, tok_est, user_text = calibrate(target, salt, timeout=min(timeout, 180))
@@ -304,8 +316,9 @@ def main() -> int:
         "results": results,
         "wall_clock": time.strftime("%Y-%m-%d %H:%M:%S %z"),
     }
-    OUT_JSON.write_text(json.dumps(payload, indent=2) + "\n")
-    print(f"\nWrote {OUT_JSON}", flush=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"\nWrote {out_path}", flush=True)
     return 0
 
 

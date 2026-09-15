@@ -300,6 +300,15 @@ GLM53_ADAPTIVE_K_MARGIN="${GLM53_ADAPTIVE_K_MARGIN:-1.0}"
 GLM53_ADAPTIVE_K_MIN_STEPS="${GLM53_ADAPTIVE_K_MIN_STEPS:-4}"
 GLM53_ADAPTIVE_K_SATURATE="${GLM53_ADAPTIVE_K_SATURATE:-max}"
 GLM53_ADAPTIVE_K_HIST="${GLM53_ADAPTIVE_K_HIST:-200}"
+# Thin/small-M EXL3 routed-expert decode path (overlay/patch_exl3_decode_pipeline.py).
+# 1 = opt-in SM121 K4/N256 kernels (frag-1/shared-8, optional gate/up transform
+# reuse); 0 = stock exl3_moe kernels. Requires an image built from a tree that
+# includes the decode-pipeline patch, otherwise model load fails closed.
+GLM53_EXL3_MOE_FAST="${GLM53_EXL3_MOE_FAST-0}"
+# Large-M FP8 dispatch for the KDA in_proj (overlay Glm53DenseFp8Method).
+# 1 = retain raw FP8 weights at load and route M>64 calls to torch native
+# FP8 _scaled_mm; 0 = Marlin everywhere. Fail-closed per-layer predicates.
+GLM53_KDA_FP8_FAT="${GLM53_KDA_FP8_FAT-0}"
 # Dense projections FP8 weight-only via Marlin (overlay/patch_dense_fp8.py). off = BF16 as shipped.
 # PROVISIONAL (changes target numerics; needs a KLD panel). Groups: shared,dense,kda,mla.
 GLM53_DENSE_FP8="${GLM53_DENSE_FP8:-off}"
@@ -486,6 +495,8 @@ validate_numeric_config() {
     fi
     _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-rightsize}" \
         stock rightsize || return
+    _glm53_validate_enum GLM53_EXL3_MOE_FAST "${GLM53_EXL3_MOE_FAST-0}" 0 1 || return
+    _glm53_validate_enum GLM53_KDA_FP8_FAT "${GLM53_KDA_FP8_FAT-0}" 0 1 || return
     _glm53_validate_spinwait_ms || return
     # The template treats medium as max, so do not advertise it as a level.
     if [ -n "${GLM53_DEFAULT_REASONING_EFFORT-}" ]; then
@@ -1554,7 +1565,7 @@ launch_cluster() {
              DEFAULT_MAX_NEW_TOKENS MODEL_DIR EXTRA_ARGS \
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP \
              GLM53_ADAPTIVE_K GLM53_ADAPTIVE_K_SET GLM53_ADAPTIVE_K_ALPHA GLM53_ADAPTIVE_K_MARGIN \
-             GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST GLM53_DENSE_FP8; do
+             GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST GLM53_DENSE_FP8 GLM53_EXL3_MOE_FAST GLM53_KDA_FP8_FAT; do
         serve_env+=" -e $v='${!v:-}'"
     done
     # The worker is headless and serves no API, so do not propagate the API
@@ -1674,6 +1685,8 @@ launch_cluster() {
         -e GLM53_ADAPTIVE_K_SATURATE="$GLM53_ADAPTIVE_K_SATURATE" \
         -e GLM53_ADAPTIVE_K_HIST="$GLM53_ADAPTIVE_K_HIST" \
         -e GLM53_DENSE_FP8="$GLM53_DENSE_FP8" \
+        -e GLM53_EXL3_MOE_FAST="$GLM53_EXL3_MOE_FAST" \
+        -e GLM53_KDA_FP8_FAT="$GLM53_KDA_FP8_FAT" \
         -e MODEL_DIR="$MODEL_DIR" \
         -e VLLM_API_KEY \
         -e EXTRA_ARGS="${EXTRA_ARGS:-}" \

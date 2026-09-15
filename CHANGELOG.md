@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — CPU hardening for opt-in SM121 performance paths
+
+Explicit EXL3 fast-path requests now fail loading rather than silently
+degrading when fused initialization fails. Both optimization flags require
+literal 0/1 before service lifecycle actions. KDA-fat dispatch uses flattened
+row count, handles strided activations safely, aligns eager quantization
+scale/division semantics and probes the production M=65 operation at load.
+
+The logprob screening panel corrects its NLL sign and rejects empty,
+incompatible or unscorable receipts instead of reporting a clean panel.
+CPU regressions cover these paths; both optimization defaults remain off.
+Native build, GPU parity/graphs, serving quality/performance and memory
+qualification are deferred to the latest completed TheGrill.
+
 ## Unreleased — omitted-only output-token defaults
 
 `DEFAULT_MAX_NEW_TOKENS` now changes only omitted request limits, including
