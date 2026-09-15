@@ -1732,8 +1732,11 @@ class Exl3Config(QuantizationConfig):
 #           stays BF16: MLA reads its weight directly for the absorbed matmuls)
 # Weights load as BF16 exactly as today (all custom loaders untouched, ABLIT edits
 # o_proj at the end of load_weights), then process_weights_after_loading quantizes
-# per output channel to FP8 e4m3 and repacks for the Marlin kernel. PROVISIONAL:
-# changes target numerics; needs a KLD panel before it can become a default.
+# per output channel to FP8 e4m3 and repacks for the Marlin kernel. OPT-IN: the KL panel
+# (2026-09-09, scripts/quality/kl_panel.py, logs/quality-20260909) measured 0.005-0.017
+# nats/token vs BF16 on 57k tokens of code/prose, flat across 0-32k depth, argmax agreement
+# 95-98 %, tool-calling unchanged; a default-on still needs the maintainer's exact-head
+# server-side prefill-cost admission.
 # ----------------------------------------------------------------------------
 _GLM53_DENSE_FP8_SUFFIXES = {
     "shared": (".mlp.shared_experts.gate_up_proj", ".mlp.shared_experts.down_proj"),

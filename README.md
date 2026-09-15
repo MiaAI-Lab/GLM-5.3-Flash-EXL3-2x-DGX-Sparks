@@ -102,7 +102,7 @@ as below; the stock k=7 / BF16 serve measured ~18–27 tok/s per stream on the l
 Two decode speed-ups ship in the overlay, both **off by default** (matched A/B/A at 131k and 850k, 8 runs per prompt, bootstrap 95 % CI; receipts in `logs/overnight-decode-20260907T224521Z/`):
 
 - **Adaptive verification length** (`GLM53_ADAPTIVE_K=ema`): the DFlash2 drafter still proposes 7 tokens, but the scheduler verifies only a per-step prefix (2, 4 or 7) chosen from a running average of how many drafts have been surviving, batch-uniform so every decode step keeps its FULL CUDA graph. Lossless at temperature 0. Measured vs stock k=7 (8 runs/prompt, 131k and 850k): Silk Road essay +21 %, sky/sunset +13 %, hash-map +10 %, code +5–15 %, counting unchanged.
-- **FP8 weight-only dense projections** (`GLM53_DENSE_FP8=dense,kda`): KDA and dense-MLP projections quantised per output channel to FP8 at load and run through the Marlin kernel, ~11 ms less per step on everything (+10 % on counting, prose +12–19 % alone, **+37 % on hard prose stacked with adaptive-k**). PROVISIONAL: it changes target numerics by FP8 rounding (KL proxy vs stock 0.002–0.013 nats/position, argmax agreement 94–100 %; no full KLD panel yet).
+- **FP8 weight-only dense projections** (`GLM53_DENSE_FP8=dense,kda`): KDA and dense-MLP projections quantised per output channel to FP8 at load and run through the Marlin kernel, ~11 ms less per step on everything (+10 % on counting, prose +12–19 % alone, **+37 % on hard prose stacked with adaptive-k**). This changes target numerics: the historical shared-top-K **conditional** KL screen measured 0.005–0.017 nats on 57k code/prose tokens (argmax agreement 95–98 %, tool-calling aggregate unchanged, `logs/quality-20260909`) — a shared-support proxy, not full-distribution numerical qualification, so the default stays `off` pending the maintainer's exact-head server-side prefill-cost admission.
 
 Turn on (no rebuild; the patches apply at container start on both nodes):
 
@@ -169,6 +169,24 @@ current maintainer default for `MAX_NUM_SEQS=4`, pending a repeated same-kit
 comparison.
 
 ## Quality (KLD)
+
+The separate `scripts/quality/kl_panel.py` projection comparison is a **screening
+tool**, not the teacher-logit panel below. Quote its `condKL` together with
+`covA`/`covB` shared-support mass and the scored/masked-position counts; the
+conditional KL excludes unreturned vocabulary tails. Exit `0` means the captures
+were comparable, not that a numerical-quality threshold passed. Comparison exits
+`2` for incomplete/noncomparable captures and `3` for unreadable/invalid JSON.
+Capture exits `2` when it records acquisition errors or warnings, retaining the
+partial file for diagnosis.
+
+New captures use tracked repository text, including
+`docs/DESIGN-apc-per-group-retention.md`; the historical projection figures used
+a different prose input. Do not compare old/new corpora as if only the projection
+mode changed: token sequences, scored spans and panel membership must match.
+`run_arm.sh` requires `DATA` pointing to `humaneval.jsonl` and
+`mbpp_sanitized_test.jsonl`, and stops when an evaluator fails.
+`run_boot_arms.sh` restores the original adaptive-k configuration on exit.
+Its cross-mode capture is not a substitute for a same-mode repeatability control.
 
 Independent teacher-logit panel from
 [malaiwah on the 4bpw discussion](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw/discussions/1#6a9144846b0bdba943bfe86f):
@@ -896,7 +914,7 @@ that are now documented/enforced:
 | `ABLIT` | `0` (off) | opt-in. `1` = apply o_proj edit at load (both ranks). Unset = stock weights |
 | `GLM53_ADAPTIVE_K` | `off` | `ema` = adaptive verification length (prose +13–21 %); needs the capture-size list in `EXTRA_ARGS`. See *Faster prose decode* |
 | `GLM53_ADAPTIVE_K_SET` | `2,4,7` | candidate draft lengths; graphs are captured for each length + 1 |
-| `GLM53_DENSE_FP8` | `off` | `dense,kda` = FP8 weight-only (Marlin) dense projections, ~-11 ms/step; PROVISIONAL numerics. Groups: `shared,dense,kda,mla` |
+| `GLM53_DENSE_FP8` | `off` | `dense,kda` = FP8 weight-only (Marlin) dense + KDA projections, ~-11 ms/step. Historical comparison vs BF16: **shared-top-K conditional KL proxy** 0.005-0.017 nats on 57k code/prose tokens, argmax agreement 95-98%, tool-calling aggregate unchanged (`logs/quality-20260909`). The distributions were renormalized on shared support: this is not full-distribution KL or a numerical qualification pass. `scripts/quality/kl_panel.py compare` reports screening measurements, not a quality verdict. Kept opt-in: a default-on also needs the maintainer's exact-head server-side prefill-cost admission. `off` = BF16. Groups: `shared,dense,kda,mla` |
 | `ABLIT_METHOD` | `auto` | `auto` = transplant when `ablit/transplant/` is populated, else `proj` |
 | `ABLIT_LAYERS` | `15-45` | inclusive range; `45` is the checkpoint MTP block |
 | `ABLIT_DIRECTION` | `dealign` | proj-only: `dealign` \| `bf_oproj` \| path to a custom `.pt` |
@@ -918,6 +936,7 @@ that are now documented/enforced:
 | `EXL3_TEMP_ROWS_FUSED` | `32` with E3, `256` with E2 (launcher picks by `EXL3_FAT_GROUPED` unless set) | fused `exl3_moe` rows per expert; experts above it are "fat". Keep ≥ `MAX_NUM_SEQS × (DFLASH_TOKENS+1)` so decode stays one graph-safe launch. E2 wants 256 (its per-expert loop is host-bound) |
 | `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq |
 | `MAX_NUM_BATCHED_TOKENS` | `7168` | current maintainer default at `MAX_NUM_SEQS=4`. MNBT 2048 was the clean PR77 A/B configuration and the best measured balance on an independent `MAX_NUM_SEQS=16` geometry. Tune per deployment; change after a repeated same-kit comparison |
+| `LONG_PREFILL_TOKEN_THRESHOLD` | budget-derived (`3584` at MNBT `7168`) | `--long-prefill-token-threshold` (issue #110). When unset: half the validated `MAX_NUM_BATCHED_TOKENS`, rounded down, capped at `3584` and floored at `1`; MNBT `2048` gives `1024`. Explicit empty disables the flag (stock scheduler). An explicit positive integer must be ≤ MNBT; invalid overrides are rejected, not clamped. At MNBT `7168`/threshold `3584`, measured waiting-session freeze 131/108 s → 15 s; contended long prefill +6%. Other budgets need their own performance measurements. A mixed-prefill policy change alone does **not** replace this |
 | `MAX_MODEL_LEN` | `850000` | default context since 2026-09-07 (E3 default; 1M fits again with `EXL3_FAT_GROUPED=0`). 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool. At MNBT 7168 one 1M request needs **14.52 GiB** KV (10.98 GiB at 500k; ~7.4 GiB fixed + 7.1 GiB per 1M); the E3 recipe runs 500k |
 | `GPU_MEM_UTIL` | `0.85` | GB10 UMA budget (default lowered from 0.87 on 2026-09-07: each 0.01 is 1.2 GiB of host headroom, and long prefills need it — see *Cold prefill (E3)*). E3 at 900k / 0.85: pool ~1.05M tokens / 1.17× (0.87: 16.2 GiB / 1,051,648 tokens). Pre-E3 receipts at 1M / 0.87: 1,754,237 tokens / 18.67 GiB (MNBT 2048); 1,243,902 tokens / 1.24× (7168, rightsize, E2) |
 | `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` when unset | TP=2 `start.sh` passes the effective value to both ranks. An explicit empty value disables this option; caller exports, including empty, override `.env`. Changing allocator settings requires a restart and separate memory/connector qualification; TP=4 is unchanged |

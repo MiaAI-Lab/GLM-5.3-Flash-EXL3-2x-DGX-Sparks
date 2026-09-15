@@ -177,8 +177,8 @@ MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-7168}"
 # and a caller export — including empty — beats .env.
 # Two-node start.sh only; start-tp4.sh is unchanged.
 DEFAULT_MAX_NEW_TOKENS="${DEFAULT_MAX_NEW_TOKENS-65536}"
-# Empty preserves the stock scheduler; opt in after measuring contention.
-LONG_PREFILL_TOKEN_THRESHOLD="${LONG_PREFILL_TOKEN_THRESHOLD:-}"
+# An unset long-prefill threshold is derived from the validated token budget
+# below. Explicit empty preserves the stock scheduler.
 CHAT_TEMPLATE_HOST="${CHAT_TEMPLATE_HOST:-$SCRIPT_DIR/files/chat_template.jinja}"
 CHAT_TEMPLATE="${CHAT_TEMPLATE:-/opt/glm53/chat_template.jinja}"
 VIDEO_PATCH_HOST="${VIDEO_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm_video_placeholders.py}"
@@ -572,6 +572,16 @@ validate_numeric_config() {
     _glm53_canonical_positive_int MAX_MODEL_LEN "$MAX_MODEL_LEN" 1000000 || return
     _glm53_canonical_positive_int MAX_NUM_SEQS "$MAX_NUM_SEQS" 4096 || return
     _glm53_canonical_positive_int MAX_NUM_BATCHED_TOKENS "$MAX_NUM_BATCHED_TOKENS" 8388608 || return
+    # Unset derives from the validated budget; a caller/.env value (including
+    # explicitly empty, which keeps the stock scheduler) is never overwritten.
+    if [ "${LONG_PREFILL_TOKEN_THRESHOLD+x}" != x ]; then
+        LONG_PREFILL_TOKEN_THRESHOLD=$((MAX_NUM_BATCHED_TOKENS / 2))
+        if [ "$LONG_PREFILL_TOKEN_THRESHOLD" -lt 1 ]; then
+            LONG_PREFILL_TOKEN_THRESHOLD=1
+        elif [ "$LONG_PREFILL_TOKEN_THRESHOLD" -gt 3584 ]; then
+            LONG_PREFILL_TOKEN_THRESHOLD=3584
+        fi
+    fi
     if [ -n "${LONG_PREFILL_TOKEN_THRESHOLD:-}" ]; then
         _glm53_canonical_positive_int LONG_PREFILL_TOKEN_THRESHOLD \
             "$LONG_PREFILL_TOKEN_THRESHOLD" "$MAX_NUM_BATCHED_TOKENS" || return
