@@ -512,5 +512,75 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(probe, [])
 
 
+class Tp1LifecycleTests(unittest.TestCase):
+    """Regression cover for the standalone-harness model-parallel bug.
+    The production ``process_weights_after_loading`` path calls the real
+    ``get_tensor_model_parallel_world_size()``; standalone entry points
+    used to run with vLLM's initial ``_TP=None`` state and die with
+    ``AssertionError: tensor model parallel group is not initialized``.
+    These tests pin (1) that failure on genuinely uninitialized state,
+    (2) that ``single_rank_model_parallel`` establishes REAL TP=1 state
+    (genuine process group + genuine coordinators, no mocks), and
+    (3) that cleanup restores a usable clean process afterwards.
+    """
+
+    def setUp(self):
+        import importlib.util
+
+        if importlib.util.find_spec("vllm") is None:
+            self.skipTest("vllm not installed")
+        if importlib.util.find_spec("torch") is None:
+            self.skipTest("torch not installed")
+
+    def test_uninitialized_world_size_raises(self):
+        from vllm.distributed import (
+            get_tensor_model_parallel_world_size,
+            model_parallel_is_initialized,
+        )
+
+        self.assertFalse(model_parallel_is_initialized())
+        with self.assertRaisesRegex(AssertionError,
+                                     "tensor model parallel group"):
+            get_tensor_model_parallel_world_size()
+
+    def test_real_tp1_lifecycle_and_clean_restore(self):
+        import torch
+        from vllm.distributed import (
+            get_tensor_model_parallel_world_size,
+            model_parallel_is_initialized,
+        )
+        from _vllm_tp1 import single_rank_model_parallel
+
+        with single_rank_model_parallel() as world_size:
+            # REAL initialized state: genuine TP group of size 1.
+            self.assertEqual(world_size, 1)
+            self.assertTrue(model_parallel_is_initialized())
+            self.assertTrue(torch.distributed.is_initialized())
+            self.assertEqual(get_tensor_model_parallel_world_size(), 1)
+        # Cleanup restored a clean process: usable again, and the
+        # original failure mode is back (nothing leaked, nothing stubbed).
+        self.assertFalse(torch.distributed.is_initialized())
+        self.assertFalse(model_parallel_is_initialized())
+        with self.assertRaisesRegex(AssertionError,
+                                     "tensor model parallel group"):
+            get_tensor_model_parallel_world_size()
+        # A second lifecycle in the same process must still work.
+        with single_rank_model_parallel():
+            self.assertEqual(get_tensor_model_parallel_world_size(), 1)
+        self.assertFalse(model_parallel_is_initialized())
+
+    def test_entry_refuses_leaked_state(self):
+        from _vllm_tp1 import single_rank_model_parallel
+
+        with single_rank_model_parallel():
+            with self.assertRaisesRegex(RuntimeError, "already initialized"):
+                with single_rank_model_parallel():
+                    pass
+        # Outer cleanup still ran despite the inner failure.
+        from vllm.distributed import model_parallel_is_initialized
+
+        self.assertFalse(model_parallel_is_initialized())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
