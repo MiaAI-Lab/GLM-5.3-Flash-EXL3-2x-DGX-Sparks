@@ -6,8 +6,9 @@ unsupported KDA-fat retention falls back to Marlin.
 
 Performance, compiler and GPU-numerical results below are author-reported
 measurements of an earlier candidate. CPU hardening does not requalify them.
-The updated candidate still needs the latest completed TheGrill for native
-builds, kernel/graph parity, serving correctness, latency and memory capacity.
+Exact-head qualification evidence is recorded separately in
+docs/qualification-evidence.md; the refined claims there supersede the
+older numbers below wherever they differ.
 
 ## 1. EXL3 thin-decode fast path — `GLM53_EXL3_MOE_FAST=1`
 
@@ -34,9 +35,15 @@ N256, eight blocks per expert) is unchanged.
   literal `0` or `1`: the launcher rejects other values, including explicit
   empty and surrounding whitespace, before stopping services. Load-time
   validation also remains in place.
-* Compiler effect (SM121 `ptxas -v`): 128 regs / 84 B spill stores /
-  188 B spill loads / 88 B stack → 127 regs / zero spills / 16 B stack.
-* Measured (2x GB10 serving, same image, flag-only switch): C1 code
+* Compiler effect (exact-head SASS audit, host CUDA 13.0 toolkit on
+  `glm53_exl3_moe_fast_kernel<4,256>` vs stock `exl3_moe_kernel<4,256>`):
+  fast 127 regs / 16 B frame / 6 STL / 0 LDL (write-only stack slots,
+  no spilled value ever reloaded) vs stock 128 regs / 88 B frame /
+  37 STL / 39 LDL genuine spill traffic. Occupancy class unchanged.
+  (Supersedes the earlier ptxas-only note.)
+* Measured (historical, earlier head — superseded by
+docs/qualification-evidence.md §5: THIN +4.8–8.4% TheGrill A/B/A2,
+COMBINED +5.7–9.9%): C1 code
   +8.6%, C3 code +6.5–7.5%, C6 code +8.8%, mixed decode +11.5% at identical
   speculative acceptance; cold prefill unchanged. Numerical battery:
   fast-vs-stock rel RMSE ~4e-8 (repeat-noise level), graph replay clean.
@@ -56,9 +63,11 @@ and routes large-M prefill of the KDA `in_proj` through torch native FP8
   matching K, flattened `M = numel/K > 64` → fat path; otherwise Marlin. Per-capture-size
   CUDA graphs bake the branch taken at capture. `o_proj`/`f_b`/`g_b` and
   dense projections stay Marlin by measurement.
-* Boundary evidence (SM121): Marlin wins every measured M ≤ 64; the fat
-  path wins every measured M ≥ 65 (1.5x at 65, 2.7x at 220, 3.2–3.8x at
-  1536–3683). Serving Ms split cleanly (decode ≤ 220, prefill ≥ 1536).
+* Boundary evidence (SM121, exact-head re-measured with true-Marlin
+  control and production fat path incl. fused Triton quant): Marlin wins
+every measured M ≤ 64; the fat path wins every measured M ≥ 65
+(1.8x at 65, 3.3x at 220, 5.9x at 1536, 6.2x at 3584). Serving Ms split
+cleanly (decode ≤ 220, prefill ≥ 1536).
 * Load-time retention (fail-closed): only for `kda` group layers with the
   measured `[12576, 4096]` geometry on SM121 with a `_scaled_mm` proven
   by a real M=65 production-branch launch probe on each retained layer at
@@ -72,13 +81,16 @@ and routes large-M prefill of the KDA `in_proj` through torch native FP8
   fp32 division and scale floor `max(row_amax / 448, 1e-12)`, including zero
   and tiny rows. CPU tensor-value checks cover the eager path. Updated GPU
   parity assertions require bit identity; that GPU check is still deferred.
-* Measured (same image, flag-only switch): decode within ±1.5% of Marlin
+* Measured (historical, earlier head — superseded by
+docs/qualification-evidence.md §5: FAT prefill +18–19% engineering A/B,
+decode ±1.4% TheGrill A/B/A2): decode within ±1.5% of Marlin
   (M≤64 never leaves Marlin); cold prefill +20% at 16k and 100k; mixed
   decode +4.9%, mixed prefill +8.1%. Hybrid-vs-Marlin KL ≤ 5.4e-3 with
   flips only at low-confidence positions; generation canaries pass.
-* Memory cost: ~1.75 GB/rank (~3.5 GB cluster) of retained FP8; KV
-  capacity, max context, and concurrency unchanged in the tested
-  configuration (KV stays pinned).
+* Memory cost: +1.63 GiB/rank measured (worker rank, fresh boots:
+  79.65 → 81.28 GiB loaded model, exactly the predicted 34 x 49.2 MiB);
+  KV stays pinned at 14.0 GiB in both arms, and 100k context + C6
+  concurrency verified usable. (~1.75 GB/rank estimate superseded.)
 * Tests: `tests/test_kda_fp8_fat.py` (CPU dispatch/retention guards and actual
   CPU tensor values), `tests/test_kda_fp8_fat_gpu.py` (device retention,
   numerics and graphs), `tests/test_kda_logprob_compare.py` (CPU screening
@@ -110,6 +122,10 @@ accumulation, CUTLASS/Inductor FP8 GEMMs on SM121 (no usable kernel in
 this toolchain), and BF16 duplicate weights (unnecessary).
 
 ## Reproducing the serving numbers
+
+The table below is HISTORICAL (2026-09-13, earlier head) and is
+superseded by docs/qualification-evidence.md §5. Retained for
+provenance; do not quote as current claims.
 
 Combined upstream-vs-candidate A/B/A2 campaign (2026-09-13, 2x GB10,
 fresh builds from `upstream/main` vs this branch, all other settings
