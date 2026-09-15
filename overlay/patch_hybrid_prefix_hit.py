@@ -217,6 +217,17 @@ FINE_NEW = """            unsupported_partial_hit_managers = {  # [glm53-hybrid-
                 and not manager.supports_fine_grained_hash_lookup
                 and manager.block_size != hash_block_size
             }
+            _glm53_fine_unsupported = unsupported_partial_hit_managers
+            if _glm53_fine_unsupported and not getattr(
+                self, "_glm53_fine_logged", False
+            ):
+                self._glm53_fine_logged = True
+                logger.warning(
+                    "[glm53-hybrid-apc-fine] fine-grained lookup still disabled "
+                    "by participating managers: %s (hash_block_size=%s)",
+                    sorted(_glm53_fine_unsupported),
+                    hash_block_size,
+                )
 """
 
 INIT_OLD = """        self.verify_and_split_kv_cache_groups()
