@@ -17,15 +17,26 @@ opts in:
 `fair` is not affected by either knob, and an explicit `cap:N` keeps its cap.
 The knobs are validated (`0..1000000`, `0..600000`, `64..8192`) and forwarded on
 every rank; caller exports keep precedence over `.env`, including explicitly
-empty values, through the generic `_caller_overrides` snapshot. v1–v5 images are
-unpatched and re-patched to v6 with the same fail-closed drift refusal, and the
-installer verifies a v6 image by unpatch/re-patch round-trip before trusting its
-marker.
+empty values, through the generic `_caller_overrides` snapshot. Migration is
+fail-closed for every advertised version: the legacy helper site is validated
+*before* anything is removed (v1/v2/v5 against the published helper text by
+sha256, v3/v4 against the canonical site structure because those intermediate
+bodies were never published, v6 against the installer's own text), the frozen
+gate sites are inverted, one exact byte range is removed, and the whole file is
+round-trip checked -- re-adding the same span and re-applying that version's
+frozen sites must reproduce the input byte-for-byte. A drifted, duplicated,
+decorated, marker-only or unpublished variant (including the unversioned
+`"0"`-default build, whose baked default is a held direction) is refused with no
+write.
 
 CPU behavior coverage: default-off and zero-disables, both transition
 boundaries, requeue survival, explicit-cap precedence, `off`/`fair` isolation,
-knob bounds and invalid-value fallback, plus the v0–v5 migration matrix,
-re-apply idempotence and drift/marker-only refusal.
+knob bounds and invalid-value fallback, plus the v0–v5 migration matrix against
+the pinned scheduler, built from the published helper artefacts (v1/v2/v5) and
+the canonical v3/v4 site. Every migration must land on exactly the bytes a fresh
+install of the pristine scheduler produces and must be idempotent; drift,
+duplication, decoration, marker-only patches and an unpublished variant are
+asserted to fail without a write.
 
 ## Unreleased — omitted-only output-token defaults
 
