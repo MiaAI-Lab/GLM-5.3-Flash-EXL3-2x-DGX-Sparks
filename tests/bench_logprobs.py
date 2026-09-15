@@ -138,7 +138,7 @@ def compare(a_path, b_path):
             n += 1
         kl = f"{kl_sum / n:13.4f}" if n else f"{'unavailable':>13}"
         ag = f"{agree / n:13.3f}" if n else f"{'unavailable':>13}"
-        print(f"{name:12s} {n:6d} {len(pa) - 1 - n:5d} {kl} {ag}")
+        print(f"{name:12s} {n:6d} {max(0, len(pa) - 1) - n:5d} {kl} {ag}")
 
 
 if __name__ == "__main__":

@@ -43,6 +43,10 @@ class CompareDiagnosticsTest(unittest.TestCase):
         self.assertTrue(rows, f"no row for {name!r} in:\n{out}")
         return rows[0]
 
+    def test_empty_captures_have_no_comparable_or_excluded_positions(self):
+        row = self.row(run_compare({"t": []}, {"t": []}), "t")
+        self.assertEqual(tuple(map(int, row.split()[1:3])), (0, 0))
+
     def test_no_comparable_position_is_unavailable(self):
         out = run_compare({"t": [None, pos("a", "b")]}, {"t": [None, pos("c", "d")]})
         row = self.row(out, "t")
