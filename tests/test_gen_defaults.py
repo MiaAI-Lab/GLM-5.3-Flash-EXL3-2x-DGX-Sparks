@@ -344,7 +344,12 @@ def _guard_source() -> str:
     begin = source.index("# GLM53 numeric config guard (begin)")
     end_marker = "# GLM53 numeric config guard (end)"
     end = source.index(end_marker, begin) + len(end_marker)
-    return source[begin:end]
+    initializers = "\n".join(line for line in source.splitlines() if line.startswith((
+        "GLM53_MIXED_PREFILL_WARM_TOKENS=",
+        "GLM53_MIXED_PREFILL_MAX_WAIT_MS=",
+        "GLM53_MIXED_PREFILL_LATE_CAP=",
+    )))
+    return initializers + "\n" + source[begin:end]
 
 
 def _validate(value: str | None, max_model_len: int = 1000000) -> subprocess.CompletedProcess[str]:

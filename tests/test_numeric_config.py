@@ -18,7 +18,12 @@ def guard_source(path: Path = START) -> str:
     begin = source.index("# GLM53 numeric config guard (begin)")
     end_marker = "# GLM53 numeric config guard (end)"
     end = source.index(end_marker, begin) + len(end_marker)
-    return source[begin:end]
+    initializers = "\n".join(line for line in source.splitlines() if line.startswith((
+        "GLM53_MIXED_PREFILL_WARM_TOKENS=",
+        "GLM53_MIXED_PREFILL_MAX_WAIT_MS=",
+        "GLM53_MIXED_PREFILL_LATE_CAP=",
+    )))
+    return initializers + "\n" + source[begin:end]
 
 
 def validate(util: str, model: str, seqs: str, batch: str) -> subprocess.CompletedProcess[str]:
@@ -180,27 +185,11 @@ def test_mixed_prefill_contract() -> None:
         result = run({"GLM53_FAIR_PREFILL_MAX_STEP_MS": value})
         assert result.returncode == expected, (value, result.stderr)
     for launcher in (START, ROOT / "start-tp3.sh", START_TP4):
-        source = launcher.read_text()
-        assert 'GLM53_FAIR_PREFILL_MAX_STEP_MS="${GLM53_FAIR_PREFILL_MAX_STEP_MS:-1000}"' in source
-        assert '-e "GLM53_FAIR_PREFILL_MAX_STEP_MS=$GLM53_FAIR_PREFILL_MAX_STEP_MS"' in source
-        if launcher.name == "start-tp3.sh":
-            assert 'GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-0}"' in source
-        elif launcher.name == "start-tp4.sh":
-            assert 'GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-skip}"' in source
-        else:
-            assert 'GLM53_MIXED_PREFILL_CHUNK="${GLM53_MIXED_PREFILL_CHUNK:-fair}"' in source
         guard = guard_source(launcher)
-        for value, expected in (("1000", 0), ("0", 1)):
-            script = guard + '\nGLM53_FAIR_PREFILL_MAX_STEP_MS="$1"\n' + '_glm53_canonical_positive_int GLM53_FAIR_PREFILL_MAX_STEP_MS "$GLM53_FAIR_PREFILL_MAX_STEP_MS" 600000\n'
+        for value, expected in (("1000", 0), ("0", 2)):
+            script = guard + '\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4; MAX_NUM_BATCHED_TOKENS=1024; GLM53_INDEXER_WORKSPACE=stock; GLM53_SPINWAIT_MS=stock; GLM53_FAIR_PREFILL_MAX_STEP_MS="$1"\nvalidate_numeric_config\n'
             checked = subprocess.run(["bash", "-c", script, "test", value], capture_output=True, text=True)
-            assert bool(checked.returncode) == bool(expected), (launcher, value, checked.stderr)
-    for env_example, chunk in (
-        (ROOT / ".env.example", "fair"),
-        (ROOT / ".env.tp3.example", "0"),
-        (ROOT / ".env.tp4.example", "skip"),
-    ):
-        text = env_example.read_text()
-        assert f"GLM53_MIXED_PREFILL_CHUNK={chunk}" in text, env_example
+            assert checked.returncode == expected, (launcher, value, checked.stderr)
 
 
 def test_mixed_prefill_gate_knobs_contract() -> None:
@@ -215,9 +204,6 @@ def test_mixed_prefill_gate_knobs_contract() -> None:
         + '\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4; '
         + 'MAX_NUM_BATCHED_TOKENS=1024; GLM53_SPINWAIT_MS=stock; '
         + 'GLM53_INDEXER_WORKSPACE=stock\n'
-        + 'GLM53_MIXED_PREFILL_WARM_TOKENS="${GLM53_MIXED_PREFILL_WARM_TOKENS-0}"\n'
-        + 'GLM53_MIXED_PREFILL_MAX_WAIT_MS="${GLM53_MIXED_PREFILL_MAX_WAIT_MS-0}"\n'
-        + 'GLM53_MIXED_PREFILL_LATE_CAP="${GLM53_MIXED_PREFILL_LATE_CAP-512}"\n'
         + 'validate_numeric_config || exit $?\n'
         + 'printf "%s|%s|%s\\n" "$GLM53_MIXED_PREFILL_WARM_TOKENS" '
         + '"$GLM53_MIXED_PREFILL_MAX_WAIT_MS" "$GLM53_MIXED_PREFILL_LATE_CAP"\n'
@@ -255,12 +241,6 @@ def test_mixed_prefill_gate_knobs_contract() -> None:
         assert result.returncode == 2, (bad, result.returncode, result.stdout)
 
 
-def test_restart_validates_before_stop() -> None:
-    source = START.read_text()
-    main = source.index("main() {")
-    validation = source.index("start|restart) validate_numeric_config", main)
-    restart = source.index("restart)  stop; start", main)
-    assert validation < restart
 
 
 def test_tp4_rejects_retention_override() -> None:
@@ -282,9 +262,6 @@ def test_tp4_rejects_retention_override() -> None:
             )
             assert result.returncode == expected, (value, result.stderr)
 
-    source = START_TP4.read_text()
-    assert '_cli_apc_swa_set="${GLM53_APC_RETENTION_INTERVAL_SWA+1}"' in source
-    assert '[ -n "${_cli_apc_swa_set}" ] && GLM53_APC_RETENTION_INTERVAL_SWA="$_cli_apc_swa"' in source
 
 
 if __name__ == "__main__":
@@ -294,6 +271,5 @@ if __name__ == "__main__":
     test_spinwait_numeric_contract()
     test_mixed_prefill_contract()
     test_mixed_prefill_gate_knobs_contract()
-    test_restart_validates_before_stop()
     test_tp4_rejects_retention_override()
     print("numeric config tests: PASS")

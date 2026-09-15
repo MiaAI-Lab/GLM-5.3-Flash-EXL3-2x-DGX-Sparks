@@ -110,7 +110,12 @@ def guard_source() -> str:
     begin = text.index("# GLM53 numeric config guard (begin)")
     end_marker = "# GLM53 numeric config guard (end)"
     end = text.index(end_marker, begin) + len(end_marker)
-    return text[begin:end]
+    initializers = "\n".join(line for line in text.splitlines() if line.startswith((
+        "GLM53_MIXED_PREFILL_WARM_TOKENS=",
+        "GLM53_MIXED_PREFILL_MAX_WAIT_MS=",
+        "GLM53_MIXED_PREFILL_LATE_CAP=",
+    )))
+    return initializers + "\n" + text[begin:end]
 
 
 def base_env(**extra: str) -> dict[str, str]:
