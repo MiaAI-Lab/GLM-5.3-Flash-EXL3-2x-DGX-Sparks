@@ -13,7 +13,7 @@ import contextlib
 import io
 import os
 from pathlib import Path
-import runpy
+import importlib.util
 import sys
 from types import SimpleNamespace
 import unittest
@@ -22,9 +22,12 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 PATCH = ROOT / "overlay" / "patch_scheduler_decode_floor.py"
-OVERLAY = runpy.run_path(str(PATCH))
+spec = importlib.util.spec_from_file_location("glm53_prefill_v6", PATCH)
+OVERLAY = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = OVERLAY
+spec.loader.exec_module(OVERLAY)
 HELPER_NS: dict = {"os": os, "time": __import__("time")}
-exec(OVERLAY["_helper_text"](), HELPER_NS)
+exec(OVERLAY._helper_text(), HELPER_NS)
 POLICY = HELPER_NS["_Glm53MixedPrefill"]
 MIXED_KEYS = ("GLM53_MIXED_PREFILL_CHUNK", "GLM53_MIXED_PREFILL_WARM_TOKENS",
               "GLM53_MIXED_PREFILL_MAX_WAIT_MS", "GLM53_MIXED_PREFILL_LATE_CAP")
