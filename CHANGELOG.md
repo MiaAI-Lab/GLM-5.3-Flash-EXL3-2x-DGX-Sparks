@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased — opt-in before-last-user reasoning-effort placement
+
+`files/chat_template.jinja` keeps main's head placement by default. The
+`reasoning_effort_placement="before_last_user"` template kwarg opts into moving
+the directive immediately before the final user turn when rendering a
+generation prompt. History renders and conversations without a user retain
+head placement; invalid placement values are rejected.
+
+CPU checks cover rendering boundaries, literal role-marker text and real
+HEAD/PRE benchmark rendering. Default and explicit-head output match main
+byte-for-byte across 224 rendering cases.
+
+Earlier GPU/cache measurements concern the prior candidate, not qualification
+of this revision. The latest completed TheGrill must still check correctness,
+tool/stream behavior, cached tokens, reasoning cost and latency before this
+option is recommended or made default.
+
 ## Unreleased — omitted-only output-token defaults
 
 `DEFAULT_MAX_NEW_TOKENS` now changes only omitted request limits, including

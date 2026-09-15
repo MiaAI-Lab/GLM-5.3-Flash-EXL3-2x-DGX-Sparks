@@ -5,7 +5,18 @@
 {%- set thinking_enabled = true -%}
 {%- endif -%}
 {%- set effective_reasoning_effort = reasoning_effort if reasoning_effort is defined and reasoning_effort in ['low', 'high'] else 'max' -%}
-{%- if thinking_enabled and effective_reasoning_effort is not none -%}<|system|>Reasoning Effort: {{ effective_reasoning_effort | capitalize }}{%- endif -%}
+{%- set ns = namespace(last_user_index=-1) -%}
+{%- for m in messages %}
+    {%- if m.role == 'user' %}
+        {%- set ns.last_user_index = loop.index0 -%}
+    {%- endif %}
+{%- endfor %}
+{%- set effort_placement = reasoning_effort_placement | default('head') -%}
+{%- if effort_placement not in ['head', 'before_last_user'] -%}
+{{- raise_exception("reasoning_effort_placement must be head or before_last_user") -}}
+{%- endif -%}
+{%- set move_effort = effort_placement == 'before_last_user' and add_generation_prompt and ns.last_user_index >= 0 -%}
+{%- if thinking_enabled and not move_effort -%}<|system|>Reasoning Effort: {{ effective_reasoning_effort | capitalize }}{%- endif -%}
 {%- set clear_thinking = clear_thinking if clear_thinking is defined else false -%}
 {%- if tools -%}
 {%- macro tool_to_json(tool) -%}
@@ -134,14 +145,10 @@ For each function call, output the function name and arguments within the follow
     {%- endfor -%}
     {%- if ns_f.found -%}1{%- endif -%}
 {%- endmacro -%}
-{%- set ns = namespace(last_user_index=-1) -%}
-{%- for m in messages %}
-    {%- if m.role == 'user' %}
-        {%- set ns.last_user_index = loop.index0 -%}
-    {%- endif %}
-{%- endfor %}
 {%- for m in messages -%}
-{%- if m.role == 'user' -%}<|user|>{{ visible_text(m.content) }}
+{%- if m.role == 'user' -%}
+{%- if move_effort and thinking_enabled and loop.index0 == ns.last_user_index -%}<|system|>Reasoning Effort: {{ effective_reasoning_effort | capitalize }}{%- endif -%}
+<|user|>{{ visible_text(m.content) }}
 {%- elif m.role == 'assistant' -%}
 <|assistant|>
 {%- set content = visible_text(m.content) %}

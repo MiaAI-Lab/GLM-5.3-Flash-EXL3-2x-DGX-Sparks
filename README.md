@@ -786,8 +786,8 @@ curl -s http://127.0.0.1:8888/v1/chat/completions \
 
 Thinking defaults on. Disable it with the **top-level** JSON field
 `"chat_template_kwargs": {"enable_thinking": false}`. This closes the empty
-thinking block in the generation prompt. The `Reasoning Effort:` line itself
-renders unconditionally since #63 (prefix-cache stability), thinking on or off.
+thinking block in the generation prompt and omits the `Reasoning Effort:` line.
+With thinking enabled, the directive remains at the prompt head by default.
 
 Do not send a literal nested `extra_body` object over raw HTTP; `extra_body` is
 an OpenAI Python SDK option that merges its contents into the top-level request.
@@ -819,10 +819,29 @@ $ curl -s $BASE/v1/chat/completions -d '{...,"reasoning_effort":"low"}' | jq '.c
 ["annotations","audio","content","function_call","reasoning","refusal","role"]
 ```
 
-**Do not vary `reasoning_effort` per request within a conversation.** The effort
-word lands at char 39 of the prompt, so changing it is a full prefix-cache miss
-on an otherwise-warm conversation, not a partial one.
-`tests/test_chat_template.py` pins that shape.
+**Keep `reasoning_effort` constant within a conversation by default.** Its
+directive is at the prompt head, so changing it invalidates the cached prefix.
+
+Experimental placement is available through
+`"chat_template_kwargs": {"reasoning_effort_placement": "before_last_user"}`.
+The default is `"head"`; other values are rejected. With a generation prompt
+and a user turn present, the experimental mode emits the directive immediately
+before the last actual user message. Literal marker text does not select the
+insertion point. Histories without a user turn, and renders without a generation
+prompt, retain head placement. Thinking-off requests omit the directive in both
+modes. Keep the placement mode constant for the comparison.
+
+CPU rendering tests establish placement and unchanged history bytes, **not**
+model correctness, actual cache reuse, or acceptable reasoning cost. Previous
+placement evaluations found correctness regressions and cost flags; those are
+not cleared by making the feature opt-in. Unset reasoning effort still means
+**Max**, which can substantially increase reasoning and completion tokens.
+Before enabling this mode, qualify head versus experimental placement with the
+completed TheGrill version: raw/chat/continuation modes, literal-marker data,
+no-user histories, tools, and cold/warm cache conditions. Require no new strict
+correctness failures, and predeclare reasoning/completion-token and latency
+budgets at the same effort and output cap. A cache-hit gain alone is not an
+acceptance gate. No default change is approved by the CPU tests.
 
 Needs: Docker (no sudo) on both nodes, python3 on the head plus a host Python with Jinja2 (verifies mounted inputs before `restart` stops anything), passwordless SSH head → worker,
 `hf` / `huggingface-cli` + `curl` + `rsync` on the head, ~180 GiB free on the
