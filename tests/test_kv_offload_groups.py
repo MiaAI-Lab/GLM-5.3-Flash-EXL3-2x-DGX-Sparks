@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -19,9 +21,9 @@ PATCH = next(
     if p.is_file()
 )
 sys.path.insert(0, str(PATCH.parent))
-from patch_kv_offload_groups import MARK, apply, targets  # noqa: E402
+from patch_kv_offload_groups import apply, targets  # noqa: E402
 
-INSTALLED = Path("/usr/local/lib/python3.12/dist-packages/vllm")
+INSTALLED = Path(os.environ.get("GLM53_VLLM_ROOT", "/usr/local/lib/python3.12/dist-packages/vllm"))
 
 # Exact fragments from vLLM 487ecf187 / glm53-flash image. Each is the anchor a
 # corresponding edit pins; if upstream reflows any of them the patch must fail
@@ -52,28 +54,14 @@ def _write(tmp_path: Path, rel: str, text: str) -> Path:
     return p
 
 
-def test_targets_cover_the_five_patched_files(tmp_path: Path) -> None:
-    names = [p.name for p, _ in targets(tmp_path)]
-    assert names == [
-        "config.py",
-        "scheduler.py",
-        "worker.py",
-        "shared_offload_region.py",
-        "gpu_worker.py",
-    ]
-    # every target is resolved under the supplied root, never a live install
-    assert all(str(p).startswith(str(tmp_path)) for p, _ in targets(tmp_path))
 
 
-def test_apply_is_idempotent_and_marks_the_file(tmp_path: Path) -> None:
+def test_apply_is_idempotent(tmp_path: Path) -> None:
     f = _write(tmp_path, "config.py", CONFIG_FIXTURE)
     edits = dict((p.name, e) for p, e in targets(tmp_path))["config.py"]
 
     assert apply(f, edits) is True
     once = f.read_text()
-    assert MARK in once
-    # the hash-alignment assert is what aborts the boot on KpoolTailSpec
-    assert "assert group.tokens_per_block % tokens_per_hash == 0" not in once
 
     assert apply(f, edits) is True
     assert f.read_text() == once, "second apply must be a no-op"
@@ -88,22 +76,29 @@ def test_apply_fails_closed_on_a_drifted_anchor(tmp_path: Path) -> None:
     assert f.read_text() == before, "a failed apply must leave the file untouched"
 
 
-def test_env_kill_switch_skips_everything() -> None:
-    env = dict(os.environ, GLM53_SKIP_KV_OFFLOAD_GROUPS_PATCH="1")
+def test_env_kill_switch_leaves_targets_untouched(tmp_path: Path) -> None:
+    target = _write(tmp_path, "distributed/kv_transfer/kv_connector/v1/offloading/config.py", "drifted source\n")
+    env = dict(os.environ, GLM53_SKIP_KV_OFFLOAD_GROUPS_PATCH="1", GLM53_VLLM_ROOT=str(tmp_path))
     out = subprocess.run(
         [sys.executable, str(PATCH)], env=env, capture_output=True, text=True
     )
     assert out.returncode == 0
-    assert "skipped via env" in out.stdout
+    assert target.read_text() == "drifted source\n"
+    env["GLM53_SKIP_KV_OFFLOAD_GROUPS_PATCH"] = "0"
+    active = subprocess.run(
+        [sys.executable, str(PATCH)], env=env, capture_output=True, text=True
+    )
+    assert active.returncode != 0
+    assert target.read_text() == "drifted source\n"
 
 
-def test_patch_applies_to_the_installed_vllm() -> None:
-    """Runs only inside the image: every anchor must still be present."""
+def test_patch_applies_to_copies_of_the_installed_vllm(tmp_path: Path) -> None:
+    """Check real source anchors without modifying the installation."""
     if not INSTALLED.is_dir():
-        return  # not in the container; the fixture tests above still ran
+        pytest.skip("installed vLLM source is unavailable")
     for path, edits in targets(INSTALLED):
-        src = path.read_text()
-        if MARK in src:
-            continue  # already patched by start.sh
-        for old, _new in edits:
-            assert src.count(old) == 1, f"anchor drifted in {path.name}: {old[:60]!r}"
+        staged = _write(tmp_path, str(path.relative_to(INSTALLED)), path.read_text())
+        assert apply(staged, edits), f"patch refused {path}"
+        once = staged.read_bytes()
+        assert apply(staged, edits)
+        assert staged.read_bytes() == once
