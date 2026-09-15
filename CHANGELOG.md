@@ -6,7 +6,13 @@ The decode-floor overlay validates an already-patched scheduler by unpatching an
 re-patching it before accepting it: a marker alone is never trusted. Drift,
 partial, duplicated or decorated patches fail without changing the source, a
 re-apply is byte-identical, and a legacy v1–v5 image migrates to the current
-installer version (v6) without changing the operator's policy value.
+installer version (v6) without changing the operator's policy value. The legacy
+helper site is validated *before* anything is removed (v1/v2/v5 against the
+published helper text by sha256, v3/v4 against the canonical site structure
+because those intermediate bodies were never published, v6 against the
+installer's own text), one exact byte range is removed, and the whole file is
+round-trip checked: re-adding the same span and re-applying that version's frozen
+sites must reproduce the input byte-for-byte.
 
 The current version is the same single patcher used by the gate work in #80, so
 the opt-in `GLM53_MIXED_PREFILL_WARM_TOKENS` / `_MAX_WAIT_MS` forms are accepted
@@ -14,11 +20,13 @@ rather than rejected at container start. The proposed TP=2 `CHUNK=0` default is
 **not** landed here: it stays a gated candidate until the contention
 qualification below; launcher defaults are unchanged.
 
-CPU checks cover the migration matrix (pristine and v1–v5 images), re-apply
-idempotence, drift and marker-only refusal, and the progress contract of each
-policy (stock/`off`, `skip`, bounded chunk). Live contention, fairness,
-throughput and latency qualification remains deferred to the latest completed
-TheGrill.
+CPU checks cover the migration matrix (pristine and v1–v5 images built from the
+published helper artefacts) against the pinned scheduler, where every migration
+must land on exactly the bytes a fresh install of the pristine scheduler
+produces, re-apply idempotence, refusal of drifted, duplicated, decorated,
+marker-only and unpublished variants, and the progress contract of each policy
+(stock/`off`, `skip`, bounded chunk). Live contention, fairness, throughput and
+latency qualification remains deferred to the latest completed TheGrill.
 
 ## Unreleased — omitted-only output-token defaults
 

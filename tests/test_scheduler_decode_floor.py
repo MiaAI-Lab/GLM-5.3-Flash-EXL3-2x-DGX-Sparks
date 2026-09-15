@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import contextlib
 import importlib.util
 import io
@@ -22,6 +23,14 @@ mod = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = mod
 spec.loader.exec_module(mod)
 POLICY = mod._Glm53MixedPrefill
+# Real published helper artefacts (provenance in the fixture module); the
+# migration matrix builds its legacy images from these, not from stubs.
+FIXTURE = ROOT / 'tests/fixtures/legacy_scheduler_helpers.py'
+fspec = importlib.util.spec_from_file_location('legacy_scheduler_helpers', FIXTURE)
+fixtures = importlib.util.module_from_spec(fspec)
+sys.modules[fspec.name] = fixtures
+fspec.loader.exec_module(fixtures)
+LEGACY_HELPERS = dict(fixtures.HELPERS)
 PATCHED_SOURCE = None
 FAIR_ENV = {
     'GLM53_MIXED_PREFILL_CHUNK': 'fair',
@@ -435,6 +444,28 @@ class FairTests(unittest.TestCase):
         self.assertEqual(ns['input_budget'], 0)
 
 
+def structural_site(marker, members, computed):
+    """A v3/v4 site with the canonical structure (those bodies were never published)."""
+    head = f'\nclass _Glm53MixedPrefill:  {marker}\n    """Legacy fair-policy helper."""\n'
+    body = ''.join(f'    def {name}(self, *a):\n        return None\n' for name in members)
+    tail = (f'\n_GLM53_MIXED = _Glm53MixedPrefill()  # {marker}\n\n'
+            f'def _glm53_mixed_prefill_policy(sched, request{", computed=None" if computed else ""}):  # {marker}\n'
+            f'    return _GLM53_MIXED.cap_for(sched, request{", computed" if computed else ""})\n\n\n')
+    return head + body + tail
+
+
+def legacy_image(clean, version, helpers):
+    """Build the byte image version `version` installed, from its own artefacts."""
+    text = clean
+    if 'import os\n' not in text.split('import time\n', 1)[0]:
+        text = text.replace(mod.IMPORT_OLD, mod.IMPORT_NEW, 1)
+    text = text.replace(mod.NEEDLE, helpers[version] + mod.NEEDLE, 1)
+    for new, old, label in mod.LEGACY_PAIRS[version]:
+        assert text.count(old) == 1, (version, label)
+        text = text.replace(old, new, 1)
+    return text
+
+
 def installation_tests():
     src = next((p for p in [Path(os.environ.get('GLM53_SCHEDULER_PY_SRC', '/missing')),
                            Path('/usr/local/lib/python3.12/dist-packages/vllm/v1/core/sched/scheduler.py'),
@@ -442,53 +473,73 @@ def installation_tests():
     if src is None:
         raise SystemExit('Set GLM53_SCHEDULER_PY_SRC to the pinned scheduler source')
     clean = src.read_text()
-    for marker, fn in [(mod.MARK_V6, mod.unpatch_v6), (mod.MARK_V5, mod.unpatch_v5), (mod.MARK_V4, mod.unpatch_v4), (mod.MARK_V3, mod.unpatch_v3), (mod.MARK_V2, mod.unpatch_v2)]:
-        if marker in clean:
-            clean = fn(clean)
-    if mod.V1_HELPER_START in clean:
-        clean = mod.unpatch_v1(clean)
+    for version in (6, 5, 4, 3, 2, 1):
+        if mod.LEGACY_MARK[version] in clean or (version == 1 and mod.V1_HELPER_START in clean):
+            exact = mod._helper_text() if version == 6 else None
+            clean, _, _ = mod._unpatch(clean, version, exact=exact)
+            break
+    helpers = dict(LEGACY_HELPERS)
+    helpers[3] = structural_site(mod.MARK_V3, mod.LEGACY_HELPER_MEMBERS[3], computed=False)
+    helpers[4] = structural_site(mod.MARK_V4, mod.LEGACY_HELPER_MEMBERS[4], computed=True)
+
+    # The published artefacts are exactly the sites the validator admits: a
+    # fixture that drifts from the registry fails here, so the shipped registry
+    # and the fixtures cannot diverge silently.
+    for version, text in sorted(LEGACY_HELPERS.items()):
+        assert hashlib.sha256(text.encode()).hexdigest() == mod.LEGACY_HELPER_SHA256[version]
+        assert len(text) == mod.LEGACY_HELPER_LEN[version]
+
     with tempfile.TemporaryDirectory() as temp:
-        for version in (0, 1, 2, 3, 4, 5):
-            text = clean
-            if version:
-                marker = mod.MARK if version == 1 else getattr(mod, f'MARK_V{version}')
-                helper = ('\ndef _glm53_mixed_prefill_policy(running, current):\n    return 0\n\n' if version == 1 else
-                          f'\nclass _Glm53MixedPrefill:  {marker}\n    pass\n\n')
-                needle = 'from vllm.compilation.cuda_graph import CUDAGraphStat\n'
-                text = text.replace(needle, helper + needle, 1)
-                if version >= 4:
-                    for new, old, label in getattr(mod, f'V{version}_PAIRS'):
-                        text = mod.replace_once(text, old, new, label)
-                else:
-                    names = ['RUNNING', 'WAITING'] if version == 1 else ['BEGIN', 'OBS', 'RUNNING', 'WAITING', 'ALIGN', 'RUNNING_MAMBA', 'WAITING_MAMBA']
-                    if version == 3:
-                        names.append('FIN')
-                    for name in names:
-                        old = mod.V3_FIN_OLD if name == 'FIN' else getattr(mod, name + '_OLD')
-                        text = mod.replace_once(text, old, getattr(mod, f'V{version}_{name}_NEW'), name)
-            target = Path(temp) / f'scheduler_v{version}.py'
+        def run(text):
+            target = Path(temp) / 'scheduler.py'
             target.write_text(text)
             env = {**os.environ, 'GLM53_SCHEDULER_PY': str(target), 'GLM53_MIXED_PREFILL_CHUNK': 'skip'}
-            subprocess.run([sys.executable, str(PATCH)], env=env, check=True, capture_output=True)
-            installed = target.read_text()
-            compile(installed, str(target), 'exec')
-            assert mod.MARK_V6 in installed and mod.MARK_V5 not in installed and mod.MARK_V4 not in installed and mod.MARK_V3 not in installed and mod.MARK_V2 not in installed
-            subprocess.run([sys.executable, str(PATCH)], env=env, check=True, capture_output=True)
-            assert target.read_text() == installed
-            # Marker alone must not suppress validation or overwrite source drift.
-            drifted = installed.replace('_GLM53_MIXED.finish_step(self, scheduler_output)', '_GLM53_MIXED.finish_step_changed(self, scheduler_output)', 1)
-            target.write_text(drifted)
-            result = subprocess.run([sys.executable, str(PATCH)], env=env, capture_output=True)
-            assert result.returncode != 0 and target.read_text() == drifted
-        # A marker with no patch behind it (hand-edited comment) is refused too.
-        marker_only = clean + f'\n{mod.MARK_V6}\n'
-        target = Path(temp) / 'scheduler_marker_only.py'
-        target.write_text(marker_only)
-        env = {**os.environ, 'GLM53_SCHEDULER_PY': str(target), 'GLM53_MIXED_PREFILL_CHUNK': 'skip'}
-        result = subprocess.run([sys.executable, str(PATCH)], env=env, capture_output=True)
-        assert result.returncode != 0 and target.read_text() == marker_only
-        return installed
+            proc = subprocess.run([sys.executable, str(PATCH)], env=env, capture_output=True)
+            return proc.returncode, target.read_text()
 
+        rc, reference = run(clean)
+        assert rc == 0 and mod.MARK_V6 in reference, 'pristine scheduler must install v6'
+
+        # Every advertised legacy version migrates to exactly the bytes a fresh
+        # install of the pristine scheduler produces, so no scheduler byte
+        # outside the helper and its gate sites is added or dropped -- and the
+        # result is a fixed point.
+        for version in (1, 2, 3, 4, 5):
+            image = legacy_image(clean, version, helpers)
+            rc, installed = run(image)
+            assert rc == 0, f'v{version} image must migrate'
+            assert installed == reference, f'v{version} migration moved unrelated scheduler bytes'
+            for older in (mod.MARK, mod.MARK_V2, mod.MARK_V3, mod.MARK_V4, mod.MARK_V5):
+                assert older not in installed, f'v{version} left {older} behind'
+            rc, again = run(installed)
+            assert rc == 0 and again == installed, f'v{version} migration must be idempotent'
+
+        # Refusals: nonzero exit, no write, source untouched.
+        v1_signature = ('GLM53_MIXED_PREFILL_CHUNK", "skip"', 'GLM53_MIXED_PREFILL_CHUNK", "0"')
+        fake_site = (f'\nclass _Glm53MixedPrefill:  {mod.MARK_V3}\n    pass\n\n'
+                     f'\n_GLM53_MIXED = _Glm53MixedPrefill()  # {mod.MARK_V3}\n\n'
+                     f'def _glm53_mixed_prefill_policy(sched, request):  # {mod.MARK_V3}\n'
+                     f'    return _GLM53_MIXED.cap_for(sched, request)\n\n\n')
+        v5 = legacy_image(clean, 5, helpers)
+        v1 = legacy_image(clean, 1, helpers)
+        refused = {
+            'marker-only comment': clean + f'\n{mod.MARK_V6}\n',
+            'drifted v6 helper': reference.replace('_GLM53_MIXED.finish_step(self, scheduler_output)',
+                                                   '_GLM53_MIXED.finish_step_changed(self, scheduler_output)', 1),
+            'drifted v1 helper': v1.replace(*v1_signature, 1),
+            'duplicate helper site': v5.replace(mod.NEEDLE, helpers[5] + mod.NEEDLE, 1),
+            'decorated helper site': v5.replace('\nclass _Glm53MixedPrefill:',
+                                                '\n@staticmethod\nclass _Glm53MixedPrefill:', 1),
+            'unrelated bytes after the helper': v5.replace(
+                mod.NEEDLE, 'def _operator_local_helper():\n    return 1\n\n\n' + mod.NEEDLE, 1),
+            'unpublished "0"-default variant': v1.replace(helpers[1], helpers[1].replace(*v1_signature, 1), 1),
+            'fabricated class-pass site': clean.replace(mod.NEEDLE, fake_site + mod.NEEDLE, 1),
+        }
+        for label, text in refused.items():
+            rc, after = run(text)
+            assert rc != 0 and after == text, f'must refuse {label} without a write'
+
+        return reference
 
 def main():
     global POLICY, PATCHED_SOURCE

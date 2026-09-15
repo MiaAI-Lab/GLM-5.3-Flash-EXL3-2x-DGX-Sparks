@@ -1,10 +1,14 @@
 # Concurrent agents
 
 Shipped mixed-prefill defaults: `fair` on the two-node `start.sh` (TP=2),
-`0` on `start-tp3.sh` (TP=3) and `skip` on `start-tp4.sh` (TP=4). Use
-`GLM53_MIXED_PREFILL_CHUNK=0` for interactive use by multiple agents on a
-launcher that defaults to `skip`.
-This restores vLLM's stock chunked-prefill scheduler: a decoding peer no
+`0` on `start-tp3.sh` (TP=3) and `skip` on `start-tp4.sh` (TP=4). On a launcher
+that defaults to `skip`, `GLM53_MIXED_PREFILL_CHUNK=0` is one explicit option
+for concurrent interactive agents — not a recommendation. It admits newcomers
+immediately at the cost of the incumbent's decode rate, and the TP=2 `CHUNK=0`
+default is a gated candidate whose contention qualification is still open.
+`fair` is the measured policy for shared TP=2 use.
+
+Setting `0` restores vLLM's stock chunked-prefill scheduler: a decoding peer no
 longer explicitly prevents another prompt from using the remaining token
 budget in the same step. `MAX_NUM_SEQS` still limits active sequences, and
 `MAX_NUM_BATCHED_TOKENS` limits the whole step. A context still needs its full
@@ -40,11 +44,11 @@ expense of new-prompt latency. A positive number caps mixed prefill tokens.
 Interleaving can reduce per-agent generation speed, especially for long
 contexts on the older sparse-MLA kernels. Choose that tradeoff explicitly.
 
-Existing `.env` files are not rewritten during updates. Set
-`GLM53_MIXED_PREFILL_CHUNK=0` (or `fair` on TP=2) there, then recreate the
-service through your approved deployment procedure. A plain `docker restart`
-reuses the old container environment and does not apply this setting. In-flight
-requests should be drained first.
+Existing `.env` files are not rewritten during updates. Set the policy you have
+chosen for that launcher (`fair`, `skip`, a positive cap, or `0`) there, then
+recreate the service through your approved deployment procedure. A plain `docker
+restart` reuses the old container environment and does not apply this setting.
+In-flight requests should be drained first.
 
 Before measuring, record the deployed source commit, image digest, model and
 drafter revisions, launch arguments, context/sequence/token budgets, and
@@ -60,12 +64,18 @@ GLM53_SCHEDULER_PY_SRC=/path/to/scheduler.py python3 tests/test_prefill_concurre
 GLM53_SCHEDULER_PY_SRC=/path/to/scheduler.py python3 tests/test_scheduler_decode_floor.py
 ```
 
-Reapplication accepts only a complete known patch: the helper and both scheduler
-gate sites are validated by an unpatch/re-patch round-trip before any write, and
-a marker alone is never trusted. A partial patch, changed helper (including
-decorators), duplicate helper, or altered gate fails without modifying the
-scheduler. A validated legacy image (v1–v5) is migrated to the current installer
-version without changing the operator's `GLM53_MIXED_PREFILL_CHUNK` value, and
+Reapplication accepts only a complete known patch: the legacy helper site is
+validated before anything is removed (v1/v2/v5 against the published helper text
+by sha256, v3/v4 against the canonical site structure because those intermediate
+bodies were never published, the current version against the installer's own
+text), one exact byte range is removed, and the whole file is round-trip checked
+— re-adding that span and re-applying the version's frozen gate sites must
+reproduce the input byte-for-byte. A marker alone is never trusted. A partial
+patch, changed helper (including decorators), duplicate helper, or altered gate
+fails without modifying the scheduler, and an unversioned variant whose baked
+default differs from the published one is refused rather than silently migrated.
+A validated legacy image (v1–v5) is migrated to the current installer version
+without changing the operator's `GLM53_MIXED_PREFILL_CHUNK` value, and
 the current version accepts the opt-in gate forms (`GLM53_MIXED_PREFILL_WARM_TOKENS`
 / `_MAX_WAIT_MS`) so a supported gate-v2 scheduler is not rejected at startup.
 These CPU checks prove patch integrity and policy behavior, not live request
