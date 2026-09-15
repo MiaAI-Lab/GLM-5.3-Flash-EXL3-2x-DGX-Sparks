@@ -427,7 +427,13 @@ the GPU pool alone cannot hold everyone's context. Wired in `start.sh` (TP=2)
 only: `start-tp3.sh` / `start-tp4.sh` neither forward these knobs nor mount
 `overlay/patch_kv_offload_groups.py`.
 
-Measured on this kit (105k-token prompt, evicted by 6 × 168k-token floods,
+Experimental; not qualified on the current integrated image. Maintainer
+`plotarmordev` owns the forced-eviction/restore and allocator qualification
+decision. Source patch/compile/idempotence checks do not establish actual
+disk-to-GPU restores, output correctness, or bounded host memory.
+
+Historical author measurements from the August 2026 image, not a current-main
+qualification (105k-token prompt, evicted by 6 × 168k-token floods,
 100 GB per-node store, thinking off, temp 0):
 
 | | |
@@ -438,8 +444,9 @@ Measured on this kit (105k-token prompt, evicted by 6 × 168k-token floods,
 | Host | stable, 6–8 GB free throughout |
 | Capacity | 3,162 blocks ≈ **11.3M tokens** in 160 GB/node |
 
-Decode is unaffected with it enabled: `tests/bench_decode.py` (median of 5 × 400)
-gives structured **66.4** tok/s / prose **26.7** against the 65.1 / 27.1 above.
+The same historical `tests/bench_decode.py` run (median of 5 × 400) reported
+structured **66.4** tok/s / prose **26.7**, compared with the then-reported
+65.1 / 27.1 baseline; this does not establish unchanged decode on today's stack.
 
 ```bash
 GLM53_OFFLOAD_MMAP_DIR=/root/.cache/vllm/kv-mmap \
@@ -1029,7 +1036,7 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `overlay/patch_kpool_tail_slotmap.py` | clamp KpoolTail one-block circular slot mapping; identity for other KV groups |
 | `tests/test_kpool_tail_slotmap.py` | circular addressing math, exact kernel patch, idempotence, fail-closed drift, launcher wiring |
 | `overlay/patch_kv_offload_groups.py` | opt-in `GLM53_OFFLOAD_MMAP_DIR` disk tier: mark unalignable per-request scratch groups (kpool tail) as skip-at-every-scheduler-touchpoint, force the per-layer copy path, and back the staging region with a sparse NVMe file plus a bounded page cache |
-| `tests/test_kv_offload_groups.py` | five-file target map, fixture anchor apply/idempotence, fail-closed drift, env kill switch, and — inside the image — every installed-vLLM anchor still single-hit |
+| `tests/test_kv_offload_groups.py` | fixture patch idempotence, fail-closed drift, env kill switch, and patch/compile/idempotence on copies of available vLLM source; explicitly skips the source-dependent case when unavailable, not runtime qualification |
 | `overlay/patch_indexer_workspace.py` | opt-in `GLM53_INDEXER_WORKSPACE=rightsize`: size the sparse-indexer prefill workspace to the legal per-step maximum instead of `max_model_len * 40`; boot-time compress-ratio cross-check |
 | `tests/test_indexer_workspace.py` | sizing formula (MNBT/`max_num_seqs`/spec-token edge cases, stock clamp), chunk-list equivalence vs stock by exhaustion, exact three-site patch, idempotence, fail-closed drift, launcher wiring |
 | `overlay/patch_spinwait.py` | opt-in numeric `GLM53_SPINWAIT_MS`: fail-closed runtime patch of SpinCondition's reader busy-loop window on both ranks |
