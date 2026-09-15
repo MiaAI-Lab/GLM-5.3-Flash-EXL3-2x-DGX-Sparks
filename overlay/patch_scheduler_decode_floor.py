@@ -44,11 +44,37 @@ Fair knobs (read at runtime; identical on every rank):
   GLM53_FAIR_PREFILL_MAX_STEP_MS      default 1000 (estimated mixed-step limit)
   GLM53_FAIR_PREFILL_MAX_CHUNKS       default 1
 
-Versioned installer: `# [glm53-decode-floor:v5]`. v1 (no version), v2, v3
-and v4 images are unpatched then re-patched. Fail closed if anchors drift.
+Versioned installer: `# [glm53-decode-floor:v6]`. v1 (no version), v2 and v5
+images are unpatched then re-patched. A v3 or v4 marker is refused without
+touching the source: no authenticated producer of those intermediate helper
+bodies was recovered from public history, so a canonical v3/v4 image cannot be
+established, and no body is invented to fill the gap. Fail closed if anchors
+drift.
+
+Fail-closed migration: the legacy helper site is validated *before* anything is
+removed -- v1/v2/v5 against the published helper text (sha256), v6 against this
+installer's own text. The frozen gate sites are inverted, one exact byte range
+is removed, and the whole file is round-trip checked: re-adding the same span
+and re-applying that version's frozen sites must reproduce the input
+byte-for-byte. A drifted, duplicated, decorated, marker-only, v3/v4-marked or
+otherwise unattested site is refused with no write.
+
+v6 (opt-in gate, both features OFF by default -- v5 behaviour is preserved):
+  GLM53_MIXED_PREFILL_WARM_TOKENS  >0 admits a request whose uncached remainder
+      is <= this many tokens (typically one hybrid block, 3584) without waiting
+      for the decoders. 0 (default) disables the bypass.
+  GLM53_MIXED_PREFILL_MAX_WAIT_MS  >0 releases a request the `skip` hold has
+      starved for this long under GLM53_MIXED_PREFILL_LATE_CAP (default 512)
+      tokens per step. 0 (default) waits forever, i.e. v1..v5 behaviour. The
+      release only makes the request eligible for a LATE_CAP step; it bounds
+      neither allocation nor compute service (capacity and the base scheduler's
+      own limits still decide), and the request then crawls like cap:N.
+  An explicit `cap` keeps its cap (only the warm bypass applies); `fair` is a
+  different mechanism and is not touched by either knob.
 """
 from __future__ import annotations
 
+import hashlib
 import inspect
 import os
 import sys
@@ -66,6 +92,7 @@ MARK_V2 = "# [glm53-decode-floor:v2]"
 MARK_V3 = "# [glm53-decode-floor:v3]"
 MARK_V4 = "# [glm53-decode-floor:v4]"
 MARK_V5 = "# [glm53-decode-floor:v5]"
+MARK_V6 = "# [glm53-decode-floor:v6]"
 
 IMPORT_OLD = """import itertools
 import time
@@ -165,93 +192,6 @@ V2_WAITING_MAMBA_NEW = """                        num_new_tokens = self._mamba_b
 """
 
 
-
-# Frozen v3 anchors for migration from the reviewed implementation.
-V3_BEGIN_NEW = """        self.current_step += 1
-        _GLM53_MIXED.begin_step(self)  # [glm53-decode-floor:v3]
-        # NOTE(woosuk) on the scheduling algorithm:
-"""
-V3_OBS_NEW = """        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        _GLM53_MIXED.observe_output(self, scheduler_output)  # [glm53-decode-floor:v3]
-        pooler_outputs = model_runner_output.pooler_output
-"""
-V3_FIN_OLD = """        # Check if the scheduling constraints are satisfied.
-        total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
-"""
-V3_FIN_NEW = """        # Check if the scheduling constraints are satisfied.
-        _GLM53_MIXED.note_schedule_output(self, num_scheduled_tokens)  # [glm53-decode-floor:v3]
-        total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
-"""
-V3_RUNNING_NEW = """            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
-                num_new_tokens = self.scheduler_config.long_prefill_token_threshold
-            num_new_tokens = min(
-                num_new_tokens, token_budget, input_budget - draft_slots
-            )
-            mixed_cap = _glm53_mixed_prefill_policy(self, request)  # [glm53-decode-floor:v3]
-            if mixed_cap is not None and _GLM53_MIXED.needs_prefill_compute(request):
-                num_new_tokens = min(num_new_tokens, mixed_cap)
-            num_new_tokens = _GLM53_MIXED.clip_for_decode_reserve(
-                num_new_tokens,
-                token_budget,
-                int(getattr(self, "_glm53_decode_reserve_tokens", 0) or 0),
-                _GLM53_MIXED.needs_prefill_compute(request),
-            )
-
-            # Make sure the input position does not exceed the max model len.
-"""
-V3_WAITING_NEW = """                    threshold = self.scheduler_config.long_prefill_token_threshold
-                    if 0 < threshold < num_new_tokens:
-                        num_new_tokens = threshold
-                    mixed_cap = _glm53_mixed_prefill_policy(self, request)  # [glm53-decode-floor:v3]
-                    if mixed_cap is not None and _GLM53_MIXED.needs_prefill_compute(request):
-                        if mixed_cap <= 0:
-                            request_queue.pop_request()
-                            step_skipped_waiting.prepend_request(request)
-                            continue
-                        num_new_tokens = min(num_new_tokens, mixed_cap)
-                    num_new_tokens = _GLM53_MIXED.clip_for_decode_reserve(
-                        num_new_tokens,
-                        token_budget,
-                        int(getattr(self, "_glm53_decode_reserve_tokens", 0) or 0),
-                        _GLM53_MIXED.needs_prefill_compute(request),
-                    )
-                    if mixed_cap is not None and _GLM53_MIXED.needs_prefill_compute(request):
-                        if num_new_tokens <= 0:
-                            request_queue.pop_request()
-                            step_skipped_waiting.prepend_request(request)
-                            continue
-
-                    # chunked prefill has to be enabled explicitly to allow
-"""
-V3_ALIGN_NEW = """            max_prefill_tokens = self.max_num_scheduled_tokens
-            long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
-            if long_prefill_threshold > 0:
-                max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
-            _align_cap = getattr(self, "_glm53_align_prefill_limit", None)  # [glm53-decode-floor:v3]
-            if _align_cap is not None and _align_cap > 0:
-                max_prefill_tokens = min(max_prefill_tokens, _align_cap)
-            aligned_end = end // block_size * block_size
-            if aligned_end > start or block_size <= max_prefill_tokens:
-                end = aligned_end
-"""
-V3_RUNNING_MAMBA_NEW = """            # Apply Mamba alignment before encoder caps.
-            if self.need_mamba_block_aligned_split:
-                num_new_tokens = self._mamba_block_aligned_split(
-                    request, num_new_tokens
-                )
-            _GLM53_MIXED.note_scheduled(request, num_new_tokens)  # [glm53-decode-floor:v3]
-"""
-V3_WAITING_MAMBA_NEW = """                        num_new_tokens = self._mamba_block_aligned_split(
-                            request,
-                            num_new_tokens,
-                            num_new_local_computed_tokens,
-                            num_external_computed_tokens,
-                        )
-                        _GLM53_MIXED.note_scheduled(request, num_new_tokens)  # [glm53-decode-floor:v3]
-                        if num_new_tokens == 0:
-                            break
-"""
-
 class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
     """Bound contention using completion feedback, without synchronizing GPUs."""
 
@@ -264,6 +204,7 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
         self.mode = "skip"
         self.legacy_cap = 0
         self.logged_boot = False
+        self.logged_gate = False
         self.hist_every = 50
         self._parse()
         self.last_service = {}
@@ -339,6 +280,27 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
             self.max_step_s = max(0.001, int(self._e("GLM53_FAIR_PREFILL_MAX_STEP_MS", "1000")) / 1000.0)
         except ValueError:
             self.max_step_s = 1.0
+        # v6 gate (warm bypass + deadline). Both features are OFF unless an
+        # operator sets the knobs: 0 disables each one and is the default, so a
+        # skip/cap deployment keeps exactly the v5 hold behaviour.
+        try:
+            self.warm_tokens = int(self._e("GLM53_MIXED_PREFILL_WARM_TOKENS", "0"))
+        except ValueError:
+            self.warm_tokens = 0
+        if not 0 <= self.warm_tokens <= 1_000_000:
+            self.warm_tokens = 0
+        try:
+            self.max_wait_ms = int(self._e("GLM53_MIXED_PREFILL_MAX_WAIT_MS", "0"))
+        except ValueError:
+            self.max_wait_ms = 0
+        if not 0 <= self.max_wait_ms <= 600_000:
+            self.max_wait_ms = 0
+        try:
+            self.late_cap = int(self._e("GLM53_MIXED_PREFILL_LATE_CAP", "512"))
+        except ValueError:
+            self.late_cap = 512
+        if not 64 <= self.late_cap <= 8192:
+            self.late_cap = 512
         if self.mode == "fair" and not self.logged_boot:
             print(
                 f"[glm53-decode-floor] fair v5 probe_chunk={self.chunk} "
@@ -348,6 +310,13 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
                 flush=True,
             )
             self.logged_boot = True
+        if (self.warm_tokens or self.max_wait_ms) and not self.logged_gate:
+            print(
+                f"[glm53-decode-floor] gate v6 warm_tokens={self.warm_tokens} "
+                f"max_wait_ms={self.max_wait_ms} late_cap={self.late_cap}",
+                flush=True,
+            )
+            self.logged_gate = True
 
 
     @staticmethod
@@ -564,6 +533,29 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
             self._promote_next()
         self._maybe_log()
 
+    def _warm_bypass(self, remaining):
+        """Admit a small uncached remainder at once (v6). Off while the knob is 0."""
+        return self.warm_tokens > 0 and remaining <= self.warm_tokens
+
+    def _deadline_cap(self, request, remaining):
+        """Late admission for a request the skip hold would starve (v6).
+
+        Returns 0 while the deadline is disabled (0 ms = wait forever, v5
+        behaviour) or not reached, else LATE_CAP tokens for this step. The
+        first-seen stamp is the per-request arrival the fair policy already
+        keeps, so chunking, preemption and requeue cannot reset the wait.
+        """
+        if self.max_wait_ms <= 0:
+            return 0
+        rid = request.request_id
+        first_seen = self.arrival.get(rid)
+        if first_seen is None:
+            first_seen = self._now()
+            self.arrival[rid] = first_seen
+        if (self._now() - first_seen) * 1000.0 >= self.max_wait_ms:
+            return max(1, min(self.late_cap, remaining))
+        return 0
+
     def cap_for(self, sched, request, computed=None):
         self.begin_step(sched)
         sched._glm53_align_prefill_limit = None
@@ -573,9 +565,15 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
         peer_decode = any(r is not request and not self.needs_prefill_compute(r)
                           for r in sched.running)
         if self.mode == "skip":
-            return 0 if peer_decode else None
+            if not peer_decode:
+                return None
+            if self._warm_bypass(remaining):
+                return None
+            return self._deadline_cap(request, remaining)
         if self.mode == "cap":
             cap = self.legacy_cap if peer_decode else None
+            if cap is not None and self._warm_bypass(remaining):
+                cap = None
             sched._glm53_align_prefill_limit = cap
             return cap
         if self.step_mode == "solo":
@@ -731,20 +729,6 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
                 end = aligned_end
         return max(0, end - start)
 
-
-
-def _helper_text() -> str:
-    body = inspect.getsource(_Glm53MixedPrefill)
-    return (
-        "\n"
-        + body
-        + "\n_GLM53_MIXED = _Glm53MixedPrefill()  # [glm53-decode-floor:v5]\n\n"
-        + "def _glm53_mixed_prefill_policy(sched, request, computed=None):  # [glm53-decode-floor:v5]\n"
-        + "    return _GLM53_MIXED.cap_for(sched, request, computed)\n\n\n"
-    )
-
-
-HELPER = None  # filled at apply time so tests can call _helper_text()
 
 
 BEGIN_OLD = """        self.current_step += 1
@@ -929,6 +913,24 @@ WAITING_ALLOC_NEW = """                    if request.has_encoder_inputs:
 
                 # KVTransfer:"""
 
+
+def replace_once(text: str, old: str, new: str, label: str) -> str:
+    n = text.count(old)
+    if n != 1:
+        raise SystemExit(f"{P}: expected one {label} target, found {n}")
+    return text.replace(old, new, 1)
+
+
+V2_PAIRS = (
+    (V2_BEGIN_NEW, BEGIN_OLD, 'v2-begin'),
+    (V2_OBS_NEW, OBS_OLD, 'v2-obs'),
+    (V2_RUNNING_NEW, RUNNING_OLD, 'v2-running'),
+    (V2_WAITING_NEW, WAITING_OLD, 'v2-waiting'),
+    (V2_ALIGN_NEW, ALIGN_OLD, 'v2-align'),
+    (V2_RUNNING_MAMBA_NEW, RUNNING_MAMBA_OLD, 'v2-running-mamba'),
+    (V2_WAITING_MAMBA_NEW, WAITING_MAMBA_OLD, 'v2-waiting-mamba'),
+)
+
 V4_PAIRS = (
     (BEGIN_NEW, BEGIN_OLD, 'begin'),
     (OBS_NEW, OBS_OLD, 'obs'),
@@ -945,136 +947,159 @@ V4_PAIRS = (
     (WAITING_ALLOC_NEW, WAITING_ALLOC_OLD, 'waiting_alloc'),
 )
 
+V1_PAIRS = (
+    (V1_RUNNING_NEW, RUNNING_OLD, 'v1-running'),
+    (V1_WAITING_NEW, WAITING_OLD, 'v1-waiting'),
+)
 
-def replace_once(text: str, old: str, new: str, label: str) -> str:
-    n = text.count(old)
-    if n != 1:
-        raise SystemExit(f"{P}: expected one {label} target, found {n}")
-    return text.replace(old, new, 1)
-
-
-def _strip_helper(text: str, label: str) -> str:
-    start = text.find("class _Glm53MixedPrefill:")
-    if start < 0:
-        raise SystemExit(f"{P}: {label} helper start not found")
-    if start > 0 and text[start - 1] == "\n":
-        start -= 1
-    end_ak = text.find("class _Glm53AdaptiveK:", start)
-    end_cg = text.find("from vllm.compilation.cuda_graph import CUDAGraphStat\n", start)
-    candidates = [i for i in (end_ak, end_cg) if i > start]
-    if not candidates:
-        raise SystemExit(f"{P}: {label} helper end not found")
-    end = min(candidates)
-    return text[:start] + text[end:]
-
-
-def _strip_v1_helper(text: str) -> str:
-    start = text.find(V1_HELPER_START)
-    if start < 0:
-        raise SystemExit(f"{P}: v1 helper start not found")
-    if start > 0 and text[start - 1] == "\n":
-        start -= 1
-    end_ak = text.find("class _Glm53AdaptiveK:", start)
-    end_cg = text.find("from vllm.compilation.cuda_graph import CUDAGraphStat\n", start)
-    candidates = [i for i in (end_ak, end_cg) if i > start]
-    if not candidates:
-        raise SystemExit(f"{P}: v1 helper end not found")
-    end = min(candidates)
-    return text[:start] + "\n" + text[end:]
-
-
-def unpatch_v1(text: str) -> str:
-    if V1_RUNNING_NEW in text:
-        text = replace_once(text, V1_RUNNING_NEW, RUNNING_OLD, "v1-running")
-    elif "_glm53_mixed_prefill_policy(self.running, request)" in text:
-        raise SystemExit(f"{P}: v1 running insertion drifted")
-    if V1_WAITING_NEW in text:
-        text = replace_once(text, V1_WAITING_NEW, WAITING_OLD, "v1-waiting")
-    elif "_glm53_mixed_prefill_policy(self.running, request)" in text:
-        raise SystemExit(f"{P}: v1 waiting insertion drifted")
-    if V1_HELPER_START in text:
-        text = _strip_v1_helper(text)
-    leftover = [
-        "_glm53_mixed_prefill_policy(self.running, request)",
-        V1_HELPER_START,
-    ]
-    for s in leftover:
-        if s in text:
-            raise SystemExit(f"{P}: v1 leftover after unpatch: {s}")
-    return text
-
-
-def unpatch_v2(text: str) -> str:
-    pairs = (
-        (V2_BEGIN_NEW, BEGIN_OLD, "v2-begin"),
-        (V2_OBS_NEW, OBS_OLD, "v2-obs"),
-        (V2_RUNNING_NEW, RUNNING_OLD, "v2-running"),
-        (V2_WAITING_NEW, WAITING_OLD, "v2-waiting"),
-        (V2_ALIGN_NEW, ALIGN_OLD, "v2-align"),
-        (V2_RUNNING_MAMBA_NEW, RUNNING_MAMBA_OLD, "v2-running-mamba"),
-        (V2_WAITING_MAMBA_NEW, WAITING_MAMBA_OLD, "v2-waiting-mamba"),
-    )
-    for new, old, label in pairs:
-        if new in text:
-            text = replace_once(text, new, old, label)
-        elif MARK_V2 in new:
-            # Some insertions may already have been removed; fail if marker remains.
-            pass
-    if "class _Glm53MixedPrefill:" in text:
-        text = _strip_helper(text, "v2")
-    if MARK_V2 in text:
-        raise SystemExit(f"{P}: v2 leftover after unpatch")
-    return text
-
-
-def unpatch_v3(text: str) -> str:
-    pairs = (
-        (V3_BEGIN_NEW, BEGIN_OLD, "v3-begin"),
-        (V3_OBS_NEW, OBS_OLD, "v3-obs"),
-        (V3_FIN_NEW, V3_FIN_OLD, "v3-fin"),
-        (V3_RUNNING_NEW, RUNNING_OLD, "v3-running"),
-        (V3_WAITING_NEW, WAITING_OLD, "v3-waiting"),
-        (V3_ALIGN_NEW, ALIGN_OLD, "v3-align"),
-        (V3_RUNNING_MAMBA_NEW, RUNNING_MAMBA_OLD, "v3-running-mamba"),
-        (V3_WAITING_MAMBA_NEW, WAITING_MAMBA_OLD, "v3-waiting-mamba"),
-    )
-    for new, old, label in pairs:
-        text = replace_once(text, new, old, label)
-    text = _strip_helper(text, "v3")
-    if MARK_V3 in text:
-        raise SystemExit(f"{P}: v3 leftover after unpatch")
-    return text
-
-
-def unpatch_v4(text: str) -> str:
-    for new, old, label in V4_PAIRS:
-        text = replace_once(text, new, old, label)
-    text = _strip_helper(text, "v4")
-    if MARK_V4 in text:
-        raise SystemExit(f"{P}: v4 leftover after unpatch")
-    return text
-
-
-# v5 uses the same scheduler anchors as v4 with the marker advanced; the v4
-# insertions above stay frozen so a v4 image can be unpatched exactly.
+# v5 and v6 use the same scheduler anchors as v4 with the marker advanced; the
+# v4 insertions above stay frozen so a v4 image can be unpatched exactly. v6
+# only changes the helper (opt-in warm bypass + deadline, both off by default),
+# so an unpatch/re-patch of a v6 image is byte-identical.
 V5_PAIRS = tuple((new.replace(MARK_V4, MARK_V5), old, label) for new, old, label in V4_PAIRS)
+V6_PAIRS = tuple((new.replace(MARK_V5, MARK_V6), old, label) for new, old, label in V5_PAIRS)
+
+LEGACY_MARK = {1: MARK, 2: MARK_V2, 3: MARK_V3, 4: MARK_V4, 5: MARK_V5, 6: MARK_V6}
+LEGACY_PAIRS = {1: V1_PAIRS, 2: V2_PAIRS, 5: V5_PAIRS, 6: V6_PAIRS}  # v3/v4 are refused, not migrated
+
+NEEDLE = "from vllm.compilation.cuda_graph import CUDAGraphStat\n"
+ADAPTIVE_K_HEAD = "class _Glm53AdaptiveK:"
+CLASS_HEAD = "class _Glm53MixedPrefill:"
+
+# ---------------------------------------------------------------------------
+# Canonical legacy helper registry.
+#
+# Every migratable version has exactly one accepted helper site, and the site is
+# validated *before* anything is removed. The versions whose helper text is
+# published are compared byte-for-byte (sha256 and length). v3 and v4 were
+# introduced by 180725a5ce33 as markers for intermediate builds whose helper
+# bodies were never recovered from public history: they are refused as
+# unsupported rather than migrated on a structural guess, because an invented
+# body would not be a canonical image. A site that validates is removed as one
+# exact byte range, so text between the helper and its anchors can never be
+# dropped by accident.
+#
+# provenance, public history of MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks:
+#   v1  f3043c95bbf9 overlay/patch_scheduler_decode_floor.py:HELPER
+#       cross-attested byte-identical by cad980f7263:HELPER_V1, which documents
+#       itself as "byte-identical to the shipped v1 overlay"
+#   v2  9a23b2d8f061 overlay/patch_scheduler_decode_floor.py:HELPER
+#   v5  a9bbbadc4c72 overlay/patch_scheduler_decode_floor.py:_helper_text()
+#   v3/v4  no public revision carries a body (180725a5ce33 adds only the
+#          markers); refused, not migrated (see above)
+#
+# The published variants that share the unversioned marker but bake a different
+# policy default (the "0" default of 83f0067/d9758a6/9a557cf/14b6a9f) are NOT
+# accepted: migrating them would silently land a held default change, so they
+# are refused like any other drifted site.
+# ---------------------------------------------------------------------------
+LEGACY_HELPER_SHA256 = {
+    1: "c0c10c6385bd7e75bfc0f724378960b9d9cb943cf18c386a5a780cf03cb4c48d",
+    2: "e170f2bf6d0c0fe0493a91ff54bd719036f6c4b5ea9fcf2ee1346968a4e3fbed",
+    5: "c05769276df6da0a24b3b8c21e251f39ee7aa2a74ee92c6d6ce3d85c38151a53",
+}
+LEGACY_HELPER_LEN = {1: 784, 2: 13378, 5: 20866}
 
 
-def unpatch_v5(text: str) -> str:
-    for new, old, label in V5_PAIRS:
+def _refuse(reason: str):
+    raise SystemExit(f"{P}: refusing to rewrite the scheduler: {reason}")
+
+
+def _site_reasons(span: str, version: int, exact=None) -> str:
+    """Return '' when `span` is exactly this installer's canonical v{version} helper site.
+
+    v1/v2/v5 are pinned to their published helper text (sha256 and length); v6 is
+    compared against this installer's own `_helper_text()`. A version with no
+    published text has no accepted site at all.
+    """
+    if exact is not None:
+        return "" if span == exact else f"helper site is not this installer's v{version} helper text"
+    expected = LEGACY_HELPER_SHA256.get(version)
+    if expected is None:
+        return f"v{version} helper text was never published; there is no accepted site to compare"
+    got = hashlib.sha256(span.encode("utf-8")).hexdigest()
+    if got != expected or len(span) != LEGACY_HELPER_LEN[version]:
+        return (f"helper site is not the published v{version} helper (sha256 {got[:16]}, "
+                f"{len(span)} bytes; expected {expected[:16]}, {LEGACY_HELPER_LEN[version]} bytes)")
+    return ""
+
+
+def _legacy_span(text: str, version: int, exact=None):
+    """Validate and return (start, end, span) for the unique v{version} helper site.
+
+    Returns None when no helper definition is present at all. Refuses (no write)
+    on a missing, duplicated, decorated, drifted or otherwise unattested site.
+    """
+    head_token = V1_HELPER_START if version == 1 else CLASS_HEAD
+    found = text.count(head_token)
+    if found == 0:
+        return None
+    if found != 1:
+        _refuse(f"{found} {head_token!r} definitions found; v{version} installs exactly one")
+    head = text.find(head_token)
+    if head < 2 or text[head - 1] != "\n" or text[head - 2] != "\n":
+        _refuse(f"v{version} helper is not preceded by the installer's blank-line boundary "
+                f"(indented or decorated site)")
+    start = head - 1
+    reasons = []
+    for anchor in (NEEDLE, ADAPTIVE_K_HEAD):
+        end = text.find(anchor, head)
+        if end < 0:
+            continue
+        span = text[start:end]
+        why = _site_reasons(span, version, exact)
+        if not why:
+            return start, end, span
+        reasons.append(why)
+    _refuse(f"v{version} helper site rejected: " + "; ".join(reasons))
+
+
+def _unpatch(text: str, version: int, exact=None):
+    """Invert version `version`: its frozen gate sites, then its validated helper site."""
+    if version not in LEGACY_PAIRS:
+        _refuse(f"v{version} is not a migratable version: its helper text was never published")
+    for new, old, label in LEGACY_PAIRS[version]:
+        if new not in text:
+            _refuse(f"{label} insertion is missing or drifted")
         text = replace_once(text, new, old, label)
-    text = _strip_helper(text, "v5")
-    if MARK_V5 in text:
-        raise SystemExit(f"{P}: v5 leftover after unpatch")
-    return text
+    site = _legacy_span(text, version, exact)
+    if site is None:
+        _refuse(f"v{version} helper site is missing")
+    start, end, span = site
+    clean = text[:start] + text[end:]
+    mark = LEGACY_MARK[version]
+    leftover = [s for s in (mark, V1_HELPER_START if version == 1 else CLASS_HEAD) if s in clean]
+    if leftover:
+        _refuse(f"v{version} marker or helper definition still present after unpatch")
+    return clean, start, span
 
 
-def apply_v5(text: str) -> str:
+def _round_trip(original: str, clean: str, version: int, start: int, span: str) -> None:
+    """Refuse unless re-applying version `version` to `clean` reproduces `original`."""
+    again = clean[:start] + span + clean[start:]
+    for new, old, label in LEGACY_PAIRS[version]:
+        again = replace_once(again, old, new, label)
+    if again != original:
+        _refuse(f"v{version} round trip is not byte-identical; the image is not a canonical "
+                f"v{version} install")
+
+
+def _helper_text() -> str:
+    body = inspect.getsource(_Glm53MixedPrefill)
+    return (
+        "\n"
+        + body.replace(MARK_V5, MARK_V6)
+        + f"\n_GLM53_MIXED = _Glm53MixedPrefill()  # {MARK_V6}\n\n"
+        + f"def _glm53_mixed_prefill_policy(sched, request, computed=None):  # {MARK_V6}\n"
+        + "    return _GLM53_MIXED.cap_for(sched, request, computed)\n\n\n"
+    )
+
+
+def apply_v6(text: str) -> str:
     if "import os\n" not in text.split("import time\n", 1)[0]:
         text = replace_once(text, IMPORT_OLD, IMPORT_NEW, "import os")
-    needle = "from vllm.compilation.cuda_graph import CUDAGraphStat\n"
-    text = replace_once(text, needle, _helper_text() + needle, "helper")
-    for new, old, label in V5_PAIRS:
+    text = replace_once(text, NEEDLE, _helper_text() + NEEDLE, "helper")
+    for new, old, label in V6_PAIRS:
         text = replace_once(text, old, new, label)
     compile(text, str(P), "exec")
     return text
@@ -1085,27 +1110,32 @@ def main() -> int:
         raise SystemExit(f"missing {P}")
     text = P.read_text()
     original = text
-    if MARK_V5 in text:
-        # Validate existing anchors/helper instead of trusting the marker alone.
-        clean = unpatch_v5(text)
-        if apply_v5(clean) != text:
-            raise SystemExit(f"{P}: v5 helper drifted")
-        print(f"{P.name}: {MARK_V5} already present — verified")
+    if MARK_V6 in text:
+        # Validate existing anchors and helper instead of trusting the marker: a
+        # marker-only or hand-edited patch cannot round-trip and is refused
+        # without a write.
+        clean, start, span = _unpatch(text, 6, exact=_helper_text())
+        if apply_v6(clean) != text:
+            _refuse("v6 helper drifted; unpatch/re-patch is not byte-identical")
+        print(f"{P.name}: {MARK_V6} already present — verified")
         return 0
-    if MARK_V4 in text:
-        text = unpatch_v4(text)
-    elif MARK_V3 in text:
-        text = unpatch_v3(text)
-    elif MARK_V2 in text:
-        text = unpatch_v2(text)
-    elif MARK in text or V1_HELPER_START in text:
-        text = unpatch_v1(text)
-    text = apply_v5(text)
-    if MARK_V2 in text or MARK_V3 in text or MARK_V4 in text:
+    for unsupported in (3, 4):
+        if LEGACY_MARK[unsupported] in text:
+            _refuse(f"v{unsupported} is refused as unsupported: no authenticated producer of that "
+                    f"helper body was recovered from public history, so a canonical v{unsupported} "
+                    f"image cannot be established and the source is left unchanged")
+    version = next((v for v in (5, 2, 1)
+                    if LEGACY_MARK[v] in text or (v == 1 and V1_HELPER_START in text)), None)
+    if version is not None:
+        clean, start, span = _unpatch(text, version)
+        _round_trip(text, clean, version, start, span)
+        text = clean
+    text = apply_v6(text)
+    if MARK_V2 in text or MARK_V3 in text or MARK_V4 in text or MARK_V5 in text:
         raise SystemExit(f"{P}: older marker left after migration")
     if text != original:
         P.write_text(text)
-    print(f"patched {P.name} ({MARK_V5})")
+    print(f"patched {P.name} ({MARK_V6})")
     return 0
 
 
