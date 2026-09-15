@@ -44,8 +44,23 @@ def classifier_tests() -> None:
     assert f("draft_model.layers.0.mlp.gate_up_proj", all_g, lt) is None
 
 
+def marlin_tp3_compatibility_tests() -> None:
+    text = (ROOT / "overlay" / "exl3.py").read_text()
+    start = text.index("_GLM53_TP3_UNALIGNED_KDA_SUFFIXES = (")
+    end = text.index("class Glm53DenseFp8Method(")
+    ns: dict[str, object] = {}
+    exec(text[start:end], ns)
+    use_marlin = ns["_glm53_use_marlin"]
+    assert not use_marlin("kda", "model.layers.0.self_attn.f_b_proj", 3)
+    assert not use_marlin("kda", "model.layers.0.self_attn.g_b_proj", 3)
+    assert use_marlin("kda", "model.layers.0.self_attn.f_b_proj", 2)
+    assert use_marlin("kda", "model.layers.0.self_attn.o_proj", 3)
+    assert use_marlin("dense", "model.layers.0.mlp.down_proj", 3)
+
+
 def main() -> int:
     classifier_tests()
+    marlin_tp3_compatibility_tests()
     for src in (KDA_SRC, MODEL_SRC):
         if not src.is_file():
             raise SystemExit(f"missing {src}")

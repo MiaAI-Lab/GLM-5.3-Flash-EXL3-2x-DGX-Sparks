@@ -56,15 +56,19 @@ class _Glm53AdaptiveK:  # [glm53-adaptive-k]
     """CPU-only EMA policy for the verified draft prefix length."""
 
     def __init__(self) -> None:
-        mode = os.environ.get("GLM53_ADAPTIVE_K", "off").strip().lower()
+        def _e(name, default):
+            v = os.environ.get(name)
+            return default if v is None or not str(v).strip() else str(v).strip()
+
+        mode = _e("GLM53_ADAPTIVE_K", "off").lower()
         self.enabled = mode in ("ema", "on", "1")
-        self.alpha = float(os.environ.get("GLM53_ADAPTIVE_K_ALPHA", "0.25"))
-        self.margin = float(os.environ.get("GLM53_ADAPTIVE_K_MARGIN", "1.0"))
-        self.min_steps = int(os.environ.get("GLM53_ADAPTIVE_K_MIN_STEPS", "4"))
-        raw = os.environ.get("GLM53_ADAPTIVE_K_SET", "2,4,7")
+        self.alpha = float(_e("GLM53_ADAPTIVE_K_ALPHA", "0.25"))
+        self.margin = float(_e("GLM53_ADAPTIVE_K_MARGIN", "1.0"))
+        self.min_steps = int(_e("GLM53_ADAPTIVE_K_MIN_STEPS", "4"))
+        raw = _e("GLM53_ADAPTIVE_K_SET", "2,4,7")
         self.k_set = sorted({int(x) for x in raw.split(",") if x.strip()})
-        self.saturate = os.environ.get("GLM53_ADAPTIVE_K_SATURATE", "max").strip().lower()
-        self.hist_every = int(os.environ.get("GLM53_ADAPTIVE_K_HIST", "200"))
+        self.saturate = _e("GLM53_ADAPTIVE_K_SATURATE", "max").lower()
+        self.hist_every = int(_e("GLM53_ADAPTIVE_K_HIST", "200"))
         self.state: dict[str, list[float]] = {}  # req_id -> [ema, observed_steps]
         self.hist: dict[int, int] = {}
         self.steps = 0
@@ -295,10 +299,10 @@ def _glm53_adaptive_k_query_lens(lens, decode_query_len):  # [glm53-adaptive-k]
     """Extra uniform decode graph lengths for the adaptive verification prefix."""
     import os
 
-    mode = os.environ.get("GLM53_ADAPTIVE_K", "off").strip().lower()
+    mode = (os.environ.get("GLM53_ADAPTIVE_K") or "off").strip().lower()
     if mode not in ("ema", "on", "1"):
         return lens
-    raw = os.environ.get("GLM53_ADAPTIVE_K_SET", "2,4,7")
+    raw = (os.environ.get("GLM53_ADAPTIVE_K_SET") or "2,4,7").strip() or "2,4,7"
     ks = {int(x) for x in raw.split(",") if x.strip()}
     extra = {k + 1 for k in ks if 0 < k + 1 <= decode_query_len}
     out = sorted(set(lens) | extra | {decode_query_len})

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — omitted-only output-token defaults
+
+`DEFAULT_MAX_NEW_TOKENS` now changes only omitted request limits, including
+legacy completion requests whose protocol default is 16. Explicit limits
+override this default; independent server/platform and context caps remain.
+Empty values preserve stock behavior and caller exports override `.env`.
+Malformed values fail before restart stops services.
+
+CPU checks exercise the pinned limiter and completion call, both rank argument
+blocks, configuration precedence and pre-stop rejection. Live API/streaming
+qualification remains deferred to the latest completed TheGrill.
+
 ## 2026-09-07 — E3 grouped fat-expert MoE prefill (`EXL3_FAT_GROUPED`, now the default)
 
 Cold prefill **+37–45%** on this 2× GB10 kit (16k: 1,155 → 1,578 tok/s; 128k: ~1,150 → 1,629; 256k: 1,087 → 1,576),

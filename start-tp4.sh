@@ -758,7 +758,10 @@ overlay_recipe_hash() {
             "$SCRIPT_DIR/ablit" \
             -type f \
             ! -path '*/__pycache__/*' \
+            ! -path '*/.pytest_cache/*' \
             ! -path '*/ablit/transplant/*' \
+            ! -path '*/files/nfs-server/*' \
+            ! -path '*/files/nfs-share.sh' \
             ! -name '*.pyc' \
             2>/dev/null
     } | LC_ALL=C sort | xargs -d '\n' -r sha256sum | sha256sum | awk '{print $1}'
@@ -815,12 +818,12 @@ ensure_image() {
     local head_ok=0 worker_ok=0 head_key="" worker_key=""
     if docker image inspect "$IMAGE" >/dev/null 2>&1; then
         head_ok=1
-        head_key="$(local_image_key)"
+        head_key="$(local_image_key || true)"
     fi
     worker_ok=1
     for r in 1 2 3; do
         if worker_ssh_n "$r" "docker image inspect '$IMAGE' >/dev/null 2>&1"; then
-            worker_key="$(worker_image_key "$r")"
+            worker_key="$(worker_image_key "$r" || true)"
             if images_match "$head_key" "$worker_key"; then
                 :
             else
@@ -848,13 +851,13 @@ ensure_image() {
     fi
     if [ "${BUILD:-0}" = "1" ]; then
         build_image
-        head_key="$(local_image_key)"
+        head_key="$(local_image_key || true)"
         head_ok=1
         worker_ok=0
     elif image_from_registry && [ "$skip_pull" != "1" ]; then
         local before_key="$head_key"
         pull_image
-        head_key="$(local_image_key)"
+        head_key="$(local_image_key || true)"
         head_ok=1
         if [ "$head_key" != "$before_key" ]; then
             log "pulled ${IMAGE} (${before_key:-missing} -> ${head_key})"
@@ -871,7 +874,7 @@ ensure_image() {
             die "SKIP_PULL=1 but ${IMAGE} is not on the head"
         fi
         build_image
-        head_key="$(local_image_key)"
+        head_key="$(local_image_key || true)"
         head_ok=1
         worker_ok=0
     fi
@@ -880,13 +883,13 @@ ensure_image() {
     elif [ "$worker_ok" = "0" ]; then
         for r in 1 2 3; do
             local wok=0
-            worker_key="$(worker_image_key "$r")"
+            worker_key="$(worker_image_key "$r" || true)"
             if images_match "$head_key" "$worker_key"; then
                 continue
             fi
             if image_from_registry && [ "$skip_pull" != "1" ] && [ "${BUILD:-0}" != "1" ]; then
                 if pull_image_on_worker "$r"; then
-                    worker_key="$(worker_image_key "$r")"
+                    worker_key="$(worker_image_key "$r" || true)"
                     if images_match "$head_key" "$worker_key"; then
                         wok=1
                         log "rank ${r} pulled ${IMAGE} — matches head"
@@ -899,7 +902,7 @@ ensure_image() {
             fi
             if [ "$wok" = "0" ]; then
                 ship_image_to_worker "$r"
-                worker_key="$(worker_image_key "$r")"
+                worker_key="$(worker_image_key "$r" || true)"
                 if images_match "$head_key" "$worker_key"; then
                     :
                 elif worker_ssh_n "$r" "docker image inspect '$IMAGE' >/dev/null 2>&1"; then
