@@ -117,9 +117,9 @@ def compare(a_path, b_path):
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "capture":
+    if len(sys.argv) == 3 and sys.argv[1] == "capture":
         capture(sys.argv[2])
-    elif sys.argv[1] == "compare":
+    elif len(sys.argv) == 4 and sys.argv[1] == "compare":
         compare(sys.argv[2], sys.argv[3])
     else:
         raise SystemExit("usage: capture OUT | compare A B")
