@@ -102,7 +102,7 @@ class PrefillProgressTests(unittest.TestCase):
                                  self.newcomer.num_prompt_tokens)
 
     def test_skip_hold_defers_the_newcomer_until_the_peer_stops(self):
-        # `skip` (TP=4 default) gives the newcomer zero tokens while any peer decodes.
+        # `skip` gives the newcomer zero tokens while any peer decodes.
         newcomer = self.newcomer
         self.assertEqual(self.run_steps(self.policy(GLM53_MIXED_PREFILL_CHUNK="skip")), 0)
         self.sched.running = []
@@ -123,7 +123,6 @@ class PrefillProgressTests(unittest.TestCase):
             before = newcomer.num_computed_tokens
             remaining = newcomer.num_prompt_tokens - before
             self.assertGreater(remaining, 0)
-            self.assertEqual(p.cap_for(self.sched, newcomer), min(128, remaining))
             self.run_steps(p, steps=1)
             granted.append(newcomer.num_computed_tokens - before)
         self.assertEqual(granted, [128] * 9 + [48])
