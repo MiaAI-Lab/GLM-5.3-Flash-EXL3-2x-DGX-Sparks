@@ -36,7 +36,7 @@ def build_real_layer(device, group="kda", seed=5):
     return meth, layer
 
 
-def main() -> int:
+def _run() -> int:
     import torch
 
     if not torch.cuda.is_available():
@@ -157,6 +157,18 @@ def main() -> int:
 
     print("FAILURES:", failures if failures else "none", flush=True)
     return 1 if failures else 0
+
+
+def main() -> int:
+    """Entry point: run the battery inside real single-rank (TP=1) vLLM
+    model-parallel state (required: production
+    ``process_weights_after_loading`` calls
+    ``get_tensor_model_parallel_world_size()``)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from _vllm_tp1 import single_rank_model_parallel
+
+    with single_rank_model_parallel():
+        return _run()
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 
@@ -88,7 +89,7 @@ def err_stats(y: torch.Tensor, ref: torch.Tensor) -> dict:
     }
 
 
-def main() -> int:
+def _run() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--iters", type=int, default=100)
@@ -222,6 +223,18 @@ def main() -> int:
     json.dump(rec, open(args.out, "w"))
     print("wrote", args.out)
     return 0
+
+
+def main() -> int:
+    """Entry point: run the bench inside real single-rank (TP=1) vLLM
+    model-parallel state (required: production
+    ``process_weights_after_loading`` calls
+    ``get_tensor_model_parallel_world_size()``)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from _vllm_tp1 import single_rank_model_parallel
+
+    with single_rank_model_parallel():
+        return _run()
 
 
 if __name__ == "__main__":
