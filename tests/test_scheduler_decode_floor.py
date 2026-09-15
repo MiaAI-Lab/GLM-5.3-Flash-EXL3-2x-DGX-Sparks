@@ -444,14 +444,14 @@ class FairTests(unittest.TestCase):
         self.assertEqual(ns['input_budget'], 0)
 
 
-def structural_site(marker, members, computed):
-    """A v3/v4 site with the canonical structure (those bodies were never published)."""
-    head = f'\nclass _Glm53MixedPrefill:  {marker}\n    """Legacy fair-policy helper."""\n'
-    body = ''.join(f'    def {name}(self, *a):\n        return None\n' for name in members)
-    tail = (f'\n_GLM53_MIXED = _Glm53MixedPrefill()  # {marker}\n\n'
-            f'def _glm53_mixed_prefill_policy(sched, request{", computed=None" if computed else ""}):  # {marker}\n'
-            f'    return _GLM53_MIXED.cap_for(sched, request{", computed" if computed else ""})\n\n\n')
-    return head + body + tail
+def marker_relabelled(clean, version, helpers):
+    """The published v2 image with its marker relabelled to v3/v4.
+
+    No v3/v4 helper body was ever recovered, so none is reconstructed here: the
+    installer must refuse the v3/v4 marker itself, whatever body follows it, and
+    must leave the file byte-for-byte unchanged.
+    """
+    return legacy_image(clean, 2, helpers).replace(mod.MARK_V2, mod.LEGACY_MARK[version])
 
 
 def legacy_image(clean, version, helpers):
@@ -473,14 +473,12 @@ def installation_tests():
     if src is None:
         raise SystemExit('Set GLM53_SCHEDULER_PY_SRC to the pinned scheduler source')
     clean = src.read_text()
-    for version in (6, 5, 4, 3, 2, 1):
+    for version in (6, 5, 2, 1):
         if mod.LEGACY_MARK[version] in clean or (version == 1 and mod.V1_HELPER_START in clean):
             exact = mod._helper_text() if version == 6 else None
             clean, _, _ = mod._unpatch(clean, version, exact=exact)
             break
     helpers = dict(LEGACY_HELPERS)
-    helpers[3] = structural_site(mod.MARK_V3, mod.LEGACY_HELPER_MEMBERS[3], computed=False)
-    helpers[4] = structural_site(mod.MARK_V4, mod.LEGACY_HELPER_MEMBERS[4], computed=True)
 
     # The published artefacts are exactly the sites the validator admits: a
     # fixture that drifts from the registry fails here, so the shipped registry
@@ -500,11 +498,11 @@ def installation_tests():
         rc, reference = run(clean)
         assert rc == 0 and mod.MARK_V6 in reference, 'pristine scheduler must install v6'
 
-        # Every advertised legacy version migrates to exactly the bytes a fresh
-        # install of the pristine scheduler produces, so no scheduler byte
-        # outside the helper and its gate sites is added or dropped -- and the
-        # result is a fixed point.
-        for version in (1, 2, 3, 4, 5):
+        # Every migratable legacy version (the ones with published helper text)
+        # lands on exactly the bytes a fresh install of the pristine scheduler
+        # produces, so no scheduler byte outside the helper and its gate sites
+        # is added or dropped -- and the result is a fixed point.
+        for version in (1, 2, 5):
             image = legacy_image(clean, version, helpers)
             rc, installed = run(image)
             assert rc == 0, f'v{version} image must migrate'
@@ -534,6 +532,8 @@ def installation_tests():
                 mod.NEEDLE, 'def _operator_local_helper():\n    return 1\n\n\n' + mod.NEEDLE, 1),
             'unpublished "0"-default variant': v1.replace(helpers[1], helpers[1].replace(*v1_signature, 1), 1),
             'fabricated class-pass site': clean.replace(mod.NEEDLE, fake_site + mod.NEEDLE, 1),
+            'v3-marked image (no recovered helper body)': marker_relabelled(clean, 3, helpers),
+            'v4-marked image (no recovered helper body)': marker_relabelled(clean, 4, helpers),
         }
         for label, text in refused.items():
             rc, after = run(text)

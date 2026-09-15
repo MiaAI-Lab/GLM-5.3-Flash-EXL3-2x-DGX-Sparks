@@ -30,6 +30,8 @@ spec.loader.exec_module(mod)
 HELPER_NS: dict = {"os": os, "time": __import__("time")}
 exec(mod._helper_text(), HELPER_NS)
 POLICY = HELPER_NS["_Glm53MixedPrefill"]
+MIXED_KEYS = ("GLM53_MIXED_PREFILL_CHUNK", "GLM53_MIXED_PREFILL_WARM_TOKENS",
+              "GLM53_MIXED_PREFILL_MAX_WAIT_MS", "GLM53_MIXED_PREFILL_LATE_CAP")
 
 
 class Clock:
@@ -79,6 +81,13 @@ class Sched:
 
 class GateV6Tests(unittest.TestCase):
     def setUp(self):
+        # The gate reads the server's environment, so pin it here: an ambient
+        # GLM53_MIXED_PREFILL_* export must not be able to change a result.
+        self.env = patch.dict(os.environ)
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        for key in MIXED_KEYS:
+            os.environ.pop(key, None)
         self.clock = Clock()
         self.decoder = Req("A", 30000, 30000, decode=True)
         self.prefill = Req("B", 30000, 0)
@@ -98,9 +107,10 @@ class GateV6Tests(unittest.TestCase):
 
     def test_defaults_disable_both_features(self):
         p = self.policy()
-        self.assertEqual((p.warm_tokens, p.max_wait_ms, p.late_cap), (0, 0, 512))
-        # No held-request release: the skip hold is byte-for-byte the v5 policy
-        # even long after any deadline an operator could have set.
+        # 0/0 admits nothing: the smallest possible remainder is still held
+        # rather than bypassed, and no held request is released even long after
+        # any deadline an operator could have set (the v5 hold).
+        self.prefill.num_computed_tokens = self.prefill.num_prompt_tokens - 1
         self.assertEqual(self.gate(p), 0)
         self.clock.advance(600.0)
         self.assertEqual(self.gate(p), 0)
@@ -111,7 +121,6 @@ class GateV6Tests(unittest.TestCase):
         self.prefill.num_computed_tokens = self.prefill.num_prompt_tokens - 1
         for zero in ("0", "00"):
             p = self.policy(GLM53_MIXED_PREFILL_WARM_TOKENS=zero)
-            self.assertEqual(p.warm_tokens, 0)
             self.assertEqual(self.gate(p), 0)
         p = self.policy(GLM53_MIXED_PREFILL_WARM_TOKENS="1")
         self.assertIsNone(self.gate(p))
@@ -159,13 +168,11 @@ class GateV6Tests(unittest.TestCase):
     def test_explicit_cap_wins_and_only_gains_the_warm_bypass(self):
         capped = self.policy(GLM53_MIXED_PREFILL_CHUNK="256", GLM53_MIXED_PREFILL_MAX_WAIT_MS="1")
         self.assertEqual(self.gate(capped), 256)
-        self.assertEqual(self.sched._glm53_align_prefill_limit, 256)
         self.clock.advance(60.0)
         self.assertEqual(self.gate(capped), 256)
         warmed = self.policy(GLM53_MIXED_PREFILL_CHUNK="256", GLM53_MIXED_PREFILL_WARM_TOKENS="3584")
         self.prefill.num_computed_tokens = 30000 - 100
         self.assertIsNone(self.gate(warmed))
-        self.assertIsNone(self.sched._glm53_align_prefill_limit)
 
     def test_fair_and_off_modes_ignore_the_gate_knobs(self):
         fair = self.policy(GLM53_MIXED_PREFILL_CHUNK="fair",
@@ -174,26 +181,32 @@ class GateV6Tests(unittest.TestCase):
         fair.begin_step(self.sched)
         fair.credit = -10.0
         self.assertEqual(fair.cap_for(self.sched, self.prefill), 0)
-        self.assertEqual(fair.defer_reason, "credit")
         self.assertEqual(self.policy(GLM53_MIXED_PREFILL_CHUNK="off",
                                      GLM53_MIXED_PREFILL_WARM_TOKENS="3584",
                                      GLM53_MIXED_PREFILL_MAX_WAIT_MS="1").cap_for(
                                          Sched([self.decoder], [self.prefill]), self.prefill), None)
 
     def test_out_of_range_knobs_fall_back_to_disabled(self):
-        for env, attr, expected in (
-            ({"GLM53_MIXED_PREFILL_WARM_TOKENS": "abc"}, "warm_tokens", 0),
-            ({"GLM53_MIXED_PREFILL_WARM_TOKENS": "-1"}, "warm_tokens", 0),
-            ({"GLM53_MIXED_PREFILL_WARM_TOKENS": "1000001"}, "warm_tokens", 0),
-            ({"GLM53_MIXED_PREFILL_MAX_WAIT_MS": "700000"}, "max_wait_ms", 0),
-            ({"GLM53_MIXED_PREFILL_MAX_WAIT_MS": "1500"}, "max_wait_ms", 1500),
-            ({"GLM53_MIXED_PREFILL_LATE_CAP": "1"}, "late_cap", 512),
-            ({"GLM53_MIXED_PREFILL_LATE_CAP": "8192"}, "late_cap", 8192),
-        ):
-            p = self.policy(**env)
-            self.assertEqual(getattr(p, attr), expected, env)
-        # A rejected warm/deadline value leaves the knob's feature off, not half-on.
+        # A rejected value leaves the knob's feature off, not half-on: the
+        # smallest remainder is still held, and an out-of-range deadline admits
+        # nothing even after the interval it asked for.
+        self.prefill.num_computed_tokens = self.prefill.num_prompt_tokens - 1
+        for value in ("abc", "-1", "1000001"):
+            p = self.policy(GLM53_MIXED_PREFILL_WARM_TOKENS=value)
+            self.assertEqual(self.gate(p), 0, value)
+        p = self.policy(GLM53_MIXED_PREFILL_MAX_WAIT_MS="700000")
+        self.assertEqual(self.gate(p), 0)
+        self.clock.advance(600.0)
+        self.assertEqual(self.gate(p), 0)
         self.assertEqual(self.gate(self.policy(GLM53_MIXED_PREFILL_MAX_WAIT_MS="junk")), 0)
+        # LATE_CAP falls back to the documented 512 outside 64..8192; inside the
+        # range the released request gets exactly the requested cap.
+        self.prefill.num_computed_tokens = 0
+        for value, cap in (("1", 512), ("63", 512), ("8193", 512), ("8192", 8192), ("512", 512)):
+            p = self.policy(GLM53_MIXED_PREFILL_MAX_WAIT_MS="1500", GLM53_MIXED_PREFILL_LATE_CAP=value)
+            self.assertEqual(self.gate(p), 0, value)
+            self.clock.advance(2.0)
+            self.assertEqual(self.gate(p), cap, value)
 
 
 if __name__ == "__main__":

@@ -11,31 +11,33 @@ opts in:
   remainder fits under the limit instead of holding it behind a decoder.
 - `GLM53_MIXED_PREFILL_MAX_WAIT_MS` (0 = wait forever) releases a request the
   `skip` hold has starved, under `GLM53_MIXED_PREFILL_LATE_CAP` (512) tokens per
-  step. That bounds time-to-first-service, not TTFT: the released request crawls
-  like `cap:N` and slows running decodes for its duration.
+  step. That only makes the request eligible for such a step: it bounds neither
+  allocation nor admission, service time or completion (capacity and the base
+  scheduler's limits still decide), and the request then crawls like `cap:N`.
 
 `fair` is not affected by either knob, and an explicit `cap:N` keeps its cap.
 The knobs are validated (`0..1000000`, `0..600000`, `64..8192`) and forwarded on
 every rank; caller exports keep precedence over `.env`, including explicitly
 empty values, through the generic `_caller_overrides` snapshot. Migration is
-fail-closed for every advertised version: the legacy helper site is validated
-*before* anything is removed (v1/v2/v5 against the published helper text by
-sha256, v3/v4 against the canonical site structure because those intermediate
-bodies were never published, v6 against the installer's own text), the frozen
-gate sites are inverted, one exact byte range is removed, and the whole file is
-round-trip checked -- re-adding the same span and re-applying that version's
-frozen sites must reproduce the input byte-for-byte. A drifted, duplicated,
-decorated, marker-only or unpublished variant (including the unversioned
-`"0"`-default build, whose baked default is a held direction) is refused with no
-write.
+fail-closed: the legacy helper site is validated *before* anything is removed
+(v1/v2/v5 against the published helper text by sha256, v6 against the
+installer's own text), the frozen gate sites are inverted, one exact byte range
+is removed, and the whole file is round-trip checked -- re-adding the same span
+and re-applying that version's frozen sites must reproduce the input
+byte-for-byte. A drifted, duplicated, decorated, marker-only or unpublished
+variant (including the unversioned `"0"`-default build, whose baked default is a
+held direction) is refused with no write, and a v3/v4 marker is refused as
+unsupported without touching the source: no authenticated producer of those
+intermediate helper bodies was recovered from public history, so no canonical
+v3/v4 image is invented to migrate them.
 
 CPU behavior coverage: default-off and zero-disables, both transition
 boundaries, requeue survival, explicit-cap precedence, `off`/`fair` isolation,
-knob bounds and invalid-value fallback, plus the v0–v5 migration matrix against
-the pinned scheduler, built from the published helper artefacts (v1/v2/v5) and
-the canonical v3/v4 site. Every migration must land on exactly the bytes a fresh
-install of the pristine scheduler produces and must be idempotent; drift,
-duplication, decoration, marker-only patches and an unpublished variant are
+knob bounds and invalid-value fallback, plus the v1/v2/v5 migration matrix
+against the pinned scheduler, built from the published helper artefacts. Every
+migration must land on exactly the bytes a fresh install of the pristine
+scheduler produces and must be idempotent; drift, duplication, decoration,
+marker-only patches, an unpublished variant and a v3/v4-marked image are
 asserted to fail without a write.
 
 ## Unreleased — omitted-only output-token defaults

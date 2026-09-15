@@ -13,7 +13,8 @@ Do not reformat: the installer's registry keys on the sha256 of these strings.
 
 v3 and v4 are absent on purpose: 180725a5ce33 introduced their markers as
 migration targets for intermediate builds whose helper bodies were never
-published, so the installer accepts them by canonical site structure only.
+recovered from public history, so the installer refuses those markers without
+touching the source instead of migrating on a guessed body.
 """
 from __future__ import annotations
 
