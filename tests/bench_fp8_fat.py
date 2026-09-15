@@ -118,7 +118,7 @@ def main() -> int:
     retain_bytes = w_fp8_d.numel() + scales_d.numel() * 4
 
     # Marlin control (consumes its own prepared copy, like serving).
-    meth = Glm53DenseFp8Method("kda")
+    meth = Glm53DenseFp8Method("kda", "model.layers.0.self_attn.in_proj_qkvbfg_a")
     mlayer = torch.nn.Module()
     mlayer.weight = torch.nn.Parameter(w_bf16.clone(), requires_grad=False)
     mlayer.output_size_per_partition = n
