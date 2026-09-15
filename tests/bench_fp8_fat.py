@@ -119,6 +119,11 @@ def _run() -> int:
     retain_bytes = w_fp8_d.numel() + scales_d.numel() * 4
 
     # Marlin control (consumes its own prepared copy, like serving).
+    # Force FAT=0 for the control build: with FAT=1 the layer would retain
+    # fat weights and M>64 apply() calls would take the fat path, silently
+    # benchmarking fat-vs-fat instead of marlin-vs-fat.
+    _fat_env = os.environ.get("GLM53_KDA_FP8_FAT")
+    os.environ["GLM53_KDA_FP8_FAT"] = "0"
     meth = Glm53DenseFp8Method("kda", "model.layers.0.self_attn.in_proj_qkvbfg_a")
     mlayer = torch.nn.Module()
     mlayer.weight = torch.nn.Parameter(w_bf16.clone(), requires_grad=False)
@@ -126,6 +131,11 @@ def _run() -> int:
     mlayer.input_size_per_partition = k
     mlayer = mlayer.to(device)
     meth.process_weights_after_loading(mlayer)
+    assert not hasattr(mlayer, "glm53_fat_wt"), "control layer must stay Marlin-only"
+    if _fat_env is None:
+        del os.environ["GLM53_KDA_FP8_FAT"]
+    else:
+        os.environ["GLM53_KDA_FP8_FAT"] = _fat_env
 
     rec = {"device": torch.cuda.get_device_name(0),
            "capability": list(torch.cuda.get_device_capability()),
