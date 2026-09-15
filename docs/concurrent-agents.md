@@ -1,6 +1,9 @@
 # Concurrent agents
 
-Use `GLM53_MIXED_PREFILL_CHUNK=0` for interactive use by multiple agents.
+Shipped mixed-prefill defaults: `fair` on the two-node `start.sh` (TP=2),
+`0` on `start-tp3.sh` (TP=3) and `skip` on `start-tp4.sh` (TP=4). Use
+`GLM53_MIXED_PREFILL_CHUNK=0` for interactive use by multiple agents on a
+launcher that defaults to `skip`.
 This restores vLLM's stock chunked-prefill scheduler: a decoding peer no
 longer explicitly prevents another prompt from using the remaining token
 budget in the same step. `MAX_NUM_SEQS` still limits active sequences, and
@@ -26,22 +29,22 @@ Two million-token windows require capacity for both; enabling interleaving
 does not add memory. Agent-side context compression can bound the resident
 history while preserving a session across many hours and requests.
 
-The previous `skip` default gives a new prompt zero prefill tokens whenever a
-peer is decoding. A long generation can therefore starve another agent for
-minutes, even with spare sequence slots and KV memory. A client idle timeout
-then cancels and retries that waiting request. Requests already admitted to
-the running list can also have their remaining prefill suppressed.
+The `skip` policy (still the TP=4 default) gives a new prompt zero prefill tokens
+whenever a peer is decoding. A long generation can therefore starve another
+agent for minutes, even with spare sequence slots and KV memory. A client idle
+timeout then cancels and retries that waiting request. Requests already admitted
+to the running list can also have their remaining prefill suppressed.
 
 `skip` and `-1` remain explicit options for protecting decode throughput at the
 expense of new-prompt latency. A positive number caps mixed prefill tokens.
 Interleaving can reduce per-agent generation speed, especially for long
 contexts on the older sparse-MLA kernels. Choose that tradeoff explicitly.
 
-Existing `.env` files are not rewritten during updates. Change
-`GLM53_MIXED_PREFILL_CHUNK=skip` to `GLM53_MIXED_PREFILL_CHUNK=0` there, then
-recreate the service through your approved deployment procedure. A plain
-`docker restart` reuses the old container environment and does not apply this
-setting. In-flight requests should be drained first.
+Existing `.env` files are not rewritten during updates. Set
+`GLM53_MIXED_PREFILL_CHUNK=0` (or `fair` on TP=2) there, then recreate the
+service through your approved deployment procedure. A plain `docker restart`
+reuses the old container environment and does not apply this setting. In-flight
+requests should be drained first.
 
 Before measuring, record the deployed source commit, image digest, model and
 drafter revisions, launch arguments, context/sequence/token budgets, and
@@ -57,12 +60,16 @@ GLM53_SCHEDULER_PY_SRC=/path/to/scheduler.py python3 tests/test_prefill_concurre
 GLM53_SCHEDULER_PY_SRC=/path/to/scheduler.py python3 tests/test_scheduler_decode_floor.py
 ```
 
-Reapplication accepts only the complete known current or legacy patch: the
-policy helper and both scheduler gates are validated before any write. A
-partial patch, changed helper (including decorators), duplicate helper, or
-altered gate fails without modifying the scheduler. A validated legacy patch
-is upgraded from the old default to stock scheduling. These CPU checks prove
-patch integrity and policy behavior, not live request latency or KV capacity.
+Reapplication accepts only a complete known patch: the helper and both scheduler
+gate sites are validated by an unpatch/re-patch round-trip before any write, and
+a marker alone is never trusted. A partial patch, changed helper (including
+decorators), duplicate helper, or altered gate fails without modifying the
+scheduler. A validated legacy image (v1–v5) is migrated to the current installer
+version without changing the operator's `GLM53_MIXED_PREFILL_CHUNK` value, and
+the current version accepts the opt-in gate forms (`GLM53_MIXED_PREFILL_WARM_TOKENS`
+/ `_MAX_WAIT_MS`) so a supported gate-v2 scheduler is not rejected at startup.
+These CPU checks prove patch integrity and policy behavior, not live request
+latency or KV capacity.
 
 After the deployment and recipe are approved, run one live canary:
 

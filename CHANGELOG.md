@@ -1,14 +1,24 @@
 # Changelog
 
-## Unreleased — validate existing mixed-prefill scheduler patches
+## Unreleased — validate and migrate existing mixed-prefill scheduler patches
 
-The decode-floor patch validates its helper and both gates before accepting
-an existing patch or upgrading the legacy default. Drift and incomplete
-patches fail without changing the source. CPU checks cover stock, skip and
-bounded-chunk scheduling policies against the pinned scheduler.
+The decode-floor overlay validates an already-patched scheduler by unpatching and
+re-patching it before accepting it: a marker alone is never trusted. Drift,
+partial, duplicated or decorated patches fail without changing the source, a
+re-apply is byte-identical, and a legacy v1–v5 image migrates to the current
+installer version (v6) without changing the operator's policy value.
 
-Live contention, fairness, throughput and latency qualification remains
-deferred to the latest completed TheGrill.
+The current version is the same single patcher used by the gate work in #80, so
+the opt-in `GLM53_MIXED_PREFILL_WARM_TOKENS` / `_MAX_WAIT_MS` forms are accepted
+rather than rejected at container start. The proposed TP=2 `CHUNK=0` default is
+**not** landed here: it stays a gated candidate until the contention
+qualification below; launcher defaults are unchanged.
+
+CPU checks cover the migration matrix (pristine and v1–v5 images), re-apply
+idempotence, drift and marker-only refusal, and the progress contract of each
+policy (stock/`off`, `skip`, bounded chunk). Live contention, fairness,
+throughput and latency qualification remains deferred to the latest completed
+TheGrill.
 
 ## Unreleased — omitted-only output-token defaults
 
