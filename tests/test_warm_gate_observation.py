@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Inert fixtures for the warm-gate observation rules (no HTTP, no GPU).
 
-`tests/validate_warm_gate.py` runs against a live server, but the rules that
-decide what counts as an observation are pure functions over a capture record.
-These cases pin them on fixed records and fixed bytes only: SSE error objects,
-absolute versus capture-relative chunk stamps, a peer window with no decode, and
-the precedence that a void capture is never reported as an expectation that was
-not met. Nothing here opens a socket or a device.
+The pure capture rules and the actual main entrypoint are exercised with inert
+records, bytes, clocks and transports. These cases cover SSE errors, absolute
+timestamps, missing peer activity, mixed-invalid verdict precedence and peer
+failures discovered only after the observation windows. No socket or device is
+opened.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import importlib.util
 import json
 import os
@@ -138,6 +139,90 @@ class VoidPrecedenceTests(unittest.TestCase):
         peer = capture(offsets=(1.0,), ttft=0.2, wall=9.0, finish_reason=None)
         self.assertEqual(gate.classify(warm, True, peer, (T0, T0 + 2.0)), ("", True))
         self.assertEqual(gate.classify(warm, False, peer, (T0, T0 + 2.0)), ("", False))
+
+
+class EntrypointVerdictTests(unittest.TestCase):
+    def run_capture(self, scenario):
+        calls = []
+
+        class Clock:
+            now = T0
+
+            @classmethod
+            def time(cls):
+                return cls.now
+
+            @classmethod
+            def sleep(cls, seconds):
+                cls.now += seconds
+
+        def stream(text, limit, rec):
+            index = len(calls)
+            calls.append(index)
+            start = Clock.now
+            wall, ttft = 2.0, 1.0
+            if index == 1:
+                wall = 6.0
+            elif index == 2:
+                wall = 200.0
+            elif index == 3 and scenario != "valid":
+                wall, ttft = 5.0, 4.0
+            elif index == 4:
+                wall, ttft = 12.0, 10.0
+            elif index == 5:
+                wall = 12.0
+            rec.update(
+                t0=start, chunks=[start + j for j in range(1, int(wall) + 1)],
+                complete=True, finish_reason="stop", error=None, void_reason=None,
+                wall=wall, ttft=ttft,
+                usage={"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 100}},
+            )
+            if index == 4 and scenario == "mixed-void-unmet":
+                rec.update(error="synthetic transport failure", complete=False)
+            if index != 2:
+                Clock.now += wall
+
+        class Thread:
+            def __init__(self, target, args=(), **kwargs):
+                self.target, self.args = target, args
+
+            def start(self):
+                self.target(*self.args)
+
+            def is_alive(self):
+                return False
+
+            def join(self, **kwargs):
+                if self.target is stream and scenario == "late-peer-error":
+                    self.args[2].update(error="synthetic late peer failure", complete=False)
+
+        output = io.StringIO()
+        with patch.multiple(
+            gate, time=Clock, threading=type("Threads", (), {"Thread": Thread}),
+            stream=stream, require_idle=lambda: None, require_gate_enabled=lambda: None,
+            running_now=lambda: 1.0, time_to_service=lambda *args: 10.0,
+            MAX_WAIT_S=10.0, WARM_TOKENS=100,
+        ), patch.object(sys, "argv", ["validate_warm_gate.py", "fixture"]), contextlib.redirect_stdout(output):
+            status = gate.main()
+        summary = json.loads(next(
+            line.removeprefix("SUMMARY ") for line in output.getvalue().splitlines()
+            if line.startswith("SUMMARY ")
+        ))
+        return status, summary
+
+    def test_valid_run_remains_observable(self):
+        self.assertEqual(self.run_capture("valid")[0], 0)
+
+    def test_mixed_invalid_and_unmet_run_is_void(self):
+        status, summary = self.run_capture("mixed-void-unmet")
+        self.assertEqual(status, 2)
+        self.assertTrue(summary["void"])
+        self.assertTrue(summary["unmet"])
+
+    def test_late_peer_failure_invalidates_pending_conclusions(self):
+        status, summary = self.run_capture("late-peer-error")
+        self.assertEqual(status, 2)
+        self.assertEqual(summary["unmet"], [])
 
 
 if __name__ == "__main__":

@@ -40,6 +40,12 @@ scheduler produces and must be idempotent; drift, duplication, decoration,
 marker-only patches, an unpublished variant and a v3/v4-marked image are
 asserted to fail without a write.
 
+The warm validator defers conclusions until the peer capture finishes and
+checks its final validity. A void capture takes precedence over unmet
+expectations in the exit status; a late peer failure invalidates the pending
+conclusions. Inert entrypoint regressions cover both cases without claiming
+live contention or numerical qualification.
+
 ## Unreleased — omitted-only output-token defaults
 
 `DEFAULT_MAX_NEW_TOKENS` now changes only omitted request limits, including

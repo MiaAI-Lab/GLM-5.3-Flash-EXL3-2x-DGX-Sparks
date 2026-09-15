@@ -219,26 +219,15 @@ def main() -> int:
     require_gate_enabled()
     unmet: list[str] = []
     void: list[str] = []
+    checks: list[tuple] = []
 
     def note(msg: str) -> None:
         void.append(msg)
         print(f"[{tag}] void    {msg}", flush=True)
 
     def check(rec: dict, cond: bool, msg: str, peer: dict | None = None, window=None) -> None:
-        """One predeclared expectation.
-
-        A capture that failed, and a window without a live decoding peer, are
-        both void: neither can satisfy or contradict the expectation, so a void
-        capture is never reported as held and never as not-met.
-        """
-        reason, verdict = classify(rec, cond, peer, window)
-        if reason:
-            void.append(f"{msg} ({reason})")
-            print(f"[{tag}] void    {msg} — not observed: {reason}", flush=True)
-            return
-        print(f"[{tag}] {'holds  ' if verdict else 'not-met'} {msg}", flush=True)
-        if not verdict:
-            unmet.append(msg)
+        """Defer conclusions until the peer capture has finished."""
+        checks.append((rec, cond, msg, peer, window))
 
     def ttft(rec: dict) -> str:
         return f"{rec['ttft']:.2f}s" if "ttft" in rec else "n/a"
@@ -322,6 +311,24 @@ def main() -> int:
 
     if th is not None:
         th.join(timeout=900)
+        if not blocked:
+            peer_failure = observation(g)
+            if peer_failure:
+                note(f"peer generation G did not complete ({peer_failure})")
+
+    for rec, cond, msg, peer, window in checks:
+        reason = observation(peer) if peer is not None else ""
+        if reason:
+            verdict = None
+        else:
+            reason, verdict = classify(rec, cond, peer, window)
+        if reason:
+            void.append(f"{msg} ({reason})")
+            print(f"[{tag}] void    {msg} — not observed: {reason}", flush=True)
+            continue
+        print(f"[{tag}] {'holds  ' if verdict else 'not-met'} {msg}", flush=True)
+        if not verdict:
+            unmet.append(msg)
 
     print(f"[{tag}] G chunks/s: before {before} | during cold arrival {during} | after {after} | solo {solo_rate}", flush=True)
     scope = ("exploratory observation of one run: not a qualification, and no TTFT or "
@@ -336,13 +343,13 @@ def main() -> int:
                           "control": b.get("error"), "cold": c.get("error")}}
     print("SUMMARY " + json.dumps(summary), flush=True)
     print(f"[{tag}] {scope}", flush=True)
-    if unmet:
-        print(f"[{tag}] {len(unmet)} predeclared expectation(s) observed not to hold; this neither passes nor fails the gate", flush=True)
-        return 1
     if void:
         print(f"[{tag}] no usable observation: {len(void)} capture(s)/window(s) were void "
               f"— a void capture is never reported as an expectation that was not met", flush=True)
         return 2
+    if unmet:
+        print(f"[{tag}] {len(unmet)} predeclared expectation(s) observed not to hold; this neither passes nor fails the gate", flush=True)
+        return 1
     print(f"[{tag}] every predeclared expectation was observed to hold in this one run", flush=True)
     return 0
 
