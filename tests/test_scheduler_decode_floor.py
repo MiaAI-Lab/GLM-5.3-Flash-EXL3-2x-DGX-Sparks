@@ -15,8 +15,18 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[1]
-PATCH = ROOT / 'overlay/patch_scheduler_decode_floor.py'
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
+# The image flattens overlay/ and tests/ into /opt/glm53 (Dockerfile COPY), so
+# resolve the patch next to this file first and fall back to the repo layout.
+PATCH = next(
+    p
+    for p in (
+        HERE / 'patch_scheduler_decode_floor.py',
+        ROOT / 'overlay' / 'patch_scheduler_decode_floor.py',
+    )
+    if p.is_file()
+)
 spec = importlib.util.spec_from_file_location('glm53_decode_floor', PATCH)
 mod = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = mod
@@ -82,6 +92,51 @@ class Out:
     def __init__(self, counts):
         self.num_scheduled_tokens = dict(counts)
         self.total_num_scheduled_tokens = sum(counts.values())
+
+
+class ImageLayoutTests(unittest.TestCase):
+    def test_patch_resolves_when_flattened_beside_the_test(self):
+        """The image COPYs overlay/ and tests/ into one dir (/opt/glm53).
+
+        Regression for a build failure where this module resolved the patch as
+        ROOT/overlay/... only, which is /opt/overlay/... in the image and does
+        not exist, so the in-image test step died with FileNotFoundError.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            flat = Path(tmp) / 'glm53'
+            flat.mkdir()
+            (flat / 'test_scheduler_decode_floor.py').write_text(
+                Path(__file__).read_text()
+            )
+            (flat / 'patch_scheduler_decode_floor.py').write_text(
+                PATCH.read_text()
+            )
+            src = flat / 'test_scheduler_decode_floor.py'
+            # Import-time resolution only: executing the module body is what
+            # raised FileNotFoundError before the fix.
+            probe = (
+                'import importlib.util, sys;'
+                "spec = importlib.util.spec_from_file_location('probe', %r);"
+                'mod = importlib.util.module_from_spec(spec);'
+                'sys.modules[spec.name] = mod;'
+                'spec.loader.exec_module(mod);'
+                'print(mod.PATCH)' % str(src)
+            )
+            result = subprocess.run(
+                [sys.executable, '-c', probe],
+                capture_output=True,
+                text=True,
+                cwd=tmp,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                f'flattened layout failed to import: {result.stderr}',
+            )
+            self.assertEqual(
+                result.stdout.strip(),
+                str(flat / 'patch_scheduler_decode_floor.py'),
+            )
 
 
 class FairTests(unittest.TestCase):
@@ -491,7 +546,14 @@ def main():
     ns = {'os': os, 'time': __import__('time')}
     exec(PATCHED_SOURCE[begin:end], ns)
     POLICY = ns['_Glm53MixedPrefill']
-    result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(FairTests))
+    loader = unittest.defaultTestLoader
+    suite = unittest.TestSuite(
+        [
+            loader.loadTestsFromTestCase(ImageLayoutTests),
+            loader.loadTestsFromTestCase(FairTests),
+        ]
+    )
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
     return 0 if result.wasSuccessful() else 1
 
 
