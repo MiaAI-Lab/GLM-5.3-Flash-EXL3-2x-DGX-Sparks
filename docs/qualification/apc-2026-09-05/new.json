@@ -1,0 +1,862 @@
+{
+  "base_identity": {
+    "count": 128000,
+    "first_token_ids": [
+      154822,
+      154824,
+      154826,
+      25062,
+      287,
+      29905,
+      371,
+      25
+    ],
+    "last_token_ids": [
+      46645,
+      304,
+      2326,
+      4244,
+      13,
+      154828,
+      154841,
+      154842
+    ],
+    "messages_sha256": "dda4a94e79039694c00d29dbea3a7d8b2d85de1ef7afbec00cb3a766e898f3d2",
+    "token_ids_sha256": "eee16ca8b28485239ecb4cfed71a1633380ac1d023644b5e3f2d83f41e6878f5"
+  },
+  "cases": [
+    {
+      "expected": "APPEND-OK",
+      "identity": {
+        "count": 128019,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          17885,
+          4689,
+          12,
+          3925,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "5ff7396183ea3d675ffaf952c15d874c83255678b60637bd669b4efae5dd4eaf",
+        "token_ids_sha256": "9df43f4dbb4472f7d8a4b5db34bad45dfd6eb10aa86f238f97a51ce71525242e"
+      },
+      "label": "append_control",
+      "lcp_fraction": 1.0,
+      "lcp_tokens": 128000
+    },
+    {
+      "expected": "CEDAR-1183",
+      "identity": {
+        "count": 128025,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          448,
+          279,
+          897,
+          1172,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "31345f14da438c2ec41d1e275b5b166f574d0111e8cd769acd868732c8ba55a3",
+        "token_ids_sha256": "f0027d1e514b8a0d4f3cb864dbf6a96fea67b26012cec0ee258b5773351a2056"
+      },
+      "label": "edit_10pct",
+      "lcp_fraction": 0.099695,
+      "lcp_tokens": 12761
+    },
+    {
+      "expected": "FLAME-5279",
+      "identity": {
+        "count": 128024,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          448,
+          279,
+          897,
+          1172,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "b37c237c4814de3012a4f8c79a51368e7915a3ad075c31829e7b7e0334fc640b",
+        "token_ids_sha256": "9d55b69452f7abc78d0bb202180ea10b7142061b334f72efa50b1ef5b6536ebd"
+      },
+      "label": "edit_50pct",
+      "lcp_fraction": 0.497758,
+      "lcp_tokens": 63713
+    },
+    {
+      "expected": "ONYX-9311",
+      "identity": {
+        "count": 128024,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          448,
+          279,
+          897,
+          1172,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "f945696d641d2e2c83b16b62492baebfcbac72de8fb9c37ccebac1c5ae6c763b",
+        "token_ids_sha256": "dd9ac5e9b0cd9c7f8ddf24df754e5ab90d1d0a5b1a96be4dddca52939d02a70d"
+      },
+      "label": "edit_90pct",
+      "lcp_fraction": 0.895828,
+      "lcp_tokens": 114666
+    },
+    {
+      "expected": "PINE-1017",
+      "identity": {
+        "count": 12794,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          100286,
+          594,
+          897,
+          1172,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "c04e1623bf0e3c610fac5c2766fec1c05c20a62eaec35863034952622ead1462",
+        "token_ids_sha256": "ae589db4410ebc7bc20aba5536d93b6b816b46b08f5b663556b04ec75a757da5"
+      },
+      "label": "branch_10pct",
+      "lcp_fraction": 0.099742,
+      "lcp_tokens": 12767
+    },
+    {
+      "expected": "EMBER-5051",
+      "identity": {
+        "count": 63747,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          100002,
+          594,
+          897,
+          1172,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "8a82ca9a35c5af9074a62d570ef90d375a18ce1f138f6d884e42dd4c6ca8f8e5",
+        "token_ids_sha256": "8f8788e3c417bc150f700b613c05b6fec85d10010d617d5c6cdb0597c38d7835"
+      },
+      "label": "branch_50pct",
+      "lcp_fraction": 0.497812,
+      "lcp_tokens": 63720
+    },
+    {
+      "expected": "QUARTZ-9097",
+      "identity": {
+        "count": 114701,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          100614,
+          594,
+          897,
+          1172,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "5a8abc8ac38f6a60acf10cc3486198500aed9a5e388997b43ae33bbb53f0b012",
+        "token_ids_sha256": "4ef9b239e582101000b5885e25784c22d105d6dfbb60389c292521a4587f56d9"
+      },
+      "label": "branch_90pct",
+      "lcp_fraction": 0.895891,
+      "lcp_tokens": 114674
+    }
+  ],
+  "elapsed_s": 1285.57,
+  "finished_unix": 1788600827.5875907,
+  "pass": true,
+  "rows": [
+    {
+      "expected": "APPEND-OK",
+      "expected_found": true,
+      "label": "append_control",
+      "lcp_fraction": 1.0,
+      "lcp_tokens": 128000,
+      "prime": {
+        "content": "Ledger fully acknowledged.",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 0.0,
+          "local_compute": 128000.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 112.284,
+        "usage": {
+          "completion_tokens": 6,
+          "prompt_tokens": 128000,
+          "total_tokens": 128006
+        },
+        "wall_s": 112.557
+      },
+      "probe": {
+        "content": "APPEND-OK",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 125440.0,
+          "local_compute": 2579.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 2.796,
+        "usage": {
+          "completion_tokens": 5,
+          "prompt_tokens": 128019,
+          "total_tokens": 128024
+        },
+        "wall_s": 2.851
+      },
+      "probe_identity": {
+        "count": 128019,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          17885,
+          4689,
+          12,
+          3925,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "5ff7396183ea3d675ffaf952c15d874c83255678b60637bd669b4efae5dd4eaf",
+        "token_ids_sha256": "9df43f4dbb4472f7d8a4b5db34bad45dfd6eb10aa86f238f97a51ce71525242e"
+      },
+      "reset": {
+        "body": {
+          "success": true
+        },
+        "http": 200,
+        "idle": {
+          "local_cache_hit": 0.0,
+          "local_compute": 1331.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "seconds": 0.005
+      },
+      "stale_values_found": []
+    },
+    {
+      "expected": "CEDAR-1183",
+      "expected_found": true,
+      "label": "edit_10pct",
+      "lcp_fraction": 0.099695,
+      "lcp_tokens": 12761,
+      "prime": {
+        "content": "Ledger fully acknowledged.",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 0.0,
+          "local_compute": 128000.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 109.76,
+        "usage": {
+          "completion_tokens": 6,
+          "prompt_tokens": 128000,
+          "total_tokens": 128006
+        },
+        "wall_s": 110.01
+      },
+      "probe": {
+        "content": "CEDAR-1183",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 0.0,
+          "local_compute": 128025.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 109.982,
+        "usage": {
+          "completion_tokens": 6,
+          "prompt_tokens": 128025,
+          "total_tokens": 128031
+        },
+        "wall_s": 110.253
+      },
+      "probe_identity": {
+        "count": 128025,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          448,
+          279,
+          897,
+          1172,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "31345f14da438c2ec41d1e275b5b166f574d0111e8cd769acd868732c8ba55a3",
+        "token_ids_sha256": "f0027d1e514b8a0d4f3cb864dbf6a96fea67b26012cec0ee258b5773351a2056"
+      },
+      "reset": {
+        "body": {
+          "success": true
+        },
+        "http": 200,
+        "idle": {
+          "local_cache_hit": 125440.0,
+          "local_compute": 131910.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "seconds": 0.099
+      },
+      "stale_values_found": []
+    },
+    {
+      "expected": "FLAME-5279",
+      "expected_found": true,
+      "label": "edit_50pct",
+      "lcp_fraction": 0.497758,
+      "lcp_tokens": 63713,
+      "prime": {
+        "content": "Ledger fully acknowledged.",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 0.0,
+          "local_compute": 128000.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 112.688,
+        "usage": {
+          "completion_tokens": 6,
+          "prompt_tokens": 128000,
+          "total_tokens": 128006
+        },
+        "wall_s": 112.964
+      },
+      "probe": {
+        "content": "FLAME-5279",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 0.0,
+          "local_compute": 128024.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 111.755,
+        "usage": {
+          "completion_tokens": 7,
+          "prompt_tokens": 128024,
+          "total_tokens": 128031
+        },
+        "wall_s": 111.919
+      },
+      "probe_identity": {
+        "count": 128024,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          448,
+          279,
+          897,
+          1172,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "b37c237c4814de3012a4f8c79a51368e7915a3ad075c31829e7b7e0334fc640b",
+        "token_ids_sha256": "9d55b69452f7abc78d0bb202180ea10b7142061b334f72efa50b1ef5b6536ebd"
+      },
+      "reset": {
+        "body": {
+          "success": true
+        },
+        "http": 200,
+        "idle": {
+          "local_cache_hit": 125440.0,
+          "local_compute": 387935.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "seconds": 0.12
+      },
+      "stale_values_found": []
+    },
+    {
+      "expected": "ONYX-9311",
+      "expected_found": true,
+      "label": "edit_90pct",
+      "lcp_fraction": 0.895828,
+      "lcp_tokens": 114666,
+      "prime": {
+        "content": "Ledger fully acknowledged.",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 0.0,
+          "local_compute": 128000.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 111.536,
+        "usage": {
+          "completion_tokens": 6,
+          "prompt_tokens": 128000,
+          "total_tokens": 128006
+        },
+        "wall_s": 111.817
+      },
+      "probe": {
+        "content": "ONYX-9311",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 0.0,
+          "local_compute": 128024.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 112.491,
+        "usage": {
+          "completion_tokens": 7,
+          "prompt_tokens": 128024,
+          "total_tokens": 128031
+        },
+        "wall_s": 112.817
+      },
+      "probe_identity": {
+        "count": 128024,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          448,
+          279,
+          897,
+          1172,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "f945696d641d2e2c83b16b62492baebfcbac72de8fb9c37ccebac1c5ae6c763b",
+        "token_ids_sha256": "dd9ac5e9b0cd9c7f8ddf24df754e5ab90d1d0a5b1a96be4dddca52939d02a70d"
+      },
+      "reset": {
+        "body": {
+          "success": true
+        },
+        "http": 200,
+        "idle": {
+          "local_cache_hit": 125440.0,
+          "local_compute": 643959.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "seconds": 0.116
+      },
+      "stale_values_found": []
+    },
+    {
+      "expected": "PINE-1017",
+      "expected_found": true,
+      "label": "branch_10pct",
+      "lcp_fraction": 0.099742,
+      "lcp_tokens": 12767,
+      "prime": {
+        "content": "Ledger fully acknowledged.",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 0.0,
+          "local_compute": 128000.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 110.6,
+        "usage": {
+          "completion_tokens": 6,
+          "prompt_tokens": 128000,
+          "total_tokens": 128006
+        },
+        "wall_s": 110.852
+      },
+      "probe": {
+        "content": "PINE-1017",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 0.0,
+          "local_compute": 12794.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 11.016,
+        "usage": {
+          "completion_tokens": 6,
+          "prompt_tokens": 12794,
+          "total_tokens": 12800
+        },
+        "wall_s": 11.136
+      },
+      "probe_identity": {
+        "count": 12794,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          100286,
+          594,
+          897,
+          1172,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "c04e1623bf0e3c610fac5c2766fec1c05c20a62eaec35863034952622ead1462",
+        "token_ids_sha256": "ae589db4410ebc7bc20aba5536d93b6b816b46b08f5b663556b04ec75a757da5"
+      },
+      "reset": {
+        "body": {
+          "success": true
+        },
+        "http": 200,
+        "idle": {
+          "local_cache_hit": 125440.0,
+          "local_compute": 899983.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "seconds": 0.187
+      },
+      "stale_values_found": []
+    },
+    {
+      "expected": "EMBER-5051",
+      "expected_found": true,
+      "label": "branch_50pct",
+      "lcp_fraction": 0.497812,
+      "lcp_tokens": 63720,
+      "prime": {
+        "content": "Ledger fully acknowledged.",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 0.0,
+          "local_compute": 128000.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 107.786,
+        "usage": {
+          "completion_tokens": 6,
+          "prompt_tokens": 128000,
+          "total_tokens": 128006
+        },
+        "wall_s": 108.028
+      },
+      "probe": {
+        "content": "EMBER-5051",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 0.0,
+          "local_compute": 63747.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 56.312,
+        "usage": {
+          "completion_tokens": 6,
+          "prompt_tokens": 63747,
+          "total_tokens": 63753
+        },
+        "wall_s": 56.411
+      },
+      "probe_identity": {
+        "count": 63747,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          100002,
+          594,
+          897,
+          1172,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "8a82ca9a35c5af9074a62d570ef90d375a18ce1f138f6d884e42dd4c6ca8f8e5",
+        "token_ids_sha256": "8f8788e3c417bc150f700b613c05b6fec85d10010d617d5c6cdb0597c38d7835"
+      },
+      "reset": {
+        "body": {
+          "success": true
+        },
+        "http": 200,
+        "idle": {
+          "local_cache_hit": 125440.0,
+          "local_compute": 1040777.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "seconds": 0.123
+      },
+      "stale_values_found": []
+    },
+    {
+      "expected": "QUARTZ-9097",
+      "expected_found": true,
+      "label": "branch_90pct",
+      "lcp_fraction": 0.895891,
+      "lcp_tokens": 114674,
+      "prime": {
+        "content": "Ledger fully acknowledged.",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 0.0,
+          "local_compute": 128000.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 111.262,
+        "usage": {
+          "completion_tokens": 6,
+          "prompt_tokens": 128000,
+          "total_tokens": 128006
+        },
+        "wall_s": 111.538
+      },
+      "probe": {
+        "content": "QUARTZ-9097",
+        "finish_reason": "stop",
+        "http": 200,
+        "metric_delta": {
+          "local_cache_hit": 0.0,
+          "local_compute": 114701.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "ok": true,
+        "ttft_s": 99.885,
+        "usage": {
+          "completion_tokens": 8,
+          "prompt_tokens": 114701,
+          "total_tokens": 114709
+        },
+        "wall_s": 99.953
+      },
+      "probe_identity": {
+        "count": 114701,
+        "first_token_ids": [
+          154822,
+          154824,
+          154826,
+          25062,
+          287,
+          29905,
+          371,
+          25
+        ],
+        "last_token_ids": [
+          100614,
+          594,
+          897,
+          1172,
+          13,
+          154828,
+          154841,
+          154842
+        ],
+        "messages_sha256": "5a8abc8ac38f6a60acf10cc3486198500aed9a5e388997b43ae33bbb53f0b012",
+        "token_ids_sha256": "4ef9b239e582101000b5885e25784c22d105d6dfbb60389c292521a4587f56d9"
+      },
+      "reset": {
+        "body": {
+          "success": true
+        },
+        "http": 200,
+        "idle": {
+          "local_cache_hit": 125440.0,
+          "local_compute": 1232524.0,
+          "preemptions": 0.0,
+          "running": 0.0,
+          "waiting": 0.0
+        },
+        "seconds": 0.114
+      },
+      "stale_values_found": []
+    }
+  ],
+  "runtime": "new",
+  "started_unix": 1788599542.0175025
+}

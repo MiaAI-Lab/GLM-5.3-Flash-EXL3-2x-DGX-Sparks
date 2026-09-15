@@ -143,7 +143,7 @@ def _set_mode(value):
 def test_mode_enum() -> None:
     """Literal match, exactly like start.sh's ``_glm53_validate_enum``.
 
-    The launcher expands ``${GLM53_INDEXER_WORKSPACE-stock}`` -- default on
+    The launcher expands ``${GLM53_INDEXER_WORKSPACE-rightsize}`` -- default on
     UNSET only -- and then compares the value as-is against ``stock rightsize``.
     The python side must agree character for character, or a value the launcher
     rejects (or accepts) changes meaning across the container boundary.
@@ -194,7 +194,7 @@ def test_mode_enum_matches_launcher_enum() -> None:
     script = (
         guard
         + '\n_glm53_validate_enum GLM53_INDEXER_WORKSPACE '
-        + '"${GLM53_INDEXER_WORKSPACE-stock}" stock rightsize\n'
+        + '"${GLM53_INDEXER_WORKSPACE-rightsize}" stock rightsize\n'
     )
     saved = os.environ.get(ENV_NAME)
     try:
@@ -785,18 +785,21 @@ def test_recipe_wiring_if_present() -> None:
         return
     launcher = start.read_text()
     image = dockerfile.read_text()
-    assert 'GLM53_INDEXER_WORKSPACE="${GLM53_INDEXER_WORKSPACE-stock}"' in launcher
-    assert '_cli_indexer_workspace="${GLM53_INDEXER_WORKSPACE-}"' in launcher
-    # Setness-aware capture: an explicitly empty caller value must survive the
-    # .env source and reach the enum guard, not be swallowed by a .env value.
-    assert '_cli_indexer_workspace_set="${GLM53_INDEXER_WORKSPACE+1}"' in launcher
-    assert (
-        '[ -n "${_cli_indexer_workspace_set}" ] '
-        '&& GLM53_INDEXER_WORKSPACE="$_cli_indexer_workspace"'
-    ) in launcher
+    assert 'GLM53_INDEXER_WORKSPACE="${GLM53_INDEXER_WORKSPACE-rightsize}"' in launcher
+    from test_start_overrides import _run_preamble
+
+    key = "GLM53_INDEXER_WORKSPACE"
+    probe = '\nprintf "[%s]\\n" "${GLM53_INDEXER_WORKSPACE-UNSET}"\n'
+    for caller, expected in (({}, "rightsize"), ({key: "stock"}, "stock"), ({key: ""}, "")):
+        assert _run_preamble(f"{key}=rightsize\n", caller, probe) == f"[{expected}]"
     assert '_glm53_validate_enum GLM53_INDEXER_WORKSPACE' in launcher
     assert '-e "GLM53_INDEXER_WORKSPACE=$GLM53_INDEXER_WORKSPACE"' in launcher
-    assert launcher.count("python3 /opt/glm53/patch_indexer_workspace.py") == 2
+    # Both ranks apply the one pinned list (GLM53_OVERLAY_ORDER) that
+    # write_inner_scripts emits into the head and worker inner scripts.
+    order = launcher[launcher.index("GLM53_OVERLAY_ORDER=(") : launcher.index(")", launcher.index("GLM53_OVERLAY_ORDER=("))]
+    assert "\n    patch_indexer_workspace.py\n" in order
+    assert 'emit_overlay_block >> "$HEAD_SCRIPT"' in launcher
+    assert 'emit_overlay_block >> "$WORKER_SCRIPT"' in launcher
     assert "COPY overlay/patch_indexer_workspace.py" in image
     assert "COPY tests/test_indexer_workspace.py" in image
     assert "RUN python3 /opt/glm53/patch_indexer_workspace.py" in image

@@ -11,7 +11,8 @@
     G's stream rate before / during / after is reported in SSE chunks per second (DFlash2 emits several tokens per chunk,
     so this is NOT tokens/s; only ratios are meaningful).
 Env: GLM53_BASE_URL (default http://127.0.0.1:8888), VLLM_API_KEY (bearer), GLM53_MIXED_PREFILL_WARM_TOKENS/MAX_WAIT_MS
-(defaults 3584 / 1500, used for the thresholds).
+(the values the server runs with; both features are opt-in and default to 0, and the run refuses to start at 0 rather
+than scoring a disabled gate as a pass or a failure).
 """
 from __future__ import annotations
 
@@ -27,8 +28,9 @@ import uuid
 BASE = os.environ.get("GLM53_BASE_URL", "http://127.0.0.1:8888")
 MODEL = "GLM-5.3-Flash-EXL3"
 API_KEY = os.environ.get("VLLM_API_KEY", "")
-WARM_TOKENS = int(os.environ.get("GLM53_MIXED_PREFILL_WARM_TOKENS", "3584"))
-MAX_WAIT_S = int(os.environ.get("GLM53_MIXED_PREFILL_MAX_WAIT_MS", "1500")) / 1000.0
+WARM_TOKENS = int(os.environ.get("GLM53_MIXED_PREFILL_WARM_TOKENS", "0"))
+MAX_WAIT_MS = int(os.environ.get("GLM53_MIXED_PREFILL_MAX_WAIT_MS", "0"))
+MAX_WAIT_S = MAX_WAIT_MS / 1000.0
 SEED = "Ledger row %d reconciled to the cent under audit rule seven. "
 RUN = uuid.uuid4().hex[:8]
 
@@ -48,6 +50,14 @@ def require_idle() -> None:
         raise SystemExit(77)
     if sum(float(v) for v in vals) > 0:
         print("server busy — refusing to run", file=sys.stderr)
+        raise SystemExit(77)
+
+
+def require_gate_enabled() -> None:
+    """Both gate features are opt-in (0 = off); a run against a disabled gate scores nothing."""
+    if WARM_TOKENS <= 0 or MAX_WAIT_MS <= 0:
+        print(f"mixed-prefill gate disabled (WARM_TOKENS={WARM_TOKENS}, MAX_WAIT_MS={MAX_WAIT_MS}); "
+              "export the values the server runs with before validating", file=sys.stderr)
         raise SystemExit(77)
 
 
@@ -108,6 +118,7 @@ def cached(rec: dict):
 def main() -> int:
     tag = sys.argv[1] if len(sys.argv) > 1 else "warm-gate"
     require_idle()
+    require_gate_enabled()
     fails: list[str] = []
 
     def check(cond: bool, msg: str) -> None:

@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""C1 vs mixed C2 decode tok/s (issue #6). Thinking off, temp 0, two cold prefixes.
+"""C1 vs mixed C2 decode tok/s (issue #6). Thinking off, temp 0, cold prefixes.
 
 C1: one long prompt, measure decode after first token.
-C2: start A, wait for first token, start B (distinct prefix) so A decodes
-while B prefills. Report A's tok/s during that overlap.
+C2: start A on a *fresh* prefix (not C1's), wait for first token, start B
+with a distinct cold prefix so A decodes while B prefills. Report A's
+whole-window tok/s *and* tok/s during the overlap after B is submitted.
+
+Does not assert that B prefills before A finishes (skip starves B). For
+GLM53_MIXED_PREFILL_CHUNK=fair, inspect overlap_tok_s, b_ttft_s, and
+whether B completed while A was still generating. Whole-window ratio still
+fails above 5× (comment used to say 3×).
 
 Decode tok/s = (completion_tokens - 1) / (last - first_token).
 """
@@ -52,6 +58,7 @@ def stream_one(prompt: str, max_tokens: int, out: dict[str, Any]) -> None:
     last = None
     usage = None
     finish = None
+    events: list[float] = []
     try:
         with _post_stream(body) as resp:
             out["http"] = resp.status
@@ -87,6 +94,7 @@ def stream_one(prompt: str, max_tokens: int, out: dict[str, Any]) -> None:
                     )
                     if content:
                         now = time.perf_counter()
+                        events.append(now)
                         if first is None:
                             first = now
                             out["first_event"].set()
@@ -114,6 +122,10 @@ def stream_one(prompt: str, max_tokens: int, out: dict[str, Any]) -> None:
             "prompt_tokens": prompt_tokens,
             "finish_reason": finish,
             "usage": usage,
+            "t0": t0,
+            "first": first,
+            "last": last,
+            "events": events,
         }
     )
 
@@ -128,11 +140,19 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--filler-words", type=int, default=48000)
     ap.add_argument("--max-tokens", type=int, default=64)
+    ap.add_argument(
+        "--b-max-tokens",
+        type=int,
+        default=None,
+        help="B's max_tokens in C2 (default: same as --max-tokens). Use 8 for a prefill-heavy newcomer.",
+    )
     ap.add_argument("--out", default="/tmp/mixed-prefill-decode.json")
     args = ap.parse_args()
+    b_max = args.max_tokens if args.b_max_tokens is None else args.b_max_tokens
 
     p1 = make_prompt("ALPHA", args.filler_words)
     p2 = make_prompt("BRAVO", args.filler_words + 17)
+    p3 = make_prompt("CHARLIE", args.filler_words + 31)
 
     print("[c1] solo long prefill + decode", flush=True)
     c1 = run_request(p1, args.max_tokens)
@@ -142,8 +162,8 @@ def main() -> int:
     print("[c2] A decode while B cold-prefills", flush=True)
     a: dict[str, Any] = {"first_event": threading.Event()}
     b: dict[str, Any] = {"first_event": threading.Event()}
-    ta = threading.Thread(target=stream_one, args=(p1, args.max_tokens, a), daemon=True)
-    tb = threading.Thread(target=stream_one, args=(p2, args.max_tokens, b), daemon=True)
+    ta = threading.Thread(target=stream_one, args=(p3, args.max_tokens, a), daemon=True)
+    tb = threading.Thread(target=stream_one, args=(p2, b_max, b), daemon=True)
     ta.start()
     if not a["first_event"].wait(timeout=900):
         print("A never emitted a first token", flush=True)
@@ -151,6 +171,7 @@ def main() -> int:
         PathWrite = __import__("pathlib").Path
         PathWrite(args.out).write_text(json.dumps(rec, indent=2, default=str))
         return 2
+    b_submit = time.perf_counter()
     print(f"[c2] A first token ttft={a.get('ttft_s')} — launching B", flush=True)
     tb.start()
     ta.join()
@@ -176,8 +197,21 @@ def main() -> int:
             flush=True,
         )
 
+    overlap_tok_s = None
+    overlap_events = 0
+    a_events = list(a.get("events") or [])
+    if a_events:
+        after = [t for t in a_events if t >= b_submit]
+        overlap_events = len(after)
+        if len(after) >= 2:
+            overlap_tok_s = (len(after) - 1) / (after[-1] - after[0])
+    b_done_before_a = bool(
+        a.get("last") and b.get("last") and b["last"] < a["last"]
+    )
     rec = {
         "filler_words": args.filler_words,
+        "a_max_tokens": args.max_tokens,
+        "b_max_tokens": b_max,
         "c1_tok_s": c1.get("tok_s"),
         "c1_ttft_s": c1.get("ttft_s"),
         "c1_prompt_tokens": c1.get("prompt_tokens"),
@@ -187,9 +221,15 @@ def main() -> int:
         "c2_b_ttft_s": b.get("ttft_s"),
         "c2_a_prompt_tokens": a.get("prompt_tokens"),
         "c2_b_prompt_tokens": b.get("prompt_tokens"),
+        "c2_a_overlap_tok_s": overlap_tok_s,
+        "c2_a_overlap_events": overlap_events,
+        "c2_b_finished_during_a": b_done_before_a,
         "ratio_c1_over_c2a": None
         if not c1.get("tok_s") or not a.get("tok_s")
         else round(c1["tok_s"] / a["tok_s"], 2),
+        "ratio_c1_over_overlap": None
+        if not c1.get("tok_s") or not overlap_tok_s
+        else round(c1["tok_s"] / overlap_tok_s, 2),
     }
     __import__("pathlib").Path(args.out).write_text(json.dumps(rec, indent=2, default=str))
     print(json.dumps(rec, indent=2), flush=True)

@@ -1,0 +1,5 @@
+.git
+logs
+docs
+results
+**/__pycache__

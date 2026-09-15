@@ -159,13 +159,17 @@ def test_recipe_wiring() -> None:
         'SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"',
         'GLM53_SPINWAIT_MS="${GLM53_SPINWAIT_MS-stock}"',
         "_glm53_validate_spinwait_ms",
-        'python3 /opt/glm53/patch_spinwait.py',
         '"GLM53_SPINWAIT_MS=$GLM53_SPINWAIT_MS"',
         '/opt/glm53/patch_spinwait.py:ro',
     )
     for needle in required_start:
         assert needle in start, needle
-    assert start.count("python3 /opt/glm53/patch_spinwait.py") == 2
+    # Both ranks apply the one pinned list (GLM53_OVERLAY_ORDER) that
+    # write_inner_scripts emits into the head and worker inner scripts.
+    order = start[start.index("GLM53_OVERLAY_ORDER=(") : start.index(")", start.index("GLM53_OVERLAY_ORDER=("))]
+    assert "\n    patch_spinwait.py\n" in order
+    assert 'emit_overlay_block >> "$HEAD_SCRIPT"' in start
+    assert 'emit_overlay_block >> "$WORKER_SCRIPT"' in start
     assert start.count("/opt/glm53/patch_spinwait.py:ro") == 2
     assert "COPY overlay/patch_spinwait.py /opt/glm53/patch_spinwait.py" in dockerfile
     assert "tests/test_spinwait_patch.py" in dockerfile

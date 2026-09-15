@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -32,12 +33,18 @@ SPEC_RE = re.compile(
 )
 
 
+def _auth_headers() -> dict[str, str]:
+    """Return the bearer header for keyed vLLM serves, if configured."""
+    key = os.environ.get("API_KEY") or os.environ.get("VLLM_API_KEY")
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
 def _post(path: str, body: dict, timeout: float = 600.0, stream: bool = False):
     data = json.dumps(body).encode()
     req = urllib.request.Request(
         BASE + path,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **_auth_headers()},
         method="POST",
     )
     return urllib.request.urlopen(req, timeout=timeout)
@@ -135,7 +142,8 @@ def stream_bench(max_tokens: int = 200, prompt: str | None = None) -> dict:
         http = resp.status
         buf = b""
         while True:
-            piece = resp.read(256)
+            # read(n) can wait across HTTP chunks and bias first-token timing.
+            piece = resp.read1(256)
             if not piece:
                 break
             buf += piece
@@ -187,11 +195,13 @@ def stream_bench(max_tokens: int = 200, prompt: str | None = None) -> dict:
         "wall_s": t1 - t0,
         "decode_s": decode_s,
         "tok_s": tps,
+        "delivered_tok_s": completion_tokens / (t1 - t0) if completion_tokens else None,
         "completion_tokens": completion_tokens,
         "prompt_tokens": prompt_tokens,
         "finish_reason": finish,
         "nan": nan,
         "text_head": text[:400],
+        "text": text,
         "text_len": len(text),
         "usage": usage,
     }

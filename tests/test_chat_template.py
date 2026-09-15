@@ -68,14 +68,17 @@ class ChatTemplateTests(unittest.TestCase):
 
     def test_thinking_can_be_disabled(self) -> None:
         rendered = render_generation_prompt(enable_thinking=False)
-        # The head line stays: it is what keeps the cached prefix stable across
-        # a thinking toggle. Thinking is disabled by the closed block instead.
-        self.assertIn("<|system|>Reasoning Effort: Max", rendered)
+        # Thinking off = closed think block AND no Reasoning Effort directive.
+        # Emitting the directive with an empty think block (2026-08-30..09-09,
+        # done to keep the prefix cache stable across a thinking toggle) made
+        # the model reason in the answer channel: spark-bench code 98 -> 60,
+        # structured 97 -> 58, syntax errors and fenced JSON at temperature 0.3.
+        self.assertNotIn("Reasoning Effort", rendered)
         self.assertTrue(rendered.endswith("<|assistant|><think></think>"), rendered)
 
     def test_thinking_alias_matches_parser_behavior(self) -> None:
         rendered = render_generation_prompt(thinking=False)
-        self.assertIn("<|system|>Reasoning Effort: Max", rendered)
+        self.assertNotIn("Reasoning Effort", rendered)
         self.assertTrue(rendered.endswith("<|assistant|><think></think>"), rendered)
 
     def test_explicit_thinking_preserves_reasoning_effort(self) -> None:
@@ -88,34 +91,31 @@ class ChatTemplateTests(unittest.TestCase):
 
 
 class PrefixStabilityTests(unittest.TestCase):
-    """Toggling thinking must not change the prompt before the final token.
+    """What a thinking toggle costs in prefix cache, and what it must not cost.
 
-    vLLM chains prefix-cache block hashes forward from token 0, so any
-    divergence near the head invalidates the whole prompt. The off-shape must
-    therefore be a strict extension of the on-shape.
+    The Reasoning Effort head line is gated on thinking, so toggling thinking
+    changes token ~2 and re-prefills the prompt (accepted: quality first —
+    agent traffic does not toggle mid-conversation). Everything after the head
+    line must still be byte-identical between the two shapes.
     """
 
-    def _assert_strict_extension(self, tools) -> None:
+    def _assert_same_after_head(self, tools) -> None:
         on = render_conversation(
             messages=CONVERSATION, tools=tools, enable_thinking=True
         )
         off = render_conversation(
             messages=CONVERSATION, tools=tools, enable_thinking=False
         )
-        self.assertTrue(
-            off.startswith(on),
-            "thinking-off prompt must extend thinking-on prompt, but they "
-            f"diverge at char {len(_common_prefix(on, off))} of {len(on)}",
-        )
-        self.assertEqual(off[len(on) :], "</think>")
+        head = "<|system|>Reasoning Effort: Max"
+        self.assertIn(head, on)
+        self.assertNotIn("Reasoning Effort", off)
+        self.assertEqual(off, on.replace(head, "", 1) + "</think>")
 
-    def test_toggle_is_prefix_stable_without_tools(self) -> None:
-        self._assert_strict_extension(None)
+    def test_toggle_only_differs_by_head_line_without_tools(self) -> None:
+        self._assert_same_after_head(None)
 
-    def test_toggle_is_prefix_stable_with_tools(self) -> None:
-        # Agent traffic always carries tools; the tools block renders after the
-        # reasoning-effort line, so this is the case that actually regressed.
-        self._assert_strict_extension(TOOLS)
+    def test_toggle_only_differs_by_head_line_with_tools(self) -> None:
+        self._assert_same_after_head(TOOLS)
 
     def test_effort_levels_share_the_prompt_up_to_the_effort_word(self) -> None:
         low = render_conversation(

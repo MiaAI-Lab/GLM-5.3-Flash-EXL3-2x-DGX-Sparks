@@ -373,6 +373,8 @@ COPY overlay/patch_exl3_ext_aarch64.py /opt/glm53/patch_exl3_ext_aarch64.py
 COPY overlay/patch_exl3_fat_kernel.py /opt/glm53/patch_exl3_fat_kernel.py
 COPY overlay/exl3_fat_gemm.cu /opt/glm53/exl3-fat-kernel/exl3_fat_gemm.cu
 COPY overlay/exl3_fat_gemm.cuh /opt/glm53/exl3-fat-kernel/exl3_fat_gemm.cuh
+COPY overlay/exl3_fat_moe.cu /opt/glm53/exl3-fat-kernel/exl3_fat_moe.cu
+COPY overlay/exl3_fat_moe.cuh /opt/glm53/exl3-fat-kernel/exl3_fat_moe.cuh
 
 ARG EXLLAMAV3_COMMIT=c5d9c657966ffeeaa9353f0cc899f18629da4a13
 ENV TORCH_CUDA_ARCH_LIST=12.1a
@@ -428,7 +430,7 @@ RUN set -eux; \
     cd /tmp/exllamav3; \
     TORCH_CUDA_ARCH_LIST=12.1a MAX_JOBS=8 \
       pip install --no-deps --no-build-isolation --no-cache-dir .; \
-    python3 -c "import torch; import exllamav3_ext; assert hasattr(exllamav3_ext, 'exl3_moe'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_gemm'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_gemm_scatter'), dir(exllamav3_ext); print('exllamav3_ext', exllamav3_ext.__file__, 'exl3_moe=yes fat_gemm=yes')"; \
+    python3 -c "import torch; import exllamav3_ext; assert hasattr(exllamav3_ext, 'exl3_moe'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_gemm'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_gemm_scatter'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_moe_gateup'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_moe_down'), dir(exllamav3_ext); assert hasattr(exllamav3_ext, 'exl3_fat_moe_gather'), dir(exllamav3_ext); print('exllamav3_ext', exllamav3_ext.__file__, 'exl3_moe=yes fat_gemm=yes fat_moe=yes')"; \
     rm -rf /tmp/exllamav3 /root/.cache/pip
 
 # Keep this AFTER the CUDA compile layer so Python-only hook edits do not
@@ -449,6 +451,8 @@ COPY tests/test_suppress_stops.py /opt/glm53/test_suppress_stops.py
 COPY overlay/patch_scheduler_decode_floor.py /opt/glm53/patch_scheduler_decode_floor.py
 COPY tests/test_scheduler_decode_floor.py /opt/glm53/test_scheduler_decode_floor.py
 COPY overlay/patch_hybrid_prefix_hit.py /opt/glm53/patch_hybrid_prefix_hit.py
+COPY overlay/patch_apc_per_group_retention.py /opt/glm53/patch_apc_per_group_retention.py
+COPY tests/test_apc_per_group_retention.py /opt/glm53/test_apc_per_group_retention.py
 COPY tests/test_hybrid_prefix_hit.py /opt/glm53/test_hybrid_prefix_hit.py
 COPY overlay/patch_xgrammar_termination.py /opt/glm53/patch_xgrammar_termination.py
 COPY tests/test_xgrammar_termination.py /opt/glm53/test_xgrammar_termination.py
@@ -468,7 +472,10 @@ RUN python3 /opt/glm53/patch_glm_eagle3.py
 RUN python3 /opt/glm53/patch_glm5_drafter_group.py
 RUN python3 /opt/glm53/patch_suppress_stops_in_reasoning.py
 RUN python3 /opt/glm53/patch_scheduler_decode_floor.py
+RUN GLM53_KV_COORDINATOR_PY_SRC=/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_coordinator.py \
+    python3 /opt/glm53/test_apc_per_group_retention.py
 RUN python3 /opt/glm53/patch_hybrid_prefix_hit.py
+RUN python3 /opt/glm53/patch_apc_per_group_retention.py
 RUN python3 /opt/glm53/patch_xgrammar_termination.py
 RUN python3 /opt/glm53/patch_kpool_tail_slotmap.py
 # Applied unconditionally; the injected sizing reads GLM53_INDEXER_WORKSPACE
