@@ -423,7 +423,9 @@ Off by default. When set, vLLM's CPU offload staging region is backed by a
 **sparse file on each node's own NVMe**, so a prefix that has been evicted from
 the GPU pool is *restored from disk* instead of recomputed. Capacity becomes the
 size of that file rather than RAM — useful when several people share the box and
-the GPU pool alone cannot hold everyone's context.
+the GPU pool alone cannot hold everyone's context. Wired in `start.sh` (TP=2)
+only: `start-tp3.sh` / `start-tp4.sh` neither forward these knobs nor mount
+`overlay/patch_kv_offload_groups.py`.
 
 Measured on this kit (105k-token prompt, evicted by 6 × 168k-token floods,
 100 GB per-node store, thinking off, temp 0):
@@ -442,8 +444,8 @@ gives structured **66.4** tok/s / prose **26.7** against the 65.1 / 27.1 above.
 ```bash
 GLM53_OFFLOAD_MMAP_DIR=/root/.cache/vllm/kv-mmap \
 GLM53_OFFLOAD_RELEASE_BYTES=2000000000 \
-GLM53_ALLOC_CONF=expandable_segments:False \
-EXTRA_ARGS='--kv-transfer-config {"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":171798691840,"eviction_policy":"lru"}}' \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+EXTRA_ARGS='--kv-transfer-config {"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":171798691840,"eviction_policy":"lru"}} --enable-cumem-allocator' \
 ./start.sh restart
 ```
 
@@ -476,7 +478,10 @@ recover once the request finished, and wedged both Sparks. Take the guard's
 documented exemption — keep `expandable_segments:True` and add
 `--enable-cumem-allocator`, which puts the KV pool on stable physical pages
 (what the guard actually protects) while the rest of the engine keeps expandable
-segments. The same request then dipped ~560 MB and completed in 397 s.
+segments. The allocator itself stays under the launcher's `PYTORCH_CUDA_ALLOC_CONF`
+override (default `expandable_segments:True` when unset; an explicit empty value
+disables it — offload adds no allocator knob of its own). The same request then
+dipped ~560 MB and completed in 397 s.
 
 ⚠️ Do **not** set `PYTHONHASHSEED` with offload on (the tier docs suggest it for
 cross-process key stability): it invalidates the Triton JIT cache keys and the
@@ -944,6 +949,8 @@ that are now documented/enforced:
 | `MAX_MODEL_LEN` | `850000` | default context since 2026-09-07 (E3 default; 1M fits again with `EXL3_FAT_GROUPED=0`). 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool. At MNBT 7168 one 1M request needs **14.52 GiB** KV (10.98 GiB at 500k; ~7.4 GiB fixed + 7.1 GiB per 1M); the E3 recipe runs 500k |
 | `GPU_MEM_UTIL` | `0.85` | GB10 UMA budget (default lowered from 0.87 on 2026-09-07: each 0.01 is 1.2 GiB of host headroom, and long prefills need it — see *Cold prefill (E3)*). E3 at 900k / 0.85: pool ~1.05M tokens / 1.17× (0.87: 16.2 GiB / 1,051,648 tokens). Pre-E3 receipts at 1M / 0.87: 1,754,237 tokens / 18.67 GiB (MNBT 2048); 1,243,902 tokens / 1.24× (7168, rightsize, E2) |
 | `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` when unset | TP=2 `start.sh` passes the effective value to both ranks. An explicit empty value disables this option; caller exports, including empty, override `.env`. Changing allocator settings requires a restart and separate memory/connector qualification; TP=4 is unchanged |
+| `GLM53_OFFLOAD_MMAP_DIR` | *(unset = off)* | opt-in: back the CPU offload staging region with a sparse file on this node's own NVMe instead of `/dev/shm` (per-node by construction; TP=2 `start.sh` only). Also needs the offload serve flags — see *KV cache offload to disk* |
+| `GLM53_OFFLOAD_RELEASE_BYTES` | *(unset = no bound)* | bytes stored between `msync` + `MADV_DONTNEED` passes over that region (`2000000000` measured good). With a large store, an unbounded page cache starves the GPU and the worker rank dies mid-prefill with no traceback |
 | `KV_CACHE_DTYPE` | `fp8` | packed `fp8_ds_mla`; not `nvfp4`, not bf16 |
 | `DEFAULT_MAX_NEW_TOKENS` | `65536` | Omitted-only output-token default (`1..1000000`) for chat and completion requests, implemented by `overlay/patch_default_max_new_tokens.py`. Explicit `max_tokens`/`max_completion_tokens` overrides this default; independent server, platform and remaining-context caps still apply. Empty preserves stock model/server defaults and caps. Does not reserve admission capacity or fix long-prefill contention; admission is chunk-based. Caller exports (including empty) override `.env`. TP=2 launcher only; `start-tp4.sh` is unchanged. |
 | `GLM53_APC_RETENTION_INTERVAL_SWA` | *(unset)* | TP=2 DFlash2 drafter retention. Empty inherits global retention with ordinary priority; explicit `0` keeps reachable boundaries and enables draft-only eviction priority; positive values must be multiples of 3584, at most 1,000,000. Requires `SPEC_METHOD=dflash` and the hybrid prefix overlay. TP=4 rejects a non-empty value. Qualify retention, branching, and draft acceptance for the chosen global/SWA pair; see [measurements](docs/apc-retention-qualification.md) |
@@ -1019,6 +1026,8 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `tests/test_xgrammar_termination.py` | exact two-file patch, idempotence, cross-file fail-closed drift, termination/rollback/reset and post-reasoning draft behavior, launcher wiring |
 | `overlay/patch_kpool_tail_slotmap.py` | clamp KpoolTail one-block circular slot mapping; identity for other KV groups |
 | `tests/test_kpool_tail_slotmap.py` | circular addressing math, exact kernel patch, idempotence, fail-closed drift, launcher wiring |
+| `overlay/patch_kv_offload_groups.py` | opt-in `GLM53_OFFLOAD_MMAP_DIR` disk tier: mark unalignable per-request scratch groups (kpool tail) as skip-at-every-scheduler-touchpoint, force the per-layer copy path, and back the staging region with a sparse NVMe file plus a bounded page cache |
+| `tests/test_kv_offload_groups.py` | five-file target map, fixture anchor apply/idempotence, fail-closed drift, env kill switch, and — inside the image — every installed-vLLM anchor still single-hit |
 | `overlay/patch_indexer_workspace.py` | opt-in `GLM53_INDEXER_WORKSPACE=rightsize`: size the sparse-indexer prefill workspace to the legal per-step maximum instead of `max_model_len * 40`; boot-time compress-ratio cross-check |
 | `tests/test_indexer_workspace.py` | sizing formula (MNBT/`max_num_seqs`/spec-token edge cases, stock clamp), chunk-list equivalence vs stock by exhaustion, exact three-site patch, idempotence, fail-closed drift, launcher wiring |
 | `overlay/patch_spinwait.py` | opt-in numeric `GLM53_SPINWAIT_MS`: fail-closed runtime patch of SpinCondition's reader busy-loop window on both ranks |
