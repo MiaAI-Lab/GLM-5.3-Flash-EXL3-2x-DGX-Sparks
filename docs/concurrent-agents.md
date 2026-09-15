@@ -66,16 +66,18 @@ GLM53_SCHEDULER_PY_SRC=/path/to/scheduler.py python3 tests/test_scheduler_decode
 
 Reapplication accepts only a complete known patch: the legacy helper site is
 validated before anything is removed (v1/v2/v5 against the published helper text
-by sha256, v3/v4 against the canonical site structure because those intermediate
-bodies were never published, the current version against the installer's own
-text), one exact byte range is removed, and the whole file is round-trip checked
-— re-adding that span and re-applying the version's frozen gate sites must
-reproduce the input byte-for-byte. A marker alone is never trusted. A partial
-patch, changed helper (including decorators), duplicate helper, or altered gate
-fails without modifying the scheduler, and an unversioned variant whose baked
-default differs from the published one is refused rather than silently migrated.
-A validated legacy image (v1–v5) is migrated to the current installer version
-without changing the operator's `GLM53_MIXED_PREFILL_CHUNK` value, and
+by sha256, the current version against the installer's own text), one exact byte
+range is removed, and the whole file is round-trip checked — re-adding that span
+and re-applying the version's frozen gate sites must reproduce the input
+byte-for-byte. A marker alone is never trusted. A partial patch, changed helper
+(including decorators), duplicate helper, or altered gate fails without
+modifying the scheduler, and an unversioned variant whose baked default differs
+from the published one is refused rather than silently migrated. v3 and v4 are
+refused as unsupported without touching the source: no authenticated producer of
+their intermediate helper bodies was recovered from public history, so no
+canonical v3/v4 image is invented for them. A validated legacy image (v1/v2/v5)
+is migrated to the current installer version without changing the operator's
+`GLM53_MIXED_PREFILL_CHUNK` value, and
 the current version accepts the opt-in gate forms (`GLM53_MIXED_PREFILL_WARM_TOKENS`
 / `_MAX_WAIT_MS`) so a supported gate-v2 scheduler is not rejected at startup.
 These CPU checks prove patch integrity and policy behavior, not live request

@@ -110,10 +110,24 @@ class PrefillProgressTests(unittest.TestCase):
         self.assertEqual(self.run_steps(self.policy(GLM53_MIXED_PREFILL_CHUNK="skip")),
                          newcomer.num_prompt_tokens)
 
-    def test_bounded_chunk_progresses_under_the_cap(self):
-        steps = -(-self.newcomer.num_prompt_tokens // 128)  # ceil: 1200 -> 10 steps at 128/step
-        self.assertEqual(self.run_steps(self.policy(GLM53_MIXED_PREFILL_CHUNK="128"), steps=steps),
-                         self.newcomer.num_prompt_tokens)
+    def test_bounded_chunk_grants_the_cap_every_step_under_the_peer(self):
+        # A positive cap is a per-step eligibility bound while a peer decodes,
+        # not a service-time guarantee: every step must offer the newcomer
+        # exactly min(cap, remaining) tokens (nothing here measures wall time),
+        # so 1200 tokens complete in ceil(1200/128) steps rather than waiting
+        # for the peer to stop.
+        p = self.policy(GLM53_MIXED_PREFILL_CHUNK="128")
+        newcomer = self.newcomer
+        granted = []
+        for _ in range(10):
+            before = newcomer.num_computed_tokens
+            remaining = newcomer.num_prompt_tokens - before
+            self.assertGreater(remaining, 0)
+            self.assertEqual(p.cap_for(self.sched, newcomer), min(128, remaining))
+            self.run_steps(p, steps=1)
+            granted.append(newcomer.num_computed_tokens - before)
+        self.assertEqual(granted, [128] * 9 + [48])
+        self.assertEqual(newcomer.num_computed_tokens, newcomer.num_prompt_tokens)
 
     def test_solo_prefill_is_never_capped(self):
         solo = Req("solo", 900)
