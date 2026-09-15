@@ -1012,6 +1012,8 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `overlay/tp3/` | TP=3-only shape overlays (FlyCockpit MIT): head/vocab/shared-expert/A_log pads, EP loader, SM120 decode pad. Not on the TP=2 path |
 | `files/nfs-share.sh` / `files/nfs-server/` | `NFS_SHARE=1`: workers mount the head's HF cache over NFSv4 instead of holding a copy. Used by `start.sh` and `start-tp3.sh`. This kit has it on |
 | `start-tp4.sh` / `.env.tp4.example` | experimental 4-node TP=4 launch; knobs stay out of `.env` |
+| `kernel_lab/exl3/` | model-agnostic EXL3 K1-K8 oracle, SM121 tactic sweep, and Atlas receipt producer (development-only; not in the production image) |
+| `docs/exl3-sm121-kernel-lab.md` | kernel ABI, measurements, upstream sources, decisions, and next gate |
 | `files/chat_template.jinja` | GLM-5.3 MM template (`<|image|>` / `<|video|>`); checkpoint jinja is language-only |
 | `overlay/qwen3_dflash2.py` | DFlash2 draft (grouped conv + candidate selector) |
 | `overlay/dflash2_speculator.py` | DFlash2 selector walk (V2 speculator) |
@@ -1042,6 +1044,13 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 
 Image-build runs `EXL3_SELFCHECK_GPU=0`. `./start.sh` runs the GPU self-check
 (`docker run --gpus all`) before shipping unless `SKIP_OVERLAY_VERIFY=1`.
+
+The kernel lab is development-only source: the production Dockerfile does not
+copy or install `kernel_lab/`, so the served image does not contain it. The lab
+accepts arbitrary `OPERATOR:K:N` shapes or a JSON workload file; GLM/Hy4 names
+are optional historical fixtures, not a supported-model list. See
+[`kernel_lab/README.md`](kernel_lab/README.md) for the portable correctness
+gate and isolated SM121 tuning command.
 
 ## Do not
 
