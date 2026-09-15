@@ -87,11 +87,11 @@ class SseErrorObjectTests(unittest.TestCase):
 
 class RateWindowTests(unittest.TestCase):
     def test_capture_relative_window_needs_the_t0_offset(self):
-        rec = capture(offsets=(2.0, 4.0, 6.0), ttft=2.0, wall=6.0)
+        rec = capture(offsets=(2.0, 4.0, 6.0), ttft=2.0, wall=8.0)
         # Chunk stamps are absolute: a window expressed in the capture's own
         # relative terms matches nothing, which is the defect this pins.
         self.assertEqual(gate.rate(rec, rec["ttft"], rec["wall"]), 0.0)
-        self.assertEqual(gate.rate(rec, rec["t0"] + rec["ttft"], rec["t0"] + rec["wall"]), 0.75)
+        self.assertEqual(gate.rate(rec, rec["t0"] + rec["ttft"], rec["t0"] + rec["wall"]), 0.5)
 
     def test_absolute_window_is_used_as_given(self):
         rec = capture(offsets=(2.0, 4.0, 6.0), ttft=2.0, wall=6.0)
