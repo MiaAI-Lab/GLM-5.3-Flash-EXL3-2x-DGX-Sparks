@@ -432,6 +432,13 @@ Experimental; not qualified on the current integrated image. Maintainer
 decision. Source patch/compile/idempotence checks do not establish actual
 disk-to-GPU restores, output correctness, or bounded host memory.
 
+The release-threshold contract still needs a maintainer decision before live
+qualification. Current worker behavior parses Python integers: unset, empty,
+or `0` disables release; negative values trigger release on every completion
+poll, and nonintegers fail worker construction. The launcher does not reject
+these values before stopping containers. These are source observations, not
+recommended settings or a qualified supported domain.
+
 Historical author measurements from the August 2026 image, not a current-main
 qualification (105k-token prompt, evicted by 6 × 168k-token floods,
 100 GB per-node store, thinking off, temp 0):
@@ -957,7 +964,7 @@ that are now documented/enforced:
 | `GPU_MEM_UTIL` | `0.85` | GB10 UMA budget (default lowered from 0.87 on 2026-09-07: each 0.01 is 1.2 GiB of host headroom, and long prefills need it — see *Cold prefill (E3)*). E3 at 900k / 0.85: pool ~1.05M tokens / 1.17× (0.87: 16.2 GiB / 1,051,648 tokens). Pre-E3 receipts at 1M / 0.87: 1,754,237 tokens / 18.67 GiB (MNBT 2048); 1,243,902 tokens / 1.24× (7168, rightsize, E2) |
 | `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` when unset | TP=2 `start.sh` passes the effective value to both ranks. An explicit empty value disables this option; caller exports, including empty, override `.env`. Changing allocator settings requires a restart and separate memory/connector qualification; TP=4 is unchanged |
 | `GLM53_OFFLOAD_MMAP_DIR` | *(unset = off)* | opt-in: back the CPU offload staging region with a sparse file on this node's own NVMe instead of `/dev/shm` (per-node by construction; TP=2 `start.sh` only). Also needs the offload serve flags — see *KV cache offload to disk* |
-| `GLM53_OFFLOAD_RELEASE_BYTES` | *(unset = no bound)* | bytes stored between `msync` + `MADV_DONTNEED` passes over that region (`2000000000` measured good). With a large store, an unbounded page cache starves the GPU and the worker rank dies mid-prefill with no traceback |
+| `GLM53_OFFLOAD_RELEASE_BYTES` | *(unset/empty/0 = release disabled)* | completed store **and load** bytes accumulated between `msync` + `MADV_DONTNEED` passes. The historical August run used `2000000000`; current-image memory behavior is unqualified. Worker parsing and pre-stop validation limits are described under *KV cache offload to disk* |
 | `KV_CACHE_DTYPE` | `fp8` | packed `fp8_ds_mla`; not `nvfp4`, not bf16 |
 | `DEFAULT_MAX_NEW_TOKENS` | `65536` | Omitted-only output-token default (`1..1000000`) for chat and completion requests, implemented by `overlay/patch_default_max_new_tokens.py`. Explicit `max_tokens`/`max_completion_tokens` overrides this default; independent server, platform and remaining-context caps still apply. Empty preserves stock model/server defaults and caps. Does not reserve admission capacity or fix long-prefill contention; admission is chunk-based. Caller exports (including empty) override `.env`. TP=2 launcher only; `start-tp4.sh` is unchanged. |
 | `GLM53_APC_RETENTION_INTERVAL_SWA` | *(unset)* | TP=2 DFlash2 drafter retention. Empty inherits global retention with ordinary priority; explicit `0` keeps reachable boundaries and enables draft-only eviction priority; positive values must be multiples of 3584, at most 1,000,000. Requires `SPEC_METHOD=dflash` and the hybrid prefix overlay. TP=4 rejects a non-empty value. Qualify retention, branching, and draft acceptance for the chosen global/SWA pair; see [measurements](docs/apc-retention-qualification.md) |
