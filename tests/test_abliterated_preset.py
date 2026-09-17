@@ -108,7 +108,7 @@ printf '%s\n' "$EXPECTED_SHARDS"
         "wrong/fallback",
         "wrong",
     ]
-    assert regular.stdout.splitlines()[-3:] == ["1", "9123", "1"]
+    assert regular.stdout.splitlines()[-3:] == ["0", "9123", "1"]
 
 
 def _make_snapshot(repo: Path, revision: str, shards: int = 120) -> None:

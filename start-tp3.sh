@@ -111,6 +111,9 @@ _cli_apc_swa="${GLM53_APC_RETENTION_INTERVAL_SWA-}"
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
+# TP=3 does not inherit ABLIT=1 from the 2-node .env. Opt in from .env.tp3
+# or ABLIT=1 on the command line.
+ABLIT=0
 # TP=3 overlay wins over the 2× knobs in .env.
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env.tp3"

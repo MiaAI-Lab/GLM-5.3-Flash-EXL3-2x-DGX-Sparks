@@ -6,6 +6,14 @@ Versions **1.0.0–1.5.0** are retrospective SemVer labels over merged `main` hi
 There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a release.
 Dates are merge dates on `MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks`.
 
+## [Unreleased]
+
+### Changed
+
+- `start.sh` and `start-tp3.sh` default `ABLIT=0` and ignore `ABLIT=1` in `.env`.
+  Opt in with `ABLIT=1 ./start.sh` or `ABLIT=1` in `.env.tp3`. Other `.env`
+  knobs are unchanged, including `GLM53_APC_RETENTION_INTERVAL_SWA` from #207.
+
 ## [1.5.0] — 2026-09-17
 
 Cooperative decode MoE (geometry 1) plus DFlash prefix-cache retention on TP3/TP4.

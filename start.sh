@@ -80,6 +80,10 @@ set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
 set +a
+# Stock o_proj unless the caller exported ABLIT. Only this flag is cleared;
+# every other .env knob stays, including GLM53_APC_RETENTION_INTERVAL_SWA
+# from #207. Use ABLIT=1 ./start.sh to opt in.
+ABLIT=0
 # Each entry is NAME=value; quoting preserves whitespace and empty values.
 # shellcheck disable=SC2163
 for _kv in ${_caller_overrides[@]+"${_caller_overrides[@]}"}; do export "$_kv"; done

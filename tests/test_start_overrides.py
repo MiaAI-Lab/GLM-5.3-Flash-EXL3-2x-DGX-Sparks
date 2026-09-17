@@ -144,9 +144,24 @@ def test_every_env_example_key_preserves_caller_setness() -> None:
         assert _run_preamble(dotenv, caller, probe) == "\n".join(
             f"[{value}]" for key in keys
         )
-    assert _run_preamble(dotenv, {}, probe) == "\n".join(
-        "[dotenv]" for key in keys
+    dotenv_expected = ["[0]" if key == "ABLIT" else "[dotenv]" for key in keys]
+    assert _run_preamble(dotenv, {}, probe) == "\n".join(dotenv_expected)
+
+
+def test_ablit_dotenv_ignored_without_touching_swa_retention() -> None:
+    """ABLIT=1 in .env is ignored; #207 SWA retention from .env still applies."""
+    env_file = "ABLIT=1\nGLM53_APC_RETENTION_INTERVAL_SWA=0\n"
+    probe = (
+        '\nprintf "ABLIT=%s SWA=%s\\n" '
+        '"${ABLIT-UNSET}" "${GLM53_APC_RETENTION_INTERVAL_SWA-UNSET}"\n'
     )
+    assert _run_preamble(env_file, {}, probe) == "ABLIT=0 SWA=0"
+    assert _run_preamble(env_file, {"ABLIT": "1"}, probe) == "ABLIT=1 SWA=0"
+    assert _run_preamble(
+        env_file,
+        {"GLM53_APC_RETENTION_INTERVAL_SWA": "3584"},
+        probe,
+    ) == "ABLIT=0 SWA=3584"
 
 
 def test_shell_assignments_preserve_caller_values() -> None:
@@ -182,4 +197,5 @@ if __name__ == "__main__":
     test_default_reasoning_effort_caller_override_is_setness_aware()
     test_indexer_workspace_caller_capture_is_setness_aware()
     test_spinwait_caller_capture_is_setness_aware()
+    test_ablit_dotenv_ignored_without_touching_swa_retention()
     print("start.sh caller override regression OK")
