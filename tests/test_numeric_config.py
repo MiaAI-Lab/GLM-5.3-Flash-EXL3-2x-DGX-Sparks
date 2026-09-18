@@ -228,24 +228,41 @@ def test_thin_decode_flag_rejects_bad_values_before_host_actions() -> None:
             assert not harness.host_touching_calls(), (value, harness.calls())
 
 
-def test_tp4_rejects_retention_override() -> None:
+def validate_tp4_retention(knob: str, value: str, method: str = "dflash") -> subprocess.CompletedProcess:
     script = (
         guard_source(START_TP4)
         + '\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4; '
         + 'MAX_NUM_BATCHED_TOKENS=1024; GLM53_INDEXER_WORKSPACE=stock; '
-        + 'GLM53_SPINWAIT_MS=stock; export "$1=$2"\n'
+        + 'GLM53_SPINWAIT_MS=stock; SPEC_METHOD="$3"; export "$1=$2"\n'
         + 'validate_numeric_config\n'
     )
+    return subprocess.run(
+        ["bash", "-c", script, "test", knob, value, method],
+        text=True,
+        capture_output=True,
+        check=False,
+        env={"PATH": os.environ["PATH"], "LC_ALL": "C"},
+    )
+
+
+def test_tp4_accepts_supported_retention_values() -> None:
     for knob in ("GLM53_APC_RETENTION_INTERVAL", "GLM53_APC_RETENTION_INTERVAL_SWA"):
-        for value, expected in (("", 0), ("0", 2), ("14336", 2)):
-            result = subprocess.run(
-                ["bash", "-c", script, "test", knob, value],
-                text=True,
-                capture_output=True,
-                check=False,
-                env={**os.environ, "LC_ALL": "C"},
-            )
-            assert result.returncode == expected, (value, result.stderr)
+        for value in ("", "0", "3584", "14336"):
+            result = validate_tp4_retention(knob, value)
+            assert result.returncode == 0, (knob, value, result.stderr)
+
+
+def test_tp4_rejects_malformed_retention_values() -> None:
+    for knob in ("GLM53_APC_RETENTION_INTERVAL", "GLM53_APC_RETENTION_INTERVAL_SWA"):
+        for value in ("-1", "1", "1.5", " 3584", "1003520", "bad"):
+            result = validate_tp4_retention(knob, value)
+            assert result.returncode == 2, (knob, value, result.stderr)
+
+
+def test_tp4_explicit_swa_requires_dflash() -> None:
+    for method in ("mtp", "none"):
+        assert validate_tp4_retention("GLM53_APC_RETENTION_INTERVAL_SWA", "0", method).returncode == 2
+        assert validate_tp4_retention("GLM53_APC_RETENTION_INTERVAL_SWA", "", method).returncode == 0
 
 
 
@@ -257,5 +274,7 @@ if __name__ == "__main__":
     test_kv_capacity_log_flag()
     test_mixed_prefill_contract()
     test_thin_decode_flag_rejects_bad_values_before_host_actions()
-    test_tp4_rejects_retention_override()
+    test_tp4_accepts_supported_retention_values()
+    test_tp4_rejects_malformed_retention_values()
+    test_tp4_explicit_swa_requires_dflash()
     print("numeric config tests: PASS")
