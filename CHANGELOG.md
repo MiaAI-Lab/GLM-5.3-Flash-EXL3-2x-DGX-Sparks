@@ -51,6 +51,19 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   TP2/TP3 adapter is unchanged, and both generators still refuse any other
   content. `docs/cooperative-moe-handoff.md` records the new pin.
 
+### Fixed
+
+- `overlay/patch_hybrid_prefix_hit.py` now migrates the legacy EAGLE
+  verification region to the v3 rule even when an earlier image already
+  carries the `[glm53-hybrid-apc]` marker: the marker gate previously skipped
+  the whole hybrid block, so upgrades of pre-patched images never installed
+  the v3 `eagle_verified.discard` fix from #130. A marker alone no longer
+  counts as current — the installer requires exactly one intact v3 region,
+  migrates the exact legacy prefix otherwise, and fails closed (no write) on
+  unknown, duplicated or partially modified verification regions. The final
+  result is also `compile()`-checked before writing. Defaults and fresh
+  installs are unchanged; repeated application stays byte-identical.
+
 ## [1.6.0] — 2026-09-17
 
 TP3 ABI2 cooperative MoE and opt-in FlashKDA, ABLIT off, and new sparkDash
