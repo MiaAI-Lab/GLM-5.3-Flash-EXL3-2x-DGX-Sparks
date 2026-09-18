@@ -32,7 +32,8 @@ GLM53_MIXED_PREFILL_CHUNK:
                afterwards a 2s age override may borrow one such chunk, only
                after all shared debt is repaid. In-flight async prefill
                blocks the next mixed turn. Prefills are selected by last
-               completed positive prefill service plus round-robin. Decode
+                completed positive prefill service plus round-robin within each
+                request-priority tier when scheduling-policy=priority. Decode
                token/input budget is allocated first by the base scheduler.
                Solo prefill retains the base scheduler's limits. Timing is a
                host busy-time proxy.
@@ -66,6 +67,23 @@ MARK_V2 = "# [glm53-decode-floor:v2]"
 MARK_V3 = "# [glm53-decode-floor:v3]"
 MARK_V4 = "# [glm53-decode-floor:v4]"
 MARK_V5 = "# [glm53-decode-floor:v5]"
+PRIORITY_MARK = "# [glm53-prefill-priority:v1]"
+LEGACY_RANK_PREFIX = """    def _rank_prefills(self, prefills):
+        return sorted(prefills, key=lambda r: (
+            self.last_service.get(r.request_id, 0.0),
+"""
+PRIORITY_RANK_PREFIX = """    def _rank_prefills(self, prefills):
+        return sorted(prefills, key=lambda r: (
+            # [glm53-prefill-priority:v1] Preserve fairness within priority tiers.
+            int(getattr(r, "priority", 0) or 0) if getattr(self, "priority_mode", False) else 0,
+            self.last_service.get(r.request_id, 0.0),
+"""
+LEGACY_CANDIDATES = """        self._candidates = self._rank_prefills(prefills)
+"""
+PRIORITY_CANDIDATES = """        policy = getattr(sched, "policy", None)
+        self.priority_mode = getattr(policy, "value", policy) == "priority"
+        self._candidates = self._rank_prefills(prefills)
+"""
 
 IMPORT_OLD = """import itertools
 import time
@@ -469,6 +487,8 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
 
     def _rank_prefills(self, prefills):
         return sorted(prefills, key=lambda r: (
+            # [glm53-prefill-priority:v1] Preserve fairness within priority tiers.
+            int(getattr(r, "priority", 0) or 0) if getattr(self, "priority_mode", False) else 0,
             self.last_service.get(r.request_id, 0.0),
             self.rr_seq.get(r.request_id, 0), self.arrival[r.request_id], r.request_id))
 
@@ -535,6 +555,8 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
                                          if self.needs_prefill_compute(r)]
         for r in running + waiting:
             self.arrival.setdefault(r.request_id, now)
+        policy = getattr(sched, "policy", None)
+        self.priority_mode = getattr(policy, "value", policy) == "priority"
         self._candidates = self._rank_prefills(prefills)
         self._tried = set()
         self.selected = set()
@@ -1088,6 +1110,9 @@ def main() -> int:
     text = P.read_text()
     original = text
     if MARK_V5 in text:
+        if PRIORITY_MARK not in text:
+            text = replace_once(text, LEGACY_RANK_PREFIX, PRIORITY_RANK_PREFIX, "prefill priority ranking")
+            text = replace_once(text, LEGACY_CANDIDATES, PRIORITY_CANDIDATES, "prefill scheduler policy")
         # Validate existing anchors/helper instead of trusting the marker alone.
         # unpatch_v5 checks every v5 insertion occurs exactly once, strips the
         # helper, and rejects leftover markers. The result is discarded: a
@@ -1100,7 +1125,11 @@ def main() -> int:
         if "import os\n" not in text.split("import time\n", 1)[0]:
             raise SystemExit(f"{P}: v5 import drifted")
         compile(text, str(P), "exec")
-        print(f"{P.name}: {MARK_V5} already present — verified")
+        if text != original:
+            P.write_text(text)
+            print(f"{P.name}: migrated prefill-priority ranking ({PRIORITY_MARK})")
+        else:
+            print(f"{P.name}: {MARK_V5} already present — verified")
         return 0
     if MARK_V4 in text:
         text = unpatch_v4(text)
