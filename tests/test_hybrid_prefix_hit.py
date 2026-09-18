@@ -38,12 +38,11 @@ def main() -> int:
         text = dst.read_text()
         assert "[glm53-hybrid-apc]" in text
         assert text.count("[glm53-hybrid-apc]") >= 3
+        assert "# [glm53-dflash-eagle-verify-v3]" in text
         assert "def _glm53_is_draft_swa_spec(" in text
         assert "swa_ids or set(" in text
         subprocess.check_call([sys.executable, str(PATCH)], env=env)
-        assert dst.read_text().count("[glm53-hybrid-apc]") == text.count(
-            "[glm53-hybrid-apc]"
-        )
+        assert dst.read_text() == text
     print("hybrid prefix-hit patch OK")
     return 0
 

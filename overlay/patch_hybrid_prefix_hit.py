@@ -46,6 +46,18 @@ P = Path(
 )
 MARK = "# [glm53-hybrid-apc]"
 DFLASH_REPLAY_MARK = "# [glm53-dflash-swa-replay-v1]"
+EAGLE_VERIFY_MARK = "# [glm53-dflash-eagle-verify-v3]"
+
+# Earlier images already contain MARK, so the main hybrid installer is skipped.
+# Migrate that exact legacy verification prefix independently of MARK. Refuse
+# unknown versions instead of leaving an old verification rule active silently.
+LEGACY_VERIFY_PREFIX = """                if drop_eagle_block:
+                    eagle_verified.add(idx)
+                elif _new_hit_length < curr_hit_length:
+                    # length shrunk; invalidate previous eagle verifications
+                    eagle_verified.clear()
+                if _glm53_is_draft_swa_spec(spec):  # [glm53-hybrid-apc]
+"""
 
 BASE_HELPER = '''
 def _glm53_inner_kv_spec(spec):
@@ -162,6 +174,19 @@ MIN_NEW = """                _glm53_draft_swa = _glm53_is_draft_swa_spec(spec)
 
                 longest_hit_length = max(longest_hit_length, curr_hit_length)
 """
+
+
+def migrate_eagle_verification(text: str) -> str:
+    prefix = MIN_NEW.split("                    # Drafter SWA", 1)[0]
+    if EAGLE_VERIFY_MARK in text:
+        if (text.count(EAGLE_VERIFY_MARK) != 1
+                or text.count(prefix) != 1
+                or LEGACY_VERIFY_PREFIX in text):
+            raise SystemExit(f"{P}: current EAGLE verification region drifted")
+        return text
+    return replace_once(text, LEGACY_VERIFY_PREFIX, prefix,
+                        "legacy-eagle-verification")
+
 
 LOG_OLD = """        # Propagate the eagle bit to each manager (default to ``use_eagle=False``).
         for group in self.attention_groups:
@@ -320,6 +345,7 @@ def main() -> int:
         text = replace_once(text, EAGLE_OLD, EAGLE_NEW, "eagle-fallback")
         text = replace_once(text, MIN_OLD, MIN_NEW, "hybrid-min")
         text = replace_once(text, LOG_OLD, LOG_NEW, "group-log")
+    text = migrate_eagle_verification(text)
     if DFLASH_REPLAY_MARK not in text:
         if "def _glm53_dflash_swa_replay_tokens(" not in text:
             # Compose with the per-group overlay in a consistent helper order
@@ -338,6 +364,7 @@ def main() -> int:
         text = replace_once(
             text, CONVERGE_OLD, CONVERGE_FINAL, "dflash-replay-clamp"
         )
+    compile(text, str(P), "exec")
     P.write_text(text)
     print(
         f"patched {P.name} (hybrid APC + versioned DFlash SWA replay clamp)"
