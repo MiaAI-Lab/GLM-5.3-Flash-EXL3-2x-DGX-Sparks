@@ -99,7 +99,9 @@ class Owner:
         if off + nbytes > self.size:
             return None
         view = _View(self.pointer + off, nbytes)
-        t = torch.as_tensor(view, device="cuda:0")
+        # The pool was registered in the caller's current context; alias it on
+        # that device rather than assuming ordinal 0.
+        t = torch.as_tensor(view, device=torch.device("cuda", torch.cuda.current_device()))
         if t.data_ptr() != view.ptr or t.dtype != torch.int8 or t.numel() != nbytes:
             raise RuntimeError("CUDA array interface copied or misinterpreted external storage")
         self.used = off + nbytes

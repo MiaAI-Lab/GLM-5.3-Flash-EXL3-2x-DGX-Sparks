@@ -76,8 +76,10 @@ Pool *glm53_display_create(const char *drm_node, size_t bytes) {
     p->fd = open(drm_node ? drm_node : "/dev/dri/card0", O_RDWR | O_CLOEXEC);
     if (!check_sys("open DRM card", p->fd >= 0)) goto fail;
     struct drm_get_cap cap = {.capability = DRM_CAP_DUMB_BUFFER};
-    if (!check_sys("DRM_CAP_DUMB_BUFFER", ioctl(p->fd, DRM_IOCTL_GET_CAP, &cap) == 0 && cap.value)) {
-        if (!errno) snprintf(error_text, sizeof error_text, "DRM node lacks dumb-buffer support (nvidia_drm modeset=0?)");
+    if (!check_sys("DRM_IOCTL_GET_CAP", ioctl(p->fd, DRM_IOCTL_GET_CAP, &cap) == 0)) goto fail;
+    if (!cap.value) {
+        snprintf(error_text, sizeof error_text,
+                 "DRM node lacks dumb-buffer support (nvidia_drm modeset=0?)");
         goto fail;
     }
     struct drm_mode_create_dumb c = {.width = 4096, .height = (unsigned)(bytes / row), .bpp = 32};
