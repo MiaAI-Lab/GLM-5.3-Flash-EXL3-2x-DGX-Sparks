@@ -1202,6 +1202,7 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `overlay/exl3_fat_gemm.cu` | additive `exl3_fat_gemm` / `_scatter` compiled into `exllamav3_ext` |
 | `overlay/exl3_fat_moe.cu` / `.cuh` | E3 grouped fat-expert kernels (gather / gate-up+SwiGLU / down+scatter); compiled into `exllamav3_ext` by the full build, or as the additive `exl3_fat_moe_ext` module by `Dockerfile.e3-layer` + `overlay/build_exl3_fat_moe_ext.py` |
 | `tests/bench_e3_microbench.py` | CUDA-event MoE-layer timing E2 vs E3 + production-geometry parity (isolated, serving stopped) |
+| `overlay/patch_skip_cudagraph_profile.py` | skip the CUDA-graph memory dry-capture when `CG_ESTIMATE=0` discards it (`tests/test_skip_cudagraph_profile.py`) |
 | `overlay/patch_cold_load_uma.py` | InstantTensor budget vs UMA page cache + 64 KiB file-backed mmap staging (`tests/test_cold_load_uma.py`) |
 | `overlay/patch_exl3_ext_aarch64.py` | stub AVX CPU allreduce so the ext builds on GB10 |
 | `overlay/patch_exl3_decode_pipeline.py` | additive SM121 K4/N256 thin-decode kernels (shared / independent gate-up transform) + `glm53_fast_moe_version` in `exllamav3_ext`; stock kernels untouched, every anchor validated before anything is written |

@@ -111,7 +111,37 @@ startup check failed twice on this kit by < 0.5 GiB (`Free memory on device
 cuda:0 (107.45/123.72 GiB) … less than desired … (0.87, 107.64 GiB)`). This is
 also the prevention step from `docs/uvm-livelock-gb10.md`.
 
+## Boot time: 259 s → 122 s on `./start.sh restart` (measured 2026-09-19)
+
+With the weight stream at the drive ceiling, the rest of the boot was
+launcher/vLLM overhead. Four changes, each measured on a back-to-back restart
+(same `.env`, 2 reps each, second rep quoted; `/health` = seconds from
+`docker run`):
+
+| change | before | after |
+|---|---|---|
+| **`overlay/patch_glm_video_placeholders.py` `.pth`**: it called `apply()` eagerly on *every* Python interpreter start, importing `vllm.model_executor.models.glm4_1v` (~4 s) in each of the ~20 boot overlay scripts on both ranks and every vLLM subprocess. The module's own import hook already applies the patch when `glm4_1v` is really imported, so the eager call now only runs when that module is already loaded. Interpreter start 4.1 s → 0.025 s; hook verified to still fire. | container → first vLLM log line **100 s** | **6 s** |
+| **Persist the NVIDIA JIT cache** (`~/.nv/ComputeCache` → `$CACHE_ROOT/nv`, like Triton/TileLang). It lived in the container overlay and died on every `docker rm`, so the DFlash2 graph capture re-JITed a 31 MiB cubin each boot. | DFlash2 capture **30 s** | **0 s** |
+| **`overlay/patch_skip_cudagraph_profile.py`**: `gpu_worker.py` always ran the CUDA-graph memory dry-capture and then discarded the result under `CG_ESTIMATE=0`. Gate it on the same flag. | KV profile 18 s | 7 s |
+| **Launcher**: kill-first parallel stop (no 60 s SIGTERM grace, nothing to flush), `/health` polled every 1 s (container liveness every 10 s). | — | ~−15 s |
+
+| | before | after |
+|---|---|---|
+| `./start.sh restart` wall | 259 s | **122 s** |
+| `/health` from `docker run` | 230 s | **99 s** |
+
+What is left in the 99 s: 26 s Python/engine/NCCL init across two nodes,
+**39 s weight stream** (5.5–5.9 GB/s per rank in isolation; InstantTensor
+chunk 8 MiB × io_depth 256 is already the best of the sweep, 4–256 MiB chunks
+and uring tried; NCCL allgather is 12.6 GB/s/rank and not the limit), 7 s KV
+profile run, 11 s target graph capture + warmup, ~10 s API-server startup.
+The only remaining lever of size is a shard-aware loader that reads each
+rank's half of the routed experts instead of every rank streaming the whole
+checkpoint (~15–18 s); not in this PR.
+
 ## Rollback
 
 `GLM53_COLD_LOAD_UMA=0` and `GLM53_HOST_MEM_HYGIENE=0` return the stock paths
-without a rebuild.
+without a rebuild. The boot-time overlays are inert with `CG_ESTIMATE=1`
+(the dry-capture runs as before) and the `.pth` change only defers work the
+import hook already does.
