@@ -575,6 +575,28 @@ _glm53_validate_retention_interval() {
 
 # Validate no-store and KV-capacity-log switches before restart stops anything;
 # both overlays reject values other than exactly 0 or 1 at runtime.
+# DFLASH_SCHEDULE is a JSON list of [batch_lo, batch_hi, k] triples with
+# 1 <= batch_lo <= batch_hi and k >= 0 (0 = no drafting in that band).
+_glm53_validate_dflash_schedule() {
+    local value="$1"
+    DFLASH_SCHEDULE_VALUE="$value" python3 - <<'PY' 2>/dev/null && return 0
+import json, os, sys
+try:
+    s = json.loads(os.environ["DFLASH_SCHEDULE_VALUE"])
+except ValueError:
+    sys.exit(1)
+ok = isinstance(s, list) and len(s) > 0 and all(
+    isinstance(e, list) and len(e) == 3
+    and all(isinstance(x, int) and not isinstance(x, bool) for x in e)
+    and 1 <= e[0] <= e[1] and e[2] >= 0
+    for e in s
+)
+sys.exit(0 if ok else 1)
+PY
+    echo "DFLASH_SCHEDULE must be a JSON list of [batch_lo,batch_hi,k] triples with 1 <= lo <= hi and k >= 0 (got: $value)" >&2
+    return 2
+}
+
 _glm53_validate_bool_flag() {
     local name="$1" value="$2"
     if [ "$value" != 0 ] && [ "$value" != 1 ]; then
@@ -675,11 +697,7 @@ validate_numeric_config() {
     _glm53_validate_bool_flag GLM53_APC_NO_STORE "${GLM53_APC_NO_STORE-1}" || return
     _glm53_validate_bool_flag GLM53_HOST_MEM_HYGIENE "$GLM53_HOST_MEM_HYGIENE" || return
     if [ -n "$DFLASH_SCHEDULE" ]; then
-        python3 -c 'import json,sys
-s=json.loads(sys.argv[1]); assert isinstance(s,list) and s, "list expected"
-for e in s:
-    assert isinstance(e,list) and len(e)==3 and all(isinstance(x,int) and x>=0 for x in e) and e[0]>=1 and e[1]>=e[0], e
-' "$DFLASH_SCHEDULE" 2>/dev/null || { echo "DFLASH_SCHEDULE must be a JSON list of [batch_lo,batch_hi,k] triples (got: $DFLASH_SCHEDULE)" >&2; return 2; }
+        _glm53_validate_dflash_schedule "$DFLASH_SCHEDULE" || return
     fi
     _glm53_validate_bool_flag GLM53_KV_CAPACITY_LOG "${GLM53_KV_CAPACITY_LOG-1}" || return
     # The template treats medium as max, so do not advertise it as a level.
