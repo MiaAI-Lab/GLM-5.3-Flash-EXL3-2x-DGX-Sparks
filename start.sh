@@ -426,6 +426,11 @@ VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
 # clears GPU_MEM_UTIL x total (the driver returns a torn-down context a few
 # GiB behind MemFree). Set 0 to leave the host alone.
 GLM53_HOST_MEM_HYGIENE="${GLM53_HOST_MEM_HYGIENE:-1}"
+# DFlash2 dynamic draft schedule: JSON [[batch_lo,batch_hi,k],...] forwarded as
+# num_speculative_tokens_per_batch_size (upstream Dynamic SD, honoured per step
+# by the scheduler's dynamic_sd_lookup). Empty = fixed DFLASH_TOKENS at every
+# batch size. Measured taper on this kit: [[1,2,3],[3,4,2],[5,8,1]].
+DFLASH_SCHEDULE="${DFLASH_SCHEDULE:-}"
 # 1 = after /health, burn DFlash2 BLOCK / sampler / kpool shapes. Nonfatal.
 GLM53_BOOT_SHAPE_WARMUP="${GLM53_BOOT_SHAPE_WARMUP:-1}"
 GLM53_WARMUP_REQ_TIMEOUT="${GLM53_WARMUP_REQ_TIMEOUT:-240}"
@@ -669,6 +674,13 @@ validate_numeric_config() {
     _glm53_validate_spinwait_ms || return
     _glm53_validate_bool_flag GLM53_APC_NO_STORE "${GLM53_APC_NO_STORE-1}" || return
     _glm53_validate_bool_flag GLM53_HOST_MEM_HYGIENE "$GLM53_HOST_MEM_HYGIENE" || return
+    if [ -n "$DFLASH_SCHEDULE" ]; then
+        python3 -c 'import json,sys
+s=json.loads(sys.argv[1]); assert isinstance(s,list) and s, "list expected"
+for e in s:
+    assert isinstance(e,list) and len(e)==3 and all(isinstance(x,int) and x>=0 for x in e) and e[0]>=1 and e[1]>=e[0], e
+' "$DFLASH_SCHEDULE" 2>/dev/null || { echo "DFLASH_SCHEDULE must be a JSON list of [batch_lo,batch_hi,k] triples (got: $DFLASH_SCHEDULE)" >&2; return 2; }
+    fi
     _glm53_validate_bool_flag GLM53_KV_CAPACITY_LOG "${GLM53_KV_CAPACITY_LOG-1}" || return
     # The template treats medium as max, so do not advertise it as a level.
     if [ -n "${GLM53_DEFAULT_REASONING_EFFORT-}" ]; then
@@ -1676,6 +1688,9 @@ spec={"method":"dflash","model":os.environ["DFLASH_MODEL_DIR"],"num_speculative_
 tp=os.environ.get("DFLASH_DRAFT_TP","").strip()
 if tp:
     spec["draft_tensor_parallel_size"]=int(tp)
+sched=os.environ.get("DFLASH_SCHEDULE","").strip()
+if sched:
+    spec["num_speculative_tokens_per_batch_size"]=json.loads(sched)
 print(json.dumps(spec,separators=(",",":")))')")
 elif [ "${SPEC_METHOD:-mtp}" = "none" ]; then
     :
@@ -1756,6 +1771,9 @@ spec={"method":"dflash","model":os.environ["DFLASH_MODEL_DIR"],"num_speculative_
 tp=os.environ.get("DFLASH_DRAFT_TP","").strip()
 if tp:
     spec["draft_tensor_parallel_size"]=int(tp)
+sched=os.environ.get("DFLASH_SCHEDULE","").strip()
+if sched:
+    spec["num_speculative_tokens_per_batch_size"]=json.loads(sched)
 print(json.dumps(spec,separators=(",",":")))')")
 elif [ "${SPEC_METHOD:-mtp}" = "none" ]; then
     :
@@ -2039,7 +2057,7 @@ launch_cluster() {
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP \
              GLM53_ADAPTIVE_K GLM53_ADAPTIVE_K_SET GLM53_ADAPTIVE_K_ALPHA GLM53_ADAPTIVE_K_MARGIN \
              GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST GLM53_DENSE_FP8 \
-             GLM53_EXL3_MOE_FAST \
+             GLM53_EXL3_MOE_FAST DFLASH_SCHEDULE \
              GLM53_COOP_GEOMETRY; do
         serve_env+=" -e $v='${!v:-}'"
         serve_env_names+=("$v")
@@ -2231,6 +2249,7 @@ launch_cluster() {
         -e GLM53_DENSE_FP8="$GLM53_DENSE_FP8" \
         -e GLM53_EXL3_MOE_FAST="$GLM53_EXL3_MOE_FAST" \
         -e GLM53_COOP_GEOMETRY="$GLM53_COOP_GEOMETRY" \
+        -e DFLASH_SCHEDULE="${DFLASH_SCHEDULE:-}" \
         -e MODEL_DIR="$MODEL_DIR" \
         -e VLLM_API_KEY \
         -e EXTRA_ARGS="${EXTRA_ARGS:-}" \
@@ -2479,6 +2498,7 @@ main() {
     case "$cmd" in
         stop)     banner stop.sh ;;
         download) banner download.sh ;;
+        stamp)    ;;
         *)        banner start.sh ;;
     esac
     case "$cmd" in
@@ -2492,6 +2512,7 @@ main() {
             ;;
         status)   status ;;
         logs)     shift || true; logs "$@" ;;
+        stamp)    overlay_recipe_hash ;;
         share)    [ "${NFS_SHARE:-0}" = "1" ] || die "NFS_SHARE=0 in .env — set NFS_SHARE=1 to share the head HF cache over NFS"
                   nfs_share_weights ;;
         -h|--help|help) usage ;;

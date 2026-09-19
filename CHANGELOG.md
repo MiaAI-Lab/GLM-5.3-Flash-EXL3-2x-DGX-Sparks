@@ -37,6 +37,13 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   dry-capture when `CG_ESTIMATE=0` discards it anyway (KV profile 18 → 7 s);
   kill-first parallel stop and a 1 s `/health` poll. Receipts in
   `docs/cold-load-uma.md`.
+- `DFLASH_SCHEDULE` (launcher knob for upstream `num_speculative_tokens_per_batch_size`),
+  `./start.sh stamp`, and three benches: `tests/bench_ceiling.py` (server-side
+  step time vs a bytes/step model against the 236 GB/s measured ceiling),
+  `tests/bench_c8.py` (agent-shaped c1…c8 ladder), `tests/bench_nvme_restore.py`.
+  Receipts on this 2× kit (k=3, dense FP8, mixed prefill off): c8 pure decode
+  91.9 tok/s at 98.6 % of ceiling with `[[1,2,3],[3,4,2],[5,8,1]]`; k=0 at c8
+  measured 75.3.
 
 - Opt-in SM121 **thin-decode** kernels for the EXL3 routed experts
   (`GLM53_EXL3_MOE_FAST`, default `0`): `overlay/patch_exl3_decode_pipeline.py`
