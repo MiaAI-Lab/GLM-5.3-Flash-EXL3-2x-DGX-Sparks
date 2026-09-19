@@ -491,6 +491,26 @@ def installation_tests():
             target.write_text(drifted)
             result = subprocess.run([sys.executable, str(PATCH)], env=env, capture_output=True)
             assert result.returncode != 0 and target.read_text() == drifted
+        # A v5 helper installed before the prefill-priority change must migrate
+        # in place to the current layout, byte-identical to a fresh install.
+        legacy = (installed
+                  .replace(mod.PRIORITY_RANK_PREFIX, mod.LEGACY_RANK_PREFIX, 1)
+                  .replace(mod.PRIORITY_CANDIDATES, mod.LEGACY_CANDIDATES, 1))
+        assert mod.PRIORITY_MARK not in legacy and mod.MARK_V5 in legacy
+        target = Path(temp) / 'scheduler_v5_legacy.py'
+        target.write_text(legacy)
+        env = {**os.environ, 'GLM53_SCHEDULER_PY': str(target), 'GLM53_MIXED_PREFILL_CHUNK': 'skip'}
+        subprocess.run([sys.executable, str(PATCH)], env=env, check=True, capture_output=True)
+        assert target.read_text() == installed
+        subprocess.run([sys.executable, str(PATCH)], env=env, check=True, capture_output=True)
+        assert target.read_text() == installed
+        # A drifted migration anchor fails closed: no partial write even when
+        # the first of the two anchors still matches.
+        drifted = legacy.replace('self._candidates = self._rank_prefills(prefills)\n',
+                                 'self._candidates = self._rank_prefills(prefills)  # drift\n', 1)
+        target.write_text(drifted)
+        result = subprocess.run([sys.executable, str(PATCH)], env=env, capture_output=True)
+        assert result.returncode != 0 and target.read_text() == drifted
         return installed
 
 
