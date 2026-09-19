@@ -161,10 +161,17 @@ def _disable_gb10_persistent_topk() -> None:
 
 
 _install_import_hook()
-try:
-    apply()
-except Exception:
-    pass
+# Do NOT call apply() eagerly here. This module is imported from a .pth on
+# every interpreter start (each overlay script, every vLLM subprocess, every
+# python3 -c), and apply() imports vllm.model_executor.models.glm4_1v — ~4 s
+# of vllm import per process, ~80 s per boot across the overlay scripts on
+# both ranks. The import hook above applies it the moment glm4_1v is actually
+# imported, which is the only time it matters.
+if "vllm.model_executor.models.glm4_1v" in sys.modules:
+    try:
+        apply()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
