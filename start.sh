@@ -228,6 +228,7 @@ TOOLCHOICE_PATCH_HOST="${TOOLCHOICE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_tool_c
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 CACHE_RESET_PATCH_HOST="${CACHE_RESET_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_cache_reset.py}"
 COLD_LOAD_PATCH_HOST="${COLD_LOAD_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_cold_load_uma.py}"
+SKIP_CGPROF_PATCH_HOST="${SKIP_CGPROF_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_skip_cudagraph_profile.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
 ADAPTIVE_K_PATCH_HOST="${ADAPTIVE_K_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_adaptive_k.py}"
@@ -456,6 +457,12 @@ WORKER_VLLM_CACHE="${WORKER_VLLM_CACHE:-$WORKER_HOME/.cache/vllm-glm53-flash}"
 # Overlay FS ~/.triton and ~/.tilelang die on container recreate (TP=2 JIT
 # stall → 600s NCCL watchdog). Persist next to the vLLM cache.
 TRITON_HOST_CACHE="${TRITON_HOST_CACHE:-$CACHE_ROOT/triton}"
+# NVIDIA driver JIT/ptxas cache (~/.nv/ComputeCache). Lives in the container
+# overlay by default and dies on every docker rm: the DFlash2 graph capture
+# then re-JITs a 31 MiB cubin on each boot (29 s vs 3 s for the target's
+# graphs). Persist it next to the Triton cache.
+NV_HOST_CACHE="${NV_HOST_CACHE:-$CACHE_ROOT/nv}"
+WORKER_NV_CACHE="${WORKER_NV_CACHE:-$WORKER_VLLM_CACHE/nv}"
 TILELANG_HOST_CACHE="${TILELANG_HOST_CACHE:-$CACHE_ROOT/tilelang}"
 WORKER_TRITON_CACHE="${WORKER_TRITON_CACHE:-$WORKER_VLLM_CACHE/triton}"
 WORKER_TILELANG_CACHE="${WORKER_TILELANG_CACHE:-$WORKER_VLLM_CACHE/tilelang}"
@@ -739,6 +746,7 @@ validate_overlay_artifacts() {
         "$DEFAULT_TOKENS_PATCH_HOST|[glm53-default-max-new-tokens]|    raise SystemExit(main(sys.argv))"
         "$CACHE_RESET_PATCH_HOST|# [glm53-cache-reset]|$main_guard"
         "$COLD_LOAD_PATCH_HOST|[glm53-cold-load-uma:v1]|    sys.exit(main())"
+        "$SKIP_CGPROF_PATCH_HOST|[glm53-skip-cudagraph-profile]|    sys.exit(main())"
         "$SCRIPT_DIR/overlay/patch_ablit.py|$ablit_marker|    main()"
         "$SCRIPT_DIR/overlay/ablit_runtime.py|o_proj abliteration (ABLIT)|    return report"
     )
@@ -1104,6 +1112,7 @@ preflight() {
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "$XGRAMMAR_PATCH_HOST missing"
     [ -f "$CACHE_RESET_PATCH_HOST" ] || die "$CACHE_RESET_PATCH_HOST missing"
     [ -f "$COLD_LOAD_PATCH_HOST" ] || die "$COLD_LOAD_PATCH_HOST missing"
+    [ -f "$SKIP_CGPROF_PATCH_HOST" ] || die "$SKIP_CGPROF_PATCH_HOST missing"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "$KPOOL_TAIL_PATCH_HOST missing"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "$SPINWAIT_PATCH_HOST missing"
     [ -f "$ADAPTIVE_K_PATCH_HOST" ] || die "$ADAPTIVE_K_PATCH_HOST missing"
@@ -1596,6 +1605,7 @@ sync_weights() {
 # editing that file.
 GLM53_OVERLAY_ORDER=(
     patch_cold_load_uma.py
+    patch_skip_cudagraph_profile.py
     patch_glm_video_placeholders.py
     patch_suppress_stops_in_reasoning.py
     patch_scheduler_decode_floor.py
@@ -1880,8 +1890,8 @@ launch_cluster() {
     worker_ssh "docker rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 || true
     host_memory_hygiene
 
-    mkdir -p "$CACHE_ROOT" "$TRITON_HOST_CACHE" "$TILELANG_HOST_CACHE"
-    worker_ssh "mkdir -p '$WORKER_VLLM_CACHE' '$WORKER_TRITON_CACHE' '$WORKER_TILELANG_CACHE'"
+    mkdir -p "$CACHE_ROOT" "$TRITON_HOST_CACHE" "$TILELANG_HOST_CACHE" "$NV_HOST_CACHE"
+    worker_ssh "mkdir -p '$WORKER_VLLM_CACHE' '$WORKER_TRITON_CACHE' '$WORKER_TILELANG_CACHE' '$WORKER_NV_CACHE'"
     scp -q -o BatchMode=yes "$WORKER_SCRIPT" "${WORKER_SSH}:/tmp/${CONTAINER_WORKER}.sh"
     [ -f "$CHAT_TEMPLATE_HOST" ] || die "missing chat template: $CHAT_TEMPLATE_HOST"
     scp -q -o BatchMode=yes "$CHAT_TEMPLATE_HOST" "${WORKER_SSH}:/tmp/glm53-chat_template.jinja"
@@ -1909,6 +1919,7 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$CACHE_RESET_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_cache_reset.py"
     [ -f "$COLD_LOAD_PATCH_HOST" ] || die "missing $COLD_LOAD_PATCH_HOST"
     scp -q -o BatchMode=yes "$COLD_LOAD_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_cold_load_uma.py"
+    scp -q -o BatchMode=yes "$SKIP_CGPROF_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_skip_cudagraph_profile.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "missing $SPINWAIT_PATCH_HOST"
@@ -2096,6 +2107,7 @@ launch_cluster() {
         -v '$WORKER_VLLM_CACHE:/root/.cache/vllm' \
         -v '$WORKER_TRITON_CACHE:/root/.triton/cache' \
         -v '$WORKER_TILELANG_CACHE:/root/.tilelang/cache' \
+        -v '$WORKER_NV_CACHE:/root/.nv/ComputeCache' \
         -v '/tmp/${CONTAINER_WORKER}.sh:/start.sh:ro' \
         -v '/tmp/glm53-chat_template.jinja:${CHAT_TEMPLATE}:ro' \
         -v '/tmp/patch_glm_video_placeholders.py:/opt/glm53/patch_glm_video_placeholders.py:ro' \
@@ -2110,6 +2122,7 @@ launch_cluster() {
         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
         -v '/tmp/patch_cache_reset.py:/opt/glm53/patch_cache_reset.py:ro' \
         -v '/tmp/patch_cold_load_uma.py:/opt/glm53/patch_cold_load_uma.py:ro' \
+        -v '/tmp/patch_skip_cudagraph_profile.py:/opt/glm53/patch_skip_cudagraph_profile.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
         -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
         -v '/tmp/patch_adaptive_k.py:/opt/glm53/patch_adaptive_k.py:ro' \
@@ -2138,6 +2151,7 @@ launch_cluster() {
         -v "$CACHE_ROOT:/root/.cache/vllm" \
         -v "$TRITON_HOST_CACHE:/root/.triton/cache" \
         -v "$TILELANG_HOST_CACHE:/root/.tilelang/cache" \
+        -v "$NV_HOST_CACHE:/root/.nv/ComputeCache" \
         -v "$HEAD_SCRIPT:/start.sh:ro" \
         -v "$CHAT_TEMPLATE_HOST:$CHAT_TEMPLATE:ro" \
         -v "$VIDEO_PATCH_HOST:/opt/glm53/patch_glm_video_placeholders.py:ro" \
@@ -2152,6 +2166,7 @@ launch_cluster() {
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$CACHE_RESET_PATCH_HOST:/opt/glm53/patch_cache_reset.py:ro" \
         -v "$COLD_LOAD_PATCH_HOST:/opt/glm53/patch_cold_load_uma.py:ro" \
+        -v "$SKIP_CGPROF_PATCH_HOST:/opt/glm53/patch_skip_cudagraph_profile.py:ro" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
         -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
         -v "$ADAPTIVE_K_PATCH_HOST:/opt/glm53/patch_adaptive_k.py:ro" \
@@ -2246,6 +2261,11 @@ wait_for_health() {
     local elapsed=0 healthy=0 exited=0 dead_side="" worker_fail=0 head_fail=0
     while [ "$elapsed" -lt "$READY_TIMEOUT" ]; do
         if curl -fsS -m 5 "$url" >/dev/null 2>&1; then healthy=1; break; fi
+        # Probe /health every second; the container liveness checks below
+        # (a docker inspect and an ssh round trip) only every 10 s.
+        if [ $((elapsed % 10)) -ne 0 ]; then
+            sleep 1; elapsed=$((elapsed + 1)); continue
+        fi
         # Keep the inspect result out of a grep -q pipeline. With pipefail,
         # grep can close early and make a running container look dead.
         # Same 3-strike window as the worker: one transient docker miss must
@@ -2277,7 +2297,7 @@ wait_for_health() {
                 exited=1; dead_side="worker"; break
             fi
         fi
-        sleep 10; elapsed=$((elapsed + 10))
+        sleep 1; elapsed=$((elapsed + 1))
     done
 
     _stop_logtail
@@ -2395,11 +2415,15 @@ start() {
 }
 
 stop_containers() {
-    log "stopping head container ..."
+    # docker rm -f sends SIGTERM and waits --stop-timeout (60 s) for vLLM's
+    # shutdown; there is nothing to flush (vLLM keeps no durable state, and an
+    # NVMe prefix tier fsyncs per chunk), so kill first and remove. Both nodes in parallel.
+    log "stopping head + worker containers ..."
+    worker_ssh "docker kill '$CONTAINER_WORKER' >/dev/null 2>&1; docker rm -f '$CONTAINER_WORKER' >/dev/null 2>&1" &
+    local wpid=$!
+    docker kill "$CONTAINER_HEAD" >/dev/null 2>&1 || true
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || log "  (no head container was running)"
-    log "stopping worker container on ${WORKER_SSH} ..."
-    worker_ssh "docker rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 \
-        || log "  (no worker container was running)"
+    wait "$wpid" || log "  (no worker container was running)"
     if [ "${NFS_SHARE:-0}" = "1" ]; then
         log "removing the worker NFS volume (the exporter stays up) ..."
         nfs_unmount_workers
