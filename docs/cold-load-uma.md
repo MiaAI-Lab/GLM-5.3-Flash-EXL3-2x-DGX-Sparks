@@ -31,6 +31,36 @@ iflag=direct`). Full boot receipt: `Loading safetensors using InstantTensor
 loader: 100% | 164G/164G [00:36, 4.88GB/s]`, `Model loading took 82.06 GiB and
 43.1 seconds`.
 
+## End-to-end bring-up A/B (2026-09-19)
+
+Same `.env` (262144 ctx, util 0.87, k=3, dense FP8), page cache filled to
+118 GiB on **both** nodes first (the state every boot after the rsync or a
+previous serve is in), `./start.sh start` to `/health`:
+
+| | stock `main` ca85576 + published image | this PR |
+|---|---|---|
+| engine init → `Loading model from scratch` | +22 s | +22 s |
+| weight stream | `Shrink io_depth from 256 to 34`, then **`RuntimeError: buffer_size … exceeds device memory budget (586612736 B)`** | 164 GiB in **36 s @ 4.82 GB/s** |
+| `Model loading took` | — | +67 s |
+| KV profile / graph capture | — | +84 s / +126 s |
+| `/health` | **never** (start.sh exit 1 after 168 s) | **230 s** |
+
+The launcher-side hygiene is what makes the in-container patch see a sane
+budget: `waiting for CUDA free (20 GiB) to reach 109 GiB …`, then `cuda free
+before launch: 117 GiB`. The remaining ~190 s of the boot after the weights
+are in is memory profiling + CUDA-graph capture (24 shapes × 3 graph sets),
+which this PR does not touch.
+
+Iterator-level A/B on one rank's share (60 shards, 82.9 GiB, same container):
+
+| page cache | stock | patched |
+|---|---|---|
+| dropped | 17.5 s, 5.09 GB/s | 17.4 s, 5.11 GB/s |
+| full (119 GiB) | `RuntimeError: buffer_size … exceeds device memory budget (938049536 B)` | 17.1 s, 5.20 GB/s |
+
+With a clean cache the patch is a no-op; with the cache full stock cannot load
+at all and patched runs at the drive ceiling.
+
 ## What the patch does
 
 Applied to `model_executor/model_loader/weight_utils.py` at image build and
