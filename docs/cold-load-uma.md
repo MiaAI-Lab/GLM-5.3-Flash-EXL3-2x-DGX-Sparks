@@ -1,4 +1,4 @@
-# Cold load at the NVMe ceiling (GB10 UMA, 64 KiB pages)
+# Cold load on GB10 UMA: boot with a full page cache, 64 KiB mmap staging
 
 `overlay/patch_cold_load_uma.py` + `GLM53_HOST_MEM_HYGIENE`. Measured on a
 2× DGX Spark pair (GB10, 128 GB UMA, 1 TB NVMe, kernel `6.17.13-rocket64k`,
@@ -31,35 +31,41 @@ iflag=direct`). Full boot receipt: `Loading safetensors using InstantTensor
 loader: 100% | 164G/164G [00:36, 4.88GB/s]`, `Model loading took 82.06 GiB and
 43.1 seconds`.
 
-## End-to-end bring-up A/B (2026-09-19)
+## What this does and does not change (measured 2026-09-19)
 
-Same `.env` (262144 ctx, util 0.87, k=3, dense FP8), page cache filled to
-118 GiB on **both** nodes first (the state every boot after the rsync or a
-previous serve is in), `./start.sh start` to `/health`:
+**It does not make a clean-cache boot faster.** Once the page cache is clean,
+InstantTensor already streams at the drive ceiling; the budget helper is a
+no-op there. Fair A/B — upstream `main` ca85576 + published image + only the
+mmap-clone half of this patch (the 64 KiB kernel needs it either way), page
+cache dropped by hand on both nodes, CUDA free ≥ 110 GiB confirmed, vs this
+PR with `GLM53_HOST_MEM_HYGIENE=0` (identical host state), same `.env`, 2 reps:
 
-| | stock `main` ca85576 + published image | this PR |
+| clean cache | stock + mmap clone | this PR |
 |---|---|---|
-| engine init → `Loading model from scratch` | +22 s | +22 s |
+| weight stream | 36 s @ 4.79 / 35 s @ 4.94 GB/s | 36 s @ 4.82 / 35 s @ 4.89 |
+| `Model loading took` | +65 / +68 s | +64 / +63 s |
+| `/health` | 230 s / 230 s | 230 s / 230 s |
+| back-to-back `./start.sh restart` | 256 s | 259 s |
+
+**It makes the boot possible when the cache is not clean.** That is the state
+every boot after the 164 GiB rsync or a previous serve is in, and the one an
+operator hits unless they drop caches by hand. Same `.env`, page cache filled
+to 118 GiB on both nodes, `./start.sh start` to `/health`:
+
+| full page cache | stock + mmap clone | this PR |
+|---|---|---|
 | weight stream | `Shrink io_depth from 256 to 34`, then **`RuntimeError: buffer_size … exceeds device memory budget (586612736 B)`** | 164 GiB in **36 s @ 4.82 GB/s** |
-| `Model loading took` | — | +67 s |
-| KV profile / graph capture | — | +84 s / +126 s |
-| `/health` | **never** (start.sh exit 1 after 168 s) | **230 s** |
+| `/health` | **never** (`start.sh` exit 1 after 168 s) | **230 s** |
 
-The launcher-side hygiene is what makes the in-container patch see a sane
-budget: `waiting for CUDA free (20 GiB) to reach 109 GiB …`, then `cuda free
-before launch: 117 GiB`. The remaining ~190 s of the boot after the weights
-are in is memory profiling + CUDA-graph capture (24 shapes × 3 graph sets),
-which this PR does not touch.
+Iterator-level on one rank's share (60 shards, 82.9 GiB, same container):
+clean cache stock 5.09 vs patched 5.11 GB/s; full cache stock raises, patched
+5.20 GB/s.
 
-Iterator-level A/B on one rank's share (60 shards, 82.9 GiB, same container):
-
-| page cache | stock | patched |
-|---|---|---|
-| dropped | 17.5 s, 5.09 GB/s | 17.4 s, 5.11 GB/s |
-| full (119 GiB) | `RuntimeError: buffer_size … exceeds device memory budget (938049536 B)` | 17.1 s, 5.20 GB/s |
-
-With a clean cache the patch is a no-op; with the cache full stock cannot load
-at all and patched runs at the drive ceiling.
+The restart gate (`waiting for CUDA free … to reach …`) closes an intermittent
+race: on this kit two consecutive restarts failed vLLM's startup check by
+< 0.5 GiB (`107.45/123.72 GiB … less than desired … 107.64 GiB`) while the
+driver was still returning the torn-down context; it did not reproduce in the
+A/B above, so treat it as insurance, not a speedup.
 
 ## What the patch does
 

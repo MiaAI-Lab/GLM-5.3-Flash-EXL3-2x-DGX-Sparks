@@ -11,15 +11,17 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Added
 
-- **Cold load at the NVMe ceiling on UMA / 64 KiB-page hosts**
+- **Cold load on GB10 UMA: boot with a full page cache + 64 KiB mmap staging**
   (`overlay/patch_cold_load_uma.py`, `tests/test_cold_load_uma.py`,
   `docs/cold-load-uma.md`). On GB10 `torch.cuda.mem_get_info()` free is host
   `MemFree`, so a full page cache (after the 164 GiB rsync or a previous serve)
   made InstantTensor either abort (`buffer_size … exceeds device memory budget`,
   reproduced) or run with `io_depth` shrunk from 512 to double digits. The patch
   measures `MemAvailable`, drops clean cache when it can, and pins an explicit
-  budget/buffer; measured 5.07 GB/s with ~120 GB cached where stock raised, and
-  the full 164 GiB checkpoint in 36 s at boot (drive O_DIRECT ceiling 4.9 GB/s).
+  budget/buffer. With the cache full stock never reaches `/health` (exit 1 at
+  168 s) while this boots in 230 s streaming 164 GiB in 36 s; with a clean
+  cache both are identical (36 s @ ~4.9 GB/s, `/health` 230 s) — this is a
+  correctness fix at the drive ceiling, not a speedup.
   On kernels whose page size is not 4 KiB it also stages file-backed safetensors
   tensors into anonymous memory before H2D (`cuMemcpyHtoDAsync` wedges on
   file-backed 64 KiB mappings); byte-identical to stock on 4 KiB kernels and
