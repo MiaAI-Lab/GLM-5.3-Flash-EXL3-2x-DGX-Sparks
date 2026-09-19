@@ -873,6 +873,15 @@ and weights, does not change the supported 2× path. First run copies
 ./start-tp4.sh logs            # head; logs 1|2|3 for a worker rank
 ```
 
+**Stall mitigation (opt-in).** `VLLM_SM120_SPARSE_MLA_SLICE_TOKENS=64` in `.env.tp4` (or
+exported before `./start-tp4.sh`) applies `overlay/patch_sparse_mla_slice.py` on every rank at
+container start: the final sparse-MLA attention call runs in slices of at most 64 query rows,
+the point where the 4-node stalls in #128 / #159 were seen to stop making progress (#223).
+The rewrite is pinned by SHA-256 to the backend shipped in this image and refuses anything else;
+the default `0` is byte-identical stock. It was qualified on another 4x GB10 kit with
+`DFLASH_TOKENS=3`, mixed prefill `off` and `--enforce-eager`; treat other combinations as
+unqualified until soaked. It does not identify or fix the underlying race.
+
 Do not pull `glm53-flash-sm121:v8` — that is the older NVFP4/Ray kernel.
 
 **Measured on a 4-Spark kit (2026-09-02).** Four DGX Sparks (two at 200G, two
@@ -1084,6 +1093,7 @@ that are now documented/enforced:
 | `HEAD_CX7_IB` / `WORKER_CX7_IB` | `rocep1s0f1` / `rocep1s0f0` | NCCL HCAs |
 | `USE_HOST_NCCL` | `0` | image nvidia-nccl; host preload duplicates DeepEP |
 | `GLM53_EXL3_MOE_FAST` | `0` | opt-in SM121 K4/N256 **thin-decode** kernels for routed experts (`overlay/patch_exl3_decode_pipeline.py`; see [docs/sm121-perf-paths.md](docs/sm121-perf-paths.md)). `1` needs an image built with that patch and requires the fused `exl3_moe` path — otherwise model load raises instead of silently degrading (also under `EXL3_FUSED_MOE=0`). Exactly `0` or `1`; the launcher refuses anything else, including explicit empty, before `restart` stops the pair. TP=2 only; the TP3 launcher keeps unsetting it |
+| `VLLM_SM120_SPARSE_MLA_SLICE_TOKENS` | `0` (`start-tp4.sh`, `.env.tp4.example`) | **TP=4 only.** `64` slices the final sparse-MLA attention call into <=64 query rows on every rank (`overlay/patch_sparse_mla_slice.py`, hash-pinned to this image's backend); `0` keeps the backend byte-identical. Opt-in mitigation for the all-rank stall in #128 / #159 (#223); bounds the call where progress stopped, does not fix the race. Any other value is refused. |
 
 `DEFAULT_MAX_NEW_TOKENS` preserves omitted completion limits through Pydantic normalization; an explicit `max_tokens: null` retains the pinned runtime's native normalization to 16. The overlay validates the limiter, completion caller, and protocol validator before writing any target. The CPU regression (`python3 tests/test_gen_defaults.py`) requires Pydantic v2 and exercises its real before-validator, not fabricated field-set metadata.
 

@@ -11,6 +11,14 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Added
 
+- Opt-in bounded final sparse-MLA attention call for TP=4
+  (`VLLM_SM120_SPARSE_MLA_SLICE_TOKENS`, default `0`): `overlay/patch_sparse_mla_slice.py`
+  slices the final `flashinfer_trtllm_batch_decode_with_kv_cache_mla` call into
+  <=64 query rows on every rank, hash-pinned to the shipped backend; `start-tp4.sh`
+  validates (`0`/`64`), stages and applies it. Mitigation for the all-rank stall
+  in #128 / #159, ported with attribution from the MIT recipe qualified on a 4x
+  GB10 kit; it does not fix the underlying race. `start.sh` / `start-tp3.sh`
+  untouched. (#223)
 - Opt-in SM121 **thin-decode** kernels for the EXL3 routed experts
   (`GLM53_EXL3_MOE_FAST`, default `0`): `overlay/patch_exl3_decode_pipeline.py`
   adds two K4/N256 fast kernels (shared / independent gate-up input transform)

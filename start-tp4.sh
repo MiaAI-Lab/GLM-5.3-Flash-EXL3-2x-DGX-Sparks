@@ -82,6 +82,8 @@ _cli_indexer_workspace="${GLM53_INDEXER_WORKSPACE-}"
 _cli_spinwait_ms_set="${GLM53_SPINWAIT_MS+1}"
 _cli_spinwait_ms="${GLM53_SPINWAIT_MS-}"
 _cli_apc_swa_set="${GLM53_APC_RETENTION_INTERVAL_SWA+1}"
+_cli_sparse_slice_set="${VLLM_SM120_SPARSE_MLA_SLICE_TOKENS+1}"
+_cli_sparse_slice="${VLLM_SM120_SPARSE_MLA_SLICE_TOKENS-}"
 _cli_apc_swa="${GLM53_APC_RETENTION_INTERVAL_SWA-}"
 set -a
 # shellcheck disable=SC1091
@@ -113,6 +115,7 @@ set +a
 [ -n "${_cli_indexer_workspace_set}" ] && GLM53_INDEXER_WORKSPACE="$_cli_indexer_workspace"
 [ -n "${_cli_spinwait_ms_set}" ] && GLM53_SPINWAIT_MS="$_cli_spinwait_ms"
 [ -n "${_cli_apc_swa_set}" ] && GLM53_APC_RETENTION_INTERVAL_SWA="$_cli_apc_swa"
+[ -n "${_cli_sparse_slice_set}" ] && VLLM_SM120_SPARSE_MLA_SLICE_TOKENS="$_cli_sparse_slice"
 
 # ----------------------------- configuration -------------------------------
 MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"
@@ -225,6 +228,7 @@ PERGROUP_PATCH_HOST="${PERGROUP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_per_gr
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
+SPARSE_SLICE_PATCH_HOST="${SPARSE_SLICE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_sparse_mla_slice.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 # Direct-I/O safetensors on the published InstantTensor image. Unset follows
 # IMAGE (*instanttensor* → on). Explicit empty (LOAD_FORMAT=) is vLLM auto.
@@ -312,6 +316,10 @@ GLM53_INDEXER_WORKSPACE="${GLM53_INDEXER_WORKSPACE-stock}"
 # SpinCondition reader busy-loop window. "stock" preserves vLLM's 1 s default;
 # 1..1000 selects milliseconds. The frozen TP=2 sweep selected 16 ms.
 GLM53_SPINWAIT_MS="${GLM53_SPINWAIT_MS-stock}"
+# Bounded final sparse-MLA attention call (overlay/patch_sparse_mla_slice.py,
+# #223 mitigation for #128/#159). 0 = stock backend, byte-identical; 64 = slice
+# the final call into <=64 query rows on every rank. Restart to apply.
+VLLM_SM120_SPARSE_MLA_SLICE_TOKENS="${VLLM_SM120_SPARSE_MLA_SLICE_TOKENS-0}"
 # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
 # exceed that without being a true hang. NCCL watchdog is still 600s.
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
@@ -404,6 +412,14 @@ _glm53_validate_enum() {
     return 2
 }
 
+_glm53_validate_sparse_slice() {
+    # Empty canonicalizes to 0 so the container patch sees one spelling.
+    [ -z "${VLLM_SM120_SPARSE_MLA_SLICE_TOKENS:-}" ] && VLLM_SM120_SPARSE_MLA_SLICE_TOKENS=0
+    _glm53_validate_enum VLLM_SM120_SPARSE_MLA_SLICE_TOKENS \
+        "$VLLM_SM120_SPARSE_MLA_SLICE_TOKENS" 0 64 || return
+    export VLLM_SM120_SPARSE_MLA_SLICE_TOKENS
+}
+
 _glm53_validate_spinwait_ms() {
     if [ "$GLM53_SPINWAIT_MS" = "stock" ]; then
         export GLM53_SPINWAIT_MS
@@ -488,6 +504,7 @@ validate_numeric_config() {
     _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-stock}" \
         stock rightsize || return
     _glm53_validate_spinwait_ms || return
+    _glm53_validate_sparse_slice || return
     _glm53_validate_mixed_prefill || return
     _glm53_validate_retention_interval GLM53_APC_RETENTION_INTERVAL "${GLM53_APC_RETENTION_INTERVAL-}" || return
     _glm53_validate_retention_interval GLM53_APC_RETENTION_INTERVAL_SWA "${GLM53_APC_RETENTION_INTERVAL_SWA-}" || return
@@ -741,6 +758,7 @@ preflight() {
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "$XGRAMMAR_PATCH_HOST missing"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "$KPOOL_TAIL_PATCH_HOST missing"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "$SPINWAIT_PATCH_HOST missing"
+    [ -f "$SPARSE_SLICE_PATCH_HOST" ] || die "$SPARSE_SLICE_PATCH_HOST missing"
     [ -f "$SCRIPT_DIR/overlay/patch_ablit.py" ] || die "$SCRIPT_DIR/overlay/patch_ablit.py missing"
     [ -f "$SCRIPT_DIR/overlay/ablit_runtime.py" ] || die "$SCRIPT_DIR/overlay/ablit_runtime.py missing"
     [ -f "$SCRIPT_DIR/ablit/LAYER_MAP.json" ] || die "$SCRIPT_DIR/ablit/LAYER_MAP.json missing"
@@ -1285,6 +1303,9 @@ fi
 if [ -f /opt/glm53/patch_spinwait.py ]; then
     python3 /opt/glm53/patch_spinwait.py
 fi
+if [ -f /opt/glm53/patch_sparse_mla_slice.py ]; then
+    python3 /opt/glm53/patch_sparse_mla_slice.py
+fi
 if [ -f /opt/glm53/patch_indexer_workspace.py ]; then
     python3 /opt/glm53/patch_indexer_workspace.py
 fi
@@ -1386,6 +1407,9 @@ fi
 if [ -f /opt/glm53/patch_spinwait.py ]; then
     python3 /opt/glm53/patch_spinwait.py
 fi
+if [ -f /opt/glm53/patch_sparse_mla_slice.py ]; then
+    python3 /opt/glm53/patch_sparse_mla_slice.py
+fi
 if [ -f /opt/glm53/patch_indexer_workspace.py ]; then
     python3 /opt/glm53/patch_indexer_workspace.py
 fi
@@ -1419,6 +1443,7 @@ _tp4_scp_runtime() {
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${ssh_t}:/tmp/patch_xgrammar_termination.py"
     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${ssh_t}:/tmp/patch_kpool_tail_slotmap.py"
     scp -q -o BatchMode=yes "$SPINWAIT_PATCH_HOST" "${ssh_t}:/tmp/patch_spinwait.py"
+    scp -q -o BatchMode=yes "$SPARSE_SLICE_PATCH_HOST" "${ssh_t}:/tmp/patch_sparse_mla_slice.py"
     worker_ssh_n "$r" "rm -rf /tmp/glm53-ablit"
     scp -q -r -o BatchMode=yes "$SCRIPT_DIR/ablit" "${ssh_t}:/tmp/glm53-ablit"
     scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/ablit_runtime.py" "${ssh_t}:/tmp/glm53-ablit_runtime.py"
@@ -1459,6 +1484,8 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "missing $SPINWAIT_PATCH_HOST"
     scp -q -o BatchMode=yes "$SPINWAIT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_spinwait.py"
+    [ -f "$SPARSE_SLICE_PATCH_HOST" ] || die "missing $SPARSE_SLICE_PATCH_HOST"
+    scp -q -o BatchMode=yes "$SPARSE_SLICE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_sparse_mla_slice.py"
 
     worker_ssh "rm -rf /tmp/glm53-ablit"
     scp -q -r -o BatchMode=yes "$SCRIPT_DIR/ablit" "${WORKER_SSH}:/tmp/glm53-ablit"
@@ -1490,6 +1517,7 @@ TP4_SKIP_OLD_SCP
         -e "GLM53_FAIR_PREFILL_MAX_CHUNKS=$GLM53_FAIR_PREFILL_MAX_CHUNKS"
         -e "GLM53_INDEXER_WORKSPACE=$GLM53_INDEXER_WORKSPACE"
         -e "GLM53_SPINWAIT_MS=$GLM53_SPINWAIT_MS"
+        -e "VLLM_SM120_SPARSE_MLA_SLICE_TOKENS=$VLLM_SM120_SPARSE_MLA_SLICE_TOKENS"
         -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
         -e "TILELANG_CACHE_DIR=$TILELANG_CACHE_DIR"
         -e "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=$VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
@@ -1544,7 +1572,8 @@ TP4_SKIP_OLD_SCP
              DFLASH_DRAFT_TP \
              LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING \
              LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE EXL3_MOE_ROW_TILE EXL3_TEMP_ROWS_FUSED EXL3_FAT_SORTED EXL3_FAT_BATCHED EXL3_FAT_KERNEL MODEL_DIR EXTRA_ARGS \
-             ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP; do
+             ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP \
+             VLLM_SM120_SPARSE_MLA_SLICE_TOKENS; do
         serve_env+=" -e $v='${!v:-}'"
     done
     # VLLM_API_KEY is read by the head (rank 0) API server for bearer auth; the
@@ -1587,6 +1616,7 @@ TP4_SKIP_OLD_SCP
             -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
             -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
             -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
+            -v '/tmp/patch_sparse_mla_slice.py:/opt/glm53/patch_sparse_mla_slice.py:ro' \
             -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
             -v '/tmp/glm53-ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro' \
             -v '/tmp/patch_ablit.py:/opt/glm53/patch_ablit.py:ro' \
@@ -1622,6 +1652,7 @@ TP4_SKIP_OLD_SCP
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
         -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
+        -v "$SPARSE_SLICE_PATCH_HOST:/opt/glm53/patch_sparse_mla_slice.py:ro" \
         -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
         -v "$SCRIPT_DIR/overlay/ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro" \
         -v "$SCRIPT_DIR/overlay/patch_ablit.py:/opt/glm53/patch_ablit.py:ro" \
