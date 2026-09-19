@@ -69,9 +69,14 @@ KV_FORWARD = '-e "GLM53_KV_CAPACITY_LOG=$GLM53_KV_CAPACITY_LOG"'
 # through the serve_env list). A one-rank miss would silently disable the kernel on
 # that rank, so the scenarios below always require it.
 THIN = "GLM53_EXL3_MOE_FAST"
+# Opt-in large-M KDA BF16 prefill path: same both-ranks contract as THIN. A
+# one-rank miss would silently leave that rank on Marlin, so the scenarios
+# below always require it.
+LARGE_M = "GLM53_KDA_BF16_LARGE_M"
 
 # Launcher knobs and the container-side names they map to.
-LAUNCHER_KNOBS = ("GLM53_APC_RETENTION_INTERVAL", SWA, NS, KV, THIN)
+LAUNCHER_KNOBS = ("GLM53_APC_RETENTION_INTERVAL", SWA, NS, KV, THIN,
+                  LARGE_M)
 CONTAINER_NAMES = LAUNCHER_KNOBS + (
     "VLLM_PREFIX_CACHE_RETENTION_INTERVAL",
     "VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA",
@@ -642,6 +647,8 @@ def part_d(h: Harness) -> None:
     # Unconditional: this checkout ships the thin-decode wiring, so a dropped
     # or one-rank-missing forward must fail D2 rather than skip the scenario.
     scenarios += [("FAST=0", {THIN: "0"}), ("FAST=1", {THIN: "1"})]
+    scenarios += [("LARGEM=0", {LARGE_M: "0"}),
+                  ("LARGEM=1", {LARGE_M: "1"})]
 
     first = None
     for label, env in scenarios:
@@ -661,6 +668,8 @@ def part_d(h: Harness) -> None:
             required[KV] = env[KV]
         if THIN in env:
             required[THIN] = env[THIN]
+        if LARGE_M in env:
+            required[LARGE_M] = env[LARGE_M]
         issues = parity_issues(head, worker, scp, required)
         check(not issues, f"D2 [{label}] rank parity: " + ("; ".join(issues) if issues else "no differences"))
         for name in CONTAINER_NAMES:

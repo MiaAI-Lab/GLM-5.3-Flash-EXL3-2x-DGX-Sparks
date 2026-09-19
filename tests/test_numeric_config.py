@@ -228,6 +228,29 @@ def test_thin_decode_flag_rejects_bad_values_before_host_actions() -> None:
             assert not harness.host_touching_calls(), (value, harness.calls())
 
 
+def test_kda_bf16_large_m_flag_rejects_bad_values_before_host_actions() -> None:
+    """GLM53_KDA_BF16_LARGE_M is exactly 0/1 and validated before any stop.
+
+    ``overlay/exl3.py`` refuses anything else at model load, so a typo must
+    not cost a running pair.
+    """
+    from test_launcher_rank_parity import Harness
+
+    with tempfile.TemporaryDirectory() as directory:
+        harness = Harness(Path(directory))
+        for value in ("0", "1"):
+            result = harness.run(
+                "validate_numeric_config", entry="start.fn.sh",
+                GLM53_KDA_BF16_LARGE_M=value)
+            assert result.returncode == 0, (value, result.stderr)
+            assert not harness.host_touching_calls()
+        for value in ("", "yes", " 1", "1 ", "2", "true"):
+            result = harness.run("restart", GLM53_KDA_BF16_LARGE_M=value)
+            assert result.returncode == 2, (value, result.stderr)
+            assert "GLM53_KDA_BF16_LARGE_M" in result.stderr, value
+            assert not harness.host_touching_calls(), (value, harness.calls())
+
+
 def test_tp4_rejects_retention_override() -> None:
     script = (
         guard_source(START_TP4)
@@ -257,5 +280,6 @@ if __name__ == "__main__":
     test_kv_capacity_log_flag()
     test_mixed_prefill_contract()
     test_thin_decode_flag_rejects_bad_values_before_host_actions()
+    test_kda_bf16_large_m_flag_rejects_bad_values_before_host_actions()
     test_tp4_rejects_retention_override()
     print("numeric config tests: PASS")
