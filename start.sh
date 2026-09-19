@@ -227,6 +227,7 @@ KVCAP_PATCH_HOST="${KVCAP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kv_capacity_log.
 TOOLCHOICE_PATCH_HOST="${TOOLCHOICE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_tool_choice_none.py}"
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 CACHE_RESET_PATCH_HOST="${CACHE_RESET_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_cache_reset.py}"
+COLD_LOAD_PATCH_HOST="${COLD_LOAD_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_cold_load_uma.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
 ADAPTIVE_K_PATCH_HOST="${ADAPTIVE_K_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_adaptive_k.py}"
@@ -415,6 +416,15 @@ GLM53_SPINWAIT_MS="${GLM53_SPINWAIT_MS-stock}"
 # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
 # exceed that without being a true hang. NCCL watchdog is still 600s.
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
+# --- host memory hygiene before launch (docs/uvm-livelock-gb10.md) ----------
+# On UMA the page cache is "used" device memory to the CUDA driver: after a
+# 164 GiB rsync or a previous serve, MemFree is ~2 GiB and the InstantTensor
+# loader either dies (buffer > budget) or shrinks io_depth to double digits.
+# 1 = drop clean page cache + cycle swap on BOTH nodes (needs passwordless
+# sudo; skipped with a warning otherwise), then wait until CUDA free memory
+# clears GPU_MEM_UTIL x total (the driver returns a torn-down context a few
+# GiB behind MemFree). Set 0 to leave the host alone.
+GLM53_HOST_MEM_HYGIENE="${GLM53_HOST_MEM_HYGIENE:-1}"
 # 1 = after /health, burn DFlash2 BLOCK / sampler / kpool shapes. Nonfatal.
 GLM53_BOOT_SHAPE_WARMUP="${GLM53_BOOT_SHAPE_WARMUP:-1}"
 GLM53_WARMUP_REQ_TIMEOUT="${GLM53_WARMUP_REQ_TIMEOUT:-240}"
@@ -651,6 +661,7 @@ validate_numeric_config() {
     _glm53_validate_bool_flag GLM53_EXL3_MOE_FAST "${GLM53_EXL3_MOE_FAST-0}" || return
     _glm53_validate_spinwait_ms || return
     _glm53_validate_bool_flag GLM53_APC_NO_STORE "${GLM53_APC_NO_STORE-1}" || return
+    _glm53_validate_bool_flag GLM53_HOST_MEM_HYGIENE "$GLM53_HOST_MEM_HYGIENE" || return
     _glm53_validate_bool_flag GLM53_KV_CAPACITY_LOG "${GLM53_KV_CAPACITY_LOG-1}" || return
     # The template treats medium as max, so do not advertise it as a level.
     if [ -n "${GLM53_DEFAULT_REASONING_EFFORT-}" ]; then
@@ -727,6 +738,7 @@ validate_overlay_artifacts() {
         "$DENSE_FP8_PATCH_HOST|[glm53-dense-fp8]|$main_guard"
         "$DEFAULT_TOKENS_PATCH_HOST|[glm53-default-max-new-tokens]|    raise SystemExit(main(sys.argv))"
         "$CACHE_RESET_PATCH_HOST|# [glm53-cache-reset]|$main_guard"
+        "$COLD_LOAD_PATCH_HOST|[glm53-cold-load-uma:v1]|    sys.exit(main())"
         "$SCRIPT_DIR/overlay/patch_ablit.py|$ablit_marker|    main()"
         "$SCRIPT_DIR/overlay/ablit_runtime.py|o_proj abliteration (ABLIT)|    return report"
     )
@@ -1091,6 +1103,7 @@ preflight() {
     [ -f "$TOOLCHOICE_PATCH_HOST" ] || die "$TOOLCHOICE_PATCH_HOST missing"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "$XGRAMMAR_PATCH_HOST missing"
     [ -f "$CACHE_RESET_PATCH_HOST" ] || die "$CACHE_RESET_PATCH_HOST missing"
+    [ -f "$COLD_LOAD_PATCH_HOST" ] || die "$COLD_LOAD_PATCH_HOST missing"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "$KPOOL_TAIL_PATCH_HOST missing"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "$SPINWAIT_PATCH_HOST missing"
     [ -f "$ADAPTIVE_K_PATCH_HOST" ] || die "$ADAPTIVE_K_PATCH_HOST missing"
@@ -1582,6 +1595,7 @@ sync_weights() {
 # kv_cache_utils.py and follows patch_glm5_drafter_group.py, the other overlay
 # editing that file.
 GLM53_OVERLAY_ORDER=(
+    patch_cold_load_uma.py
     patch_glm_video_placeholders.py
     patch_suppress_stops_in_reasoning.py
     patch_scheduler_decode_floor.py
@@ -1811,9 +1825,46 @@ _glm53_stage_coop_runtime_worker() {
 }
 
 # ------------------------------- launch ------------------------------------
+# Drop clean page cache and cycle swap on both nodes while no engine runs.
+# Needs passwordless sudo (sudo -n); otherwise warns and continues. The
+# in-container patch_cold_load_uma.py cannot drop caches (no CAP_SYS_ADMIN)
+# and only rescales the InstantTensor budget, so this host step is what keeps
+# the 164 GiB load at the NVMe ceiling instead of a double-digit io_depth.
+host_memory_hygiene() {
+    [ "$GLM53_HOST_MEM_HYGIENE" = "1" ] || { log "host memory hygiene skipped (GLM53_HOST_MEM_HYGIENE=0)"; return 0; }
+    local cmd='sync; echo 1 > /proc/sys/vm/drop_caches; if swapon --noheadings --show=USED 2>/dev/null | grep -qvE "^\s*0B?\s*$"; then swapoff -a && swapon -a; fi; echo "MemFree=$(awk "/MemFree/{print int(\$2/1048576)}" /proc/meminfo)GiB swap_used=$(swapon --noheadings --show=USED 2>/dev/null | tr -d " " | paste -sd, -)"'
+    # After a teardown the driver returns ~80 GiB of weights asynchronously;
+    # vLLM's startup check reads cuda free (== MemFree on UMA) against
+    # GPU_MEM_UTIL x total, so wait until MemFree clears that bar (+1 GiB).
+    # The gate has to be the number vLLM reads: cudaMemGetInfo free, which
+    # trails host MemFree by a few GiB while the previous context unwinds.
+    local need_mib i free_mib
+    need_mib=$(awk -v u="$GPU_MEM_UTIL" '/MemTotal/{printf "%d", $2*u/1024 + 1536}' /proc/meminfo)
+    for i in $(seq 1 45); do
+        free_mib=$(docker run --rm --gpus all --entrypoint python3 "$IMAGE" -c 'import torch; print(torch.cuda.mem_get_info()[0]//1048576)' 2>/dev/null || awk '/MemFree/{print int($2/1024)}' /proc/meminfo)
+        [ "${free_mib:-0}" -ge "$need_mib" ] && break
+        [ "$i" = 1 ] && log "waiting for CUDA free ($((free_mib/1024)) GiB) to reach $((need_mib/1024)) GiB (GPU_MEM_UTIL x total + 1.5 GiB) ..."
+        sync; sudo -n sh -c 'echo 1 > /proc/sys/vm/drop_caches' 2>/dev/null || true
+        sleep 2
+    done
+    log "cuda free before launch: $((free_mib/1024)) GiB (need $((need_mib/1024)))"
+    local out
+    if out="$(sudo -n sh -c "$cmd" 2>/dev/null)"; then
+        log "host hygiene head: $out"
+    else
+        warn "head: passwordless sudo unavailable — page cache not dropped (cold load may run below the NVMe ceiling)"
+    fi
+    if out="$(worker_ssh "sudo -n sh -c '$cmd'" 2>/dev/null)"; then
+        log "host hygiene worker: $out"
+    else
+        warn "worker: passwordless sudo unavailable — page cache not dropped"
+    fi
+}
+
 launch_cluster() {
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || true
     worker_ssh "docker rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 || true
+    host_memory_hygiene
 
     mkdir -p "$CACHE_ROOT" "$TRITON_HOST_CACHE" "$TILELANG_HOST_CACHE"
     worker_ssh "mkdir -p '$WORKER_VLLM_CACHE' '$WORKER_TRITON_CACHE' '$WORKER_TILELANG_CACHE'"
@@ -1842,6 +1893,8 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
     [ -f "$CACHE_RESET_PATCH_HOST" ] || die "missing $CACHE_RESET_PATCH_HOST"
     scp -q -o BatchMode=yes "$CACHE_RESET_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_cache_reset.py"
+    [ -f "$COLD_LOAD_PATCH_HOST" ] || die "missing $COLD_LOAD_PATCH_HOST"
+    scp -q -o BatchMode=yes "$COLD_LOAD_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_cold_load_uma.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "missing $SPINWAIT_PATCH_HOST"
@@ -2042,6 +2095,7 @@ launch_cluster() {
         -v '/tmp/patch_kv_capacity_log.py:/opt/glm53/patch_kv_capacity_log.py:ro' \
         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
         -v '/tmp/patch_cache_reset.py:/opt/glm53/patch_cache_reset.py:ro' \
+        -v '/tmp/patch_cold_load_uma.py:/opt/glm53/patch_cold_load_uma.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
         -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
         -v '/tmp/patch_adaptive_k.py:/opt/glm53/patch_adaptive_k.py:ro' \
@@ -2083,6 +2137,7 @@ launch_cluster() {
         -v "$KVCAP_PATCH_HOST:/opt/glm53/patch_kv_capacity_log.py:ro" \
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$CACHE_RESET_PATCH_HOST:/opt/glm53/patch_cache_reset.py:ro" \
+        -v "$COLD_LOAD_PATCH_HOST:/opt/glm53/patch_cold_load_uma.py:ro" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
         -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
         -v "$ADAPTIVE_K_PATCH_HOST:/opt/glm53/patch_adaptive_k.py:ro" \

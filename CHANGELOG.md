@@ -11,6 +11,23 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Added
 
+- **Cold load at the NVMe ceiling on UMA / 64 KiB-page hosts**
+  (`overlay/patch_cold_load_uma.py`, `tests/test_cold_load_uma.py`,
+  `docs/cold-load-uma.md`). On GB10 `cuda.mem_get_info()` free is host
+  `MemFree`, so a full page cache (after the 164 GiB rsync or a previous serve)
+  made InstantTensor either abort (`buffer_size … exceeds device memory budget`,
+  reproduced) or run with `io_depth` shrunk from 512 to double digits. The patch
+  measures `MemAvailable`, drops clean cache when it can, and pins an explicit
+  budget/buffer; measured 5.07 GB/s with ~120 GB cached where stock raised, and
+  the full 164 GiB checkpoint in 36 s at boot (drive O_DIRECT ceiling 4.9 GB/s).
+  On kernels whose page size is not 4 KiB it also stages file-backed safetensors
+  tensors into anonymous memory before H2D (`cuMemcpyHtoDAsync` wedges on
+  file-backed 64 KiB mappings); byte-identical to stock on 4 KiB kernels and
+  discrete GPUs. Launcher: `GLM53_HOST_MEM_HYGIENE=1` (default) drops page cache,
+  cycles swap and waits for CUDA free memory to clear the `GPU_MEM_UTIL` request
+  on both nodes before `docker run`. Kill switches `GLM53_COLD_LOAD_UMA=0`,
+  `GLM53_COLD_LOAD_STAGE_MMAP=0`.
+
 - Opt-in SM121 **thin-decode** kernels for the EXL3 routed experts
   (`GLM53_EXL3_MOE_FAST`, default `0`): `overlay/patch_exl3_decode_pipeline.py`
   adds two K4/N256 fast kernels (shared / independent gate-up input transform)
