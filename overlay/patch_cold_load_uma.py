@@ -103,6 +103,23 @@ def _glm53_uma_page_size() -> int:
         return 4096
 
 
+def _glm53_env_number(name: str, kind, lo, hi):
+    """Parse an optional numeric env var; invalid or out-of-range values are
+    ignored with a warning instead of aborting the model load."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        value = kind(raw)
+    except (TypeError, ValueError):
+        logger.warning("[glm53-cold-load-uma] ignoring %s=%r (not %s)", name, raw, kind.__name__)
+        return None
+    if (lo is not None and value < lo) or (hi is not None and value > hi):
+        logger.warning("[glm53-cold-load-uma] ignoring %s=%r (outside [%s, %s])", name, raw, lo, hi)
+        return None
+    return value
+
+
 def _glm53_uma_drop_caches() -> bool:
     """Drop clean page cache. Only possible with CAP_SYS_ADMIN; returns False
     when the container cannot (the launcher dropped on the host instead)."""
@@ -120,7 +137,8 @@ def _glm53_uma_prepare_instanttensor_budget(hf_weights_files: list[str]) -> None
 
     Sets ``_GLM53_UMA_STATE[\\"max_free_mem_usage\\"]`` / ``[\\"buffer_size\\"]``
     (None = InstantTensor/env default) and drops page cache when MemFree is
-    short. Pure host-side bookkeeping; never touches CUDA state.
+    short. Reads ``torch.cuda.mem_get_info()`` (the same query InstantTensor
+    makes) and ``/proc/meminfo``; allocates nothing on the device.
     """
     import torch
 
@@ -132,12 +150,12 @@ def _glm53_uma_prepare_instanttensor_budget(hf_weights_files: list[str]) -> None
     except ImportError:
         return
 
-    env_budget = os.environ.get("INSTANTTENSOR_MAX_FREE_MEM_USAGE")
-    env_buffer = os.environ.get("INSTANTTENSOR_BUFFER_SIZE")
+    env_budget = _glm53_env_number("INSTANTTENSOR_MAX_FREE_MEM_USAGE", float, 0.0, 1.0)
+    env_buffer = _glm53_env_number("INSTANTTENSOR_BUFFER_SIZE", int, 1, None)
     # Default buffer target: 4 GiB keeps io_depth at the AIO/uring default
     # (512 // world_size x 8 MiB chunks) — measured 5.08 GB/s on this kit,
     # the single-reader O_DIRECT ceiling of the 1 TB NVMe.
-    buffer_target = int(env_buffer) if env_buffer else 4 * (1 << 30)
+    buffer_target = env_buffer if env_buffer else 4 * (1 << 30)
     # Need the buffer plus per-tensor copies in flight (copy=True clones the
     # largest tensor once) and a 2 GiB margin for the allocator.
     largest = 0
@@ -153,8 +171,8 @@ def _glm53_uma_prepare_instanttensor_budget(hf_weights_files: list[str]) -> None
     uma = mem_free is not None and abs(free_bytes - mem_free * 1024) < (8 << 30)
     if not uma:
         # Discrete GPU: device memory is not the host page cache; stock path.
-        _GLM53_UMA_STATE["max_free_mem_usage"] = float(env_budget) if env_budget else None
-        _GLM53_UMA_STATE["buffer_size"] = int(env_buffer) if env_buffer else None
+        _GLM53_UMA_STATE["max_free_mem_usage"] = env_budget
+        _GLM53_UMA_STATE["buffer_size"] = env_buffer
         return
 
     dropped = False
@@ -164,11 +182,11 @@ def _glm53_uma_prepare_instanttensor_budget(hf_weights_files: list[str]) -> None
     # Budget = fraction of *current* free. Ask for exactly what the buffer
     # needs (plus margin) so a later CUDA allocation is never starved, but
     # never below InstantTensor's 0.5 default when free memory is plentiful.
-    frac = float(env_budget) if env_budget else None
+    frac = env_budget
     if frac is None:
         frac = 0.5 if free_bytes >= 2 * need_bytes else min(0.95, need_bytes / max(free_bytes, 1))
     budget = int(free_bytes * frac)
-    buffer_size = int(env_buffer) if env_buffer else min(buffer_target, max(budget - (1 << 30), 0))
+    buffer_size = env_buffer if env_buffer else min(buffer_target, max(budget - (1 << 30), 0))
     if buffer_size <= 0:
         buffer_size = None
     _GLM53_UMA_STATE["max_free_mem_usage"] = frac
@@ -250,6 +268,10 @@ def verified_state(src: str) -> str:
 
 
 def prepare(src: str) -> str:
+    if MARK in src:
+        # Already carries the overlay (verified_state guards partial marks);
+        # a second apply must be a no-op.
+        return src
     src = src.replace(ANCHOR_IT_OPEN, NEW_IT_OPEN, 1)
     src = src.replace(ANCHOR_IT_DEF, HELPER + ANCHOR_IT_DEF, 1)
     # The mmap flag must be defined before safetensors_weights_iterator runs;

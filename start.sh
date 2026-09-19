@@ -1832,7 +1832,21 @@ _glm53_stage_coop_runtime_worker() {
 # the 164 GiB load at the NVMe ceiling instead of a double-digit io_depth.
 host_memory_hygiene() {
     [ "$GLM53_HOST_MEM_HYGIENE" = "1" ] || { log "host memory hygiene skipped (GLM53_HOST_MEM_HYGIENE=0)"; return 0; }
-    local cmd='sync; echo 1 > /proc/sys/vm/drop_caches; if swapon --noheadings --show=USED 2>/dev/null | grep -qvE "^\s*0B?\s*$"; then swapoff -a && swapon -a; fi; echo "MemFree=$(awk "/MemFree/{print int(\$2/1048576)}" /proc/meminfo)GiB swap_used=$(swapon --noheadings --show=USED 2>/dev/null | tr -d " " | paste -sd, -)"'
+    # One POSIX sh script, sent to `sudo -n sh -s` on stdin on each node: drop
+    # clean page cache, cycle swap only if any is in use, report the result.
+    local hygiene_script
+    hygiene_script="$(cat <<'HYG'
+set -e
+sync
+echo 1 > /proc/sys/vm/drop_caches
+used_kib=$(awk '$1 != "Filename" { s += $4 } END { print s + 0 }' /proc/swaps)
+if [ "$used_kib" -gt 0 ]; then
+    swapoff -a && swapon -a
+fi
+free_gib=$(awk '/^MemFree:/ { print int($2 / 1048576) }' /proc/meminfo)
+echo "MemFree=${free_gib}GiB swap_used_before=${used_kib}KiB"
+HYG
+)"
     # After a teardown the driver returns ~80 GiB of weights asynchronously;
     # vLLM's startup check reads cuda free (== MemFree on UMA) against
     # GPU_MEM_UTIL x total, so wait until MemFree clears that bar (+1 GiB).
@@ -1849,12 +1863,12 @@ host_memory_hygiene() {
     done
     log "cuda free before launch: $((free_mib/1024)) GiB (need $((need_mib/1024)))"
     local out
-    if out="$(sudo -n sh -c "$cmd" 2>/dev/null)"; then
+    if out="$(printf '%s\n' "$hygiene_script" | sudo -n sh -s 2>/dev/null)"; then
         log "host hygiene head: $out"
     else
         warn "head: passwordless sudo unavailable — page cache not dropped (cold load may run below the NVMe ceiling)"
     fi
-    if out="$(worker_ssh "sudo -n sh -c '$cmd'" 2>/dev/null)"; then
+    if out="$(printf '%s\n' "$hygiene_script" | worker_ssh "sudo -n sh -s" 2>/dev/null)"; then
         log "host hygiene worker: $out"
     else
         warn "worker: passwordless sudo unavailable — page cache not dropped"

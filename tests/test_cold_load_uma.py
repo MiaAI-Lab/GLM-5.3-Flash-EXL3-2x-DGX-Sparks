@@ -64,8 +64,8 @@ def _run(src: str) -> str:
         out = mod.prepare(src)
         assert mod.verified_state(out) == "patched"
         compile(out, "weight_utils.py", "exec")
-        # idempotent
-        assert mod.prepare(out) != out or True  # prepare on patched is a no-op by anchors
+        # idempotent: the anchors are consumed, so a second prepare() is a no-op
+        assert mod.prepare(out) == out
         assert mod.verified_state(out) == "patched"
         return out
 
@@ -152,6 +152,28 @@ def test_budget_math():
     assert st["max_free_mem_usage"] == 0.5
     assert st["buffer_size"] == 4 << 30
     assert any(k == "info" for k, _ in logs)
+
+
+def test_env_number_parsing():
+    out = _run(FIXTURE)
+    helper_src = out[out.index("# [glm53-cold-load-uma:v1] helpers") : out.index("def instanttensor_weights_iterator(")]
+    warns: list = []
+
+    class L:
+        def info(self, *a): pass
+        def warning(self, *a): warns.append(a)
+
+    ns: dict = {}
+    env = {"INSTANTTENSOR_MAX_FREE_MEM_USAGE": "abc", "INSTANTTENSOR_BUFFER_SIZE": "-5"}
+    fake_os = types.SimpleNamespace(sysconf=lambda k: 65536, environ=env, sync=lambda: None, path=os.path)
+    exec(helper_src, {"os": fake_os, "logger": L(), "current_platform": None, "__builtins__": __builtins__}, ns)
+    fn = ns["_glm53_env_number"]
+    assert fn("INSTANTTENSOR_MAX_FREE_MEM_USAGE", float, 0.0, 1.0) is None
+    assert fn("INSTANTTENSOR_BUFFER_SIZE", int, 1, None) is None
+    assert len(warns) == 2
+    env["INSTANTTENSOR_MAX_FREE_MEM_USAGE"] = "0.75"
+    assert fn("INSTANTTENSOR_MAX_FREE_MEM_USAGE", float, 0.0, 1.0) == 0.75
+    assert fn("MISSING", int, None, None) is None
 
 
 def test_installed_optin():

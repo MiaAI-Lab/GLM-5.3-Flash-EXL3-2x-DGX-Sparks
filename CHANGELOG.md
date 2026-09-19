@@ -13,7 +13,7 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 - **Cold load at the NVMe ceiling on UMA / 64 KiB-page hosts**
   (`overlay/patch_cold_load_uma.py`, `tests/test_cold_load_uma.py`,
-  `docs/cold-load-uma.md`). On GB10 `cuda.mem_get_info()` free is host
+  `docs/cold-load-uma.md`). On GB10 `torch.cuda.mem_get_info()` free is host
   `MemFree`, so a full page cache (after the 164 GiB rsync or a previous serve)
   made InstantTensor either abort (`buffer_size … exceeds device memory budget`,
   reproduced) or run with `io_depth` shrunk from 512 to double digits. The patch
