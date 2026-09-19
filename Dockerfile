@@ -544,6 +544,41 @@ COPY overlay/patch_skip_cudagraph_profile.py /opt/glm53/patch_skip_cudagraph_pro
 COPY tests/test_skip_cudagraph_profile.py /opt/glm53/test_skip_cudagraph_profile.py
 RUN GLM53_REQUIRE_TARGET=1 python3 /opt/glm53/test_skip_cudagraph_profile.py && python3 /opt/glm53/patch_skip_cudagraph_profile.py
 
+# NVMe-direct prefix-cache offload (overlay/kvoffload/, see docs/nvme-prefix-cache.md).
+# The image ships the upstream OffloadingConnector stack; these are supersets of
+# the image files (verified 2026-09-19: every diff is an addition):
+#   offloading/scheduler.py  draft-group detection by name / root-prefix minority
+#                            (DFlash2 registers under "model.", target under
+#                            "language_model."), is_offloadable group skip
+#   offloading/config.py + kv_offload/config.py
+#                            KpoolTailSpec (4-token circular scratch, no hashes)
+#                            excluded from tokens_per_hash and every load/store
+#   kv_offload/nvme_direct.py  out-of-tree spec: no CPU tier, per-IO-thread
+#                            pinned bounce, GPU<->NVMe files, restart-restore
+ARG VPKG=/usr/local/lib/python3.12/dist-packages/vllm
+COPY overlay/kvoffload/offloading_scheduler.py ${VPKG}/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
+COPY overlay/kvoffload/offloading_config.py    ${VPKG}/distributed/kv_transfer/kv_connector/v1/offloading/config.py
+COPY overlay/kvoffload/kv_offload_config.py    ${VPKG}/v1/kv_offload/config.py
+COPY overlay/kvoffload/nvme_direct.py          ${VPKG}/v1/kv_offload/nvme_direct.py
+RUN python3 - <<'PY'
+from pathlib import Path
+site = Path("/usr/local/lib/python3.12/dist-packages/vllm")
+checks = {
+    "distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py": ['"dflash" in n', "is_offloadable", "root-prefix minority"],
+    "distributed/kv_transfer/kv_connector/v1/offloading/config.py": ["participates_in_prefix_caching", "KpoolTail"],
+    "v1/kv_offload/config.py": ["offloadable: bool = True"],
+    "v1/kv_offload/nvme_direct.py": ["NvmeDirectOffloadingSpec", "NvmeDirectWorker", "capacity_bytes"],
+    "model_executor/model_loader/weight_utils.py": ["[glm53-cold-load-uma:v1]", "_glm53_uma_prepare_instanttensor_budget"],
+}
+for rel, needles in checks.items():
+    src = (site / rel).read_text()
+    compile(src, rel, "exec")
+    for needle in needles:
+        assert needle in src, f"{rel}: missing {needle!r}"
+from vllm.v1.kv_offload.nvme_direct import NvmeDirectOffloadingSpec  # noqa: F401
+print("kv-offload + cold-load overlay verify OK")
+PY
+
 # Baked by start.sh --build-arg so a git pull that changes overlay/Dockerfile
 # misses this label and rebuilds once. Keep last so stamp-only rebuilds are cheap.
 ARG GLM53_RECIPE_STAMP=unknown

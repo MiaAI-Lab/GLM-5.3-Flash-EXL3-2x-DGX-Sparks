@@ -417,6 +417,27 @@ GLM53_SPINWAIT_MS="${GLM53_SPINWAIT_MS-stock}"
 # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
 # exceed that without being a true hang. NCCL watchdog is still 600s.
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
+# --- NVMe prefix cache (overlay/kvoffload/, docs/nvme-prefix-cache.md) -----
+# OFFLOAD_NVME=1 adds the OffloadingConnector with the NvmeDirectOffloadingSpec:
+# no CPU tier (UMA has none to spare), GPU<->NVMe files under OFFLOAD_FS_DIR
+# in each container (host dir OFFLOAD_HOST_DIR / WORKER_OFFLOAD_HOST_DIR, one
+# r<rank>/ tree per rank). Files survive restarts: a restarted engine restores
+# a 44k-token prompt in 9.5 s instead of 55 s cold (TRIAL boot 6). Cleanup is
+# the glm53-hicache-ttl cron (OFFLOAD_TTL_MINUTES, 0 = no cron).
+# OFFLOAD_CAPACITY_BYTES: the spec refuses to start unless that much is free on
+# the target (empty = auto: free space minus OFFLOAD_RESERVE_GB, both nodes).
+# DFlash2 dynamic draft schedule: JSON [[batch_lo,batch_hi,k],...] forwarded as
+# num_speculative_tokens_per_batch_size (upstream Dynamic SD). Empty = fixed
+# DFLASH_TOKENS at every batch size. Example taper: [[1,2,7],[3,4,3],[5,8,2]].
+DFLASH_SCHEDULE="${DFLASH_SCHEDULE:-}"
+OFFLOAD_NVME="${OFFLOAD_NVME:-0}"
+OFFLOAD_FS_DIR="${OFFLOAD_FS_DIR:-/kv-nvme}"
+OFFLOAD_HOST_DIR="${OFFLOAD_HOST_DIR:-$HOME/kv-cache-nvme}"
+WORKER_OFFLOAD_HOST_DIR="${WORKER_OFFLOAD_HOST_DIR:-$WORKER_HOME/kv-cache-nvme}"
+OFFLOAD_IO_THREADS="${OFFLOAD_IO_THREADS:-8}"
+OFFLOAD_CAPACITY_BYTES="${OFFLOAD_CAPACITY_BYTES:-}"
+OFFLOAD_RESERVE_GB="${OFFLOAD_RESERVE_GB:-24}"
+OFFLOAD_TTL_MINUTES="${OFFLOAD_TTL_MINUTES:-0}"
 # --- host memory hygiene before launch (docs/uvm-livelock-gb10.md) ----------
 # On UMA the page cache is "used" device memory to the CUDA driver: after a
 # 164 GiB rsync or a previous serve, MemFree is ~2 GiB and the InstantTensor
@@ -426,6 +447,9 @@ VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
 # clears GPU_MEM_UTIL x total (the driver returns a torn-down context a few
 # GiB behind MemFree). Set 0 to leave the host alone.
 GLM53_HOST_MEM_HYGIENE="${GLM53_HOST_MEM_HYGIENE:-1}"
+# Optional extra bind mount (same host path on both nodes, docker -v syntax,
+# e.g. a read-only tree the HF snapshot symlinks into). Empty = none.
+EXTRA_MOUNT="${EXTRA_MOUNT:-}"
 # DFlash2 dynamic draft schedule: JSON [[batch_lo,batch_hi,k],...] forwarded as
 # num_speculative_tokens_per_batch_size (upstream Dynamic SD, honoured per step
 # by the scheduler's dynamic_sd_lookup). Empty = fixed DFLASH_TOKENS at every
@@ -695,6 +719,16 @@ validate_numeric_config() {
     _glm53_validate_bool_flag GLM53_EXL3_MOE_FAST "${GLM53_EXL3_MOE_FAST-0}" || return
     _glm53_validate_spinwait_ms || return
     _glm53_validate_bool_flag GLM53_APC_NO_STORE "${GLM53_APC_NO_STORE-1}" || return
+    _glm53_validate_bool_flag OFFLOAD_NVME "$OFFLOAD_NVME" || return
+    if [ "$OFFLOAD_NVME" = "1" ]; then
+        _glm53_canonical_positive_int OFFLOAD_IO_THREADS "$OFFLOAD_IO_THREADS" 64 || return
+        _glm53_canonical_positive_int OFFLOAD_RESERVE_GB "$OFFLOAD_RESERVE_GB" 4096 || return
+        [[ "$OFFLOAD_TTL_MINUTES" =~ ^[0-9]+$ ]] || { echo "OFFLOAD_TTL_MINUTES must be a non-negative integer (got: $OFFLOAD_TTL_MINUTES)" >&2; return 2; }
+        if [ -n "$OFFLOAD_CAPACITY_BYTES" ]; then
+            _glm53_canonical_positive_int OFFLOAD_CAPACITY_BYTES "$OFFLOAD_CAPACITY_BYTES" 9007199254740992 || return
+        fi
+        case "$OFFLOAD_FS_DIR" in /*) ;; *) echo "OFFLOAD_FS_DIR must be an absolute in-container path (got: $OFFLOAD_FS_DIR)" >&2; return 2;; esac
+    fi
     _glm53_validate_bool_flag GLM53_HOST_MEM_HYGIENE "$GLM53_HOST_MEM_HYGIENE" || return
     if [ -n "$DFLASH_SCHEDULE" ]; then
         _glm53_validate_dflash_schedule "$DFLASH_SCHEDULE" || return
@@ -1729,6 +1763,16 @@ else
     [ "${SKIP_MM_PROFILING:-1}" = "1" ] && ARGS+=(--skip-mm-profiling)
     say "vision on: limit-mm=${LIMIT_MM:-} image-tokens=${MM_IMAGE_TOKENS:-8000} video-frames=${VIDEO_NUM_FRAMES:-32} mm-cache-gb=${MM_PROCESSOR_CACHE_GB:-4} skip-mm-profiling=${SKIP_MM_PROFILING:-1} chat-template=${CHAT_TEMPLATE:-}"
 fi
+if [ -n "${OFFLOAD_FS_DIR:-}" ] && [ "${OFFLOAD_NVME:-0}" = "1" ]; then
+    ARGS+=(--kv-transfer-config "{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"spec_name\":\"NvmeDirectOffloadingSpec\",\"spec_module_path\":\"vllm.v1.kv_offload.nvme_direct\",\"root_dir\":\"${OFFLOAD_FS_DIR}\",\"n_io_threads\":${OFFLOAD_IO_THREADS:-8},\"capacity_bytes\":${OFFLOAD_CAPACITY_BYTES:-0}}}")
+    ARGS+=(--enable-prompt-tokens-details)
+    # vLLM rejects any KV connector with expandable_segments (VMM remaps).
+    PYTORCH_CUDA_ALLOC_CONF="$(echo "${PYTORCH_CUDA_ALLOC_CONF:-}" | sed 's/expandable_segments:True//;s/^,//;s/,$//')"
+    if [ -z "${PYTORCH_CUDA_ALLOC_CONF}" ]; then unset PYTORCH_CUDA_ALLOC_CONF; else export PYTORCH_CUDA_ALLOC_CONF; fi
+    # Stable prefix hashes across ranks and restarts (restart-restore).
+    export PYTHONHASHSEED="${PYTHONHASHSEED:-0}"
+    say "kv offload: nvme-direct fs=${OFFLOAD_FS_DIR} threads=${OFFLOAD_IO_THREADS:-8} capacity=${OFFLOAD_CAPACITY_BYTES:-0} alloc_conf='${PYTORCH_CUDA_ALLOC_CONF:-}'"
+fi
 if [ -n "${EXTRA_ARGS:-}" ]; then
     # shellcheck disable=SC2206
     EXTRA=(${EXTRA_ARGS})
@@ -1810,6 +1854,13 @@ else
     [ -n "${MM_PROCESSOR_CACHE_GB:-}" ] && ARGS+=(--mm-processor-cache-gb "${MM_PROCESSOR_CACHE_GB}")
     [ "${SKIP_MM_PROFILING:-1}" = "1" ] && ARGS+=(--skip-mm-profiling)
 fi
+if [ -n "${OFFLOAD_FS_DIR:-}" ] && [ "${OFFLOAD_NVME:-0}" = "1" ]; then
+    ARGS+=(--kv-transfer-config "{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"spec_name\":\"NvmeDirectOffloadingSpec\",\"spec_module_path\":\"vllm.v1.kv_offload.nvme_direct\",\"root_dir\":\"${OFFLOAD_FS_DIR}\",\"n_io_threads\":${OFFLOAD_IO_THREADS:-8},\"capacity_bytes\":${OFFLOAD_CAPACITY_BYTES:-0}}}")
+    PYTORCH_CUDA_ALLOC_CONF="$(echo "${PYTORCH_CUDA_ALLOC_CONF:-}" | sed 's/expandable_segments:True//;s/^,//;s/,$//')"
+    if [ -z "${PYTORCH_CUDA_ALLOC_CONF}" ]; then unset PYTORCH_CUDA_ALLOC_CONF; else export PYTORCH_CUDA_ALLOC_CONF; fi
+    export PYTHONHASHSEED="${PYTHONHASHSEED:-0}"
+    say "kv offload: nvme-direct fs=${OFFLOAD_FS_DIR} threads=${OFFLOAD_IO_THREADS:-8} capacity=${OFFLOAD_CAPACITY_BYTES:-0} alloc_conf='${PYTORCH_CUDA_ALLOC_CONF:-}'"
+fi
 if [ -n "${EXTRA_ARGS:-}" ]; then
     # shellcheck disable=SC2206
     EXTRA=(${EXTRA_ARGS})
@@ -1871,6 +1922,51 @@ _glm53_stage_coop_runtime_worker() {
 }
 
 # ------------------------------- launch ------------------------------------
+# ----------------------- NVMe prefix cache + host hygiene -------------------
+# Free bytes on the filesystem holding $1 (local) or $2 (remote via worker_ssh).
+_fs_free_bytes() { df -Pk "$1" 2>/dev/null | awk 'NR==2{print $4*1024}'; }
+_worker_fs_free_bytes() { worker_ssh "df -Pk '$1' 2>/dev/null" | awk 'NR==2{print $4*1024}'; }
+
+# Creates the per-node cache dirs, resolves OFFLOAD_CAPACITY_BYTES (auto = the
+# smaller node's free space minus OFFLOAD_RESERVE_GB, so the spec's in-container
+# free-space check passes on both ranks) and installs/refreshes the TTL cron.
+prepare_offload_dirs() {
+    mkdir -p "$OFFLOAD_HOST_DIR"
+    worker_ssh "mkdir -p '$WORKER_OFFLOAD_HOST_DIR'" || die "cannot create $WORKER_OFFLOAD_HOST_DIR on worker"
+    local head_free worker_free reserve used_head used_worker
+    head_free="$(_fs_free_bytes "$OFFLOAD_HOST_DIR")"
+    worker_free="$(_worker_fs_free_bytes "$WORKER_OFFLOAD_HOST_DIR")"
+    used_head="$(du -sb "$OFFLOAD_HOST_DIR" 2>/dev/null | awk '{print $1}')"
+    used_worker="$(worker_ssh "du -sb '$WORKER_OFFLOAD_HOST_DIR' 2>/dev/null" | awk '{print $1}')"
+    reserve=$((OFFLOAD_RESERVE_GB * 1024 * 1024 * 1024))
+    if [ -z "$OFFLOAD_CAPACITY_BYTES" ]; then
+        # The spec demands this much *free* at boot (raw free, existing cache
+        # files not counted), so auto = min(head free, worker free) - reserve.
+        local m="$head_free"
+        [ "${worker_free:-0}" -lt "$m" ] && m="$worker_free"
+        OFFLOAD_CAPACITY_BYTES=$(( m - reserve ))
+        [ "$OFFLOAD_CAPACITY_BYTES" -gt 0 ] || die "NVMe prefix cache: less than OFFLOAD_RESERVE_GB=${OFFLOAD_RESERVE_GB} GiB free (head $((head_free/1073741824)) GiB, worker $((worker_free/1073741824)) GiB)"
+    fi
+    log "nvme prefix cache: head $OFFLOAD_HOST_DIR ($((head_free/1073741824)) GiB free, $(( ${used_head:-0}/1073741824 )) GiB cached), worker $WORKER_OFFLOAD_HOST_DIR ($((worker_free/1073741824)) GiB free, $(( ${used_worker:-0}/1073741824 )) GiB cached) -> $OFFLOAD_FS_DIR; capacity=$((OFFLOAD_CAPACITY_BYTES/1073741824)) GiB/node threads=$OFFLOAD_IO_THREADS"
+    if [ "$OFFLOAD_TTL_MINUTES" != "0" ]; then
+        local cron_line="17 * * * * find $OFFLOAD_HOST_DIR -type f -mmin +$OFFLOAD_TTL_MINUTES -delete # glm53-hicache-ttl"
+        local wcron_line="17 * * * * find $WORKER_OFFLOAD_HOST_DIR -type f -mmin +$OFFLOAD_TTL_MINUTES -delete # glm53-hicache-ttl"
+        { crontab -l 2>/dev/null | grep -v 'glm53-hicache-ttl'; echo "$cron_line"; } | crontab - 2>/dev/null \
+            || warn "could not install head TTL cron"
+        worker_ssh "{ crontab -l 2>/dev/null | grep -v 'glm53-hicache-ttl'; echo '$wcron_line'; } | crontab -" 2>/dev/null \
+            || warn "could not install worker TTL cron"
+        log "nvme prefix cache TTL: ${OFFLOAD_TTL_MINUTES} min (cron glm53-hicache-ttl on both nodes)"
+    else
+        # Explicit 0: remove any earlier sweeper so files persist indefinitely
+        # (capacity is the spec's boot-time free-space gate; no runtime eviction).
+        if crontab -l 2>/dev/null | grep -q 'glm53-hicache-ttl'; then
+            crontab -l | grep -v 'glm53-hicache-ttl' | crontab - || true
+            log "removed head TTL cron (OFFLOAD_TTL_MINUTES=0)"
+        fi
+        worker_ssh "if crontab -l 2>/dev/null | grep -q glm53-hicache-ttl; then crontab -l | grep -v glm53-hicache-ttl | crontab -; fi" 2>/dev/null || true
+    fi
+}
+
 # Drop clean page cache and cycle swap on both nodes while no engine runs.
 # Needs passwordless sudo (sudo -n); otherwise warns and continues. The
 # in-container patch_cold_load_uma.py cannot drop caches (no CAP_SYS_ADMIN)
@@ -1924,6 +2020,14 @@ HYG
 launch_cluster() {
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || true
     worker_ssh "docker rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 || true
+
+    local -a head_offload_mount=()
+    local worker_offload_mount=""
+    if [ "$OFFLOAD_NVME" = "1" ]; then
+        prepare_offload_dirs
+        head_offload_mount=(-v "$OFFLOAD_HOST_DIR:$OFFLOAD_FS_DIR")
+        worker_offload_mount="-v '$WORKER_OFFLOAD_HOST_DIR:$OFFLOAD_FS_DIR'"
+    fi
     host_memory_hygiene
 
     mkdir -p "$CACHE_ROOT" "$TRITON_HOST_CACHE" "$TILELANG_HOST_CACHE" "$NV_HOST_CACHE"
@@ -2076,6 +2180,7 @@ launch_cluster() {
              GLM53_ADAPTIVE_K GLM53_ADAPTIVE_K_SET GLM53_ADAPTIVE_K_ALPHA GLM53_ADAPTIVE_K_MARGIN \
              GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST GLM53_DENSE_FP8 \
              GLM53_EXL3_MOE_FAST DFLASH_SCHEDULE \
+             OFFLOAD_NVME OFFLOAD_FS_DIR OFFLOAD_IO_THREADS OFFLOAD_CAPACITY_BYTES \
              GLM53_COOP_GEOMETRY; do
         serve_env+=" -e $v='${!v:-}'"
         serve_env_names+=("$v")
@@ -2140,6 +2245,7 @@ launch_cluster() {
         --device /dev/infiniband --cap-add IPC_LOCK \
         --ulimit memlock=-1 --ulimit stack=67108864 \
         -v '$(_hf_mount)' \
+        ${EXTRA_MOUNT:+-v '$EXTRA_MOUNT'} \
         -v '$WORKER_VLLM_CACHE:/root/.cache/vllm' \
         -v '$WORKER_TRITON_CACHE:/root/.triton/cache' \
         -v '$WORKER_TILELANG_CACHE:/root/.tilelang/cache' \
@@ -2159,6 +2265,7 @@ launch_cluster() {
         -v '/tmp/patch_cache_reset.py:/opt/glm53/patch_cache_reset.py:ro' \
         -v '/tmp/patch_cold_load_uma.py:/opt/glm53/patch_cold_load_uma.py:ro' \
         -v '/tmp/patch_skip_cudagraph_profile.py:/opt/glm53/patch_skip_cudagraph_profile.py:ro' \
+        ${worker_offload_mount} \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
         -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
         -v '/tmp/patch_adaptive_k.py:/opt/glm53/patch_adaptive_k.py:ro' \
@@ -2184,6 +2291,7 @@ launch_cluster() {
         --device /dev/infiniband --cap-add IPC_LOCK \
         --ulimit memlock=-1 --ulimit stack=67108864 \
         -v "$HF_CACHE_DIR:/root/.cache/huggingface" \
+        ${EXTRA_MOUNT:+-v "$EXTRA_MOUNT"} \
         -v "$CACHE_ROOT:/root/.cache/vllm" \
         -v "$TRITON_HOST_CACHE:/root/.triton/cache" \
         -v "$TILELANG_HOST_CACHE:/root/.tilelang/cache" \
@@ -2203,6 +2311,7 @@ launch_cluster() {
         -v "$CACHE_RESET_PATCH_HOST:/opt/glm53/patch_cache_reset.py:ro" \
         -v "$COLD_LOAD_PATCH_HOST:/opt/glm53/patch_cold_load_uma.py:ro" \
         -v "$SKIP_CGPROF_PATCH_HOST:/opt/glm53/patch_skip_cudagraph_profile.py:ro" \
+        "${head_offload_mount[@]}" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
         -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
         -v "$ADAPTIVE_K_PATCH_HOST:/opt/glm53/patch_adaptive_k.py:ro" \
@@ -2268,6 +2377,10 @@ launch_cluster() {
         -e GLM53_EXL3_MOE_FAST="$GLM53_EXL3_MOE_FAST" \
         -e GLM53_COOP_GEOMETRY="$GLM53_COOP_GEOMETRY" \
         -e DFLASH_SCHEDULE="${DFLASH_SCHEDULE:-}" \
+        -e OFFLOAD_NVME="$OFFLOAD_NVME" \
+        -e OFFLOAD_FS_DIR="$OFFLOAD_FS_DIR" \
+        -e OFFLOAD_IO_THREADS="$OFFLOAD_IO_THREADS" \
+        -e OFFLOAD_CAPACITY_BYTES="$OFFLOAD_CAPACITY_BYTES" \
         -e MODEL_DIR="$MODEL_DIR" \
         -e VLLM_API_KEY \
         -e EXTRA_ARGS="${EXTRA_ARGS:-}" \
