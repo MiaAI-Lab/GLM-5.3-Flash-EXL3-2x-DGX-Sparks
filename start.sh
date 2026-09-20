@@ -251,6 +251,8 @@ SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.p
 ADAPTIVE_K_PATCH_HOST="${ADAPTIVE_K_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_adaptive_k.py}"
 DENSE_FP8_PATCH_HOST="${DENSE_FP8_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_dense_fp8.py}"
 DEFAULT_TOKENS_PATCH_HOST="${DEFAULT_TOKENS_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_default_max_new_tokens.py}"
+DISPLAY_KV_PATCH_HOST="${DISPLAY_KV_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_display_kv.py}"
+DISPLAY_KV_DIR_HOST="${DISPLAY_KV_DIR_HOST:-$SCRIPT_DIR/overlay/display_kv}"
 EXL3_OVERLAY_HOST="${EXL3_OVERLAY_HOST:-$SCRIPT_DIR/overlay/exl3.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 # Direct-I/O safetensors on the published InstantTensor image. Unset follows
@@ -393,6 +395,18 @@ GLM53_EXTRA_ENV="${GLM53_EXTRA_ENV:-}"
 # explicitly empty value is an operator error and validate_numeric_config
 # rejects it.
 GLM53_KV_CAPACITY_LOG="${GLM53_KV_CAPACITY_LOG-1}"
+# Additive display-reserve KV (overlay/patch_display_kv.py, docs/display-kv.md).
+# GB10 firmware reserves ~2 GiB for display that CUDA never sees. With
+# nvidia_drm modeset=1 fbdev=0 and no desktop, each rank allocates a DRM dumb
+# buffer of GLM53_DISPLAY_KV_MIB (default 1792; up to 2032 fits), registers it
+# with CUDA and ADDS it to the profiled KV budget: ordinary KV, GPU_MEM_UTIL and
+# the host-RAM preflight are unchanged. 1 = required (boot fails if the pool
+# cannot be opened), auto = use it when the DRM node supports dumb buffers,
+# 0 = never touch DRM. Preflight checks the module parameters on both hosts.
+GLM53_DISPLAY_KV="${GLM53_DISPLAY_KV:-auto}"
+GLM53_DISPLAY_KV_MIB="${GLM53_DISPLAY_KV_MIB:-1792}"
+HEAD_DRM_CARD="${HEAD_DRM_CARD:-/dev/dri/card0}"
+WORKER_DRM_CARD="${WORKER_DRM_CARD:-/dev/dri/card0}"
 # Adaptive verification length (overlay/patch_adaptive_k.py). off = stock k=7 every step.
 GLM53_ADAPTIVE_K="${GLM53_ADAPTIVE_K:-off}"
 GLM53_ADAPTIVE_K_SET="${GLM53_ADAPTIVE_K_SET:-2,4,7}"
@@ -742,6 +756,7 @@ validate_overlay_artifacts() {
         "$ADAPTIVE_K_PATCH_HOST|[glm53-adaptive-k]|$main_guard"
         "$DENSE_FP8_PATCH_HOST|[glm53-dense-fp8]|$main_guard"
         "$DEFAULT_TOKENS_PATCH_HOST|[glm53-default-max-new-tokens]|    raise SystemExit(main(sys.argv))"
+        "$DISPLAY_KV_PATCH_HOST|[glm53-display-kv]|$main_guard"
         "$CACHE_RESET_PATCH_HOST|# [glm53-cache-reset]|$main_guard"
         "$SCRIPT_DIR/overlay/patch_ablit.py|$ablit_marker|    main()"
         "$SCRIPT_DIR/overlay/ablit_runtime.py|o_proj abliteration (ABLIT)|    return report"
@@ -1019,6 +1034,46 @@ preflight_memory() {
 trap 'warn "interrupted — containers keep running ('"'"'./start.sh logs'"'"' to watch, '"'"'./start.sh stop'"'"' to stop)"; exit 130' INT
 
 # ------------------------------ preflight ----------------------------------
+# Display-reserve KV: check nvidia_drm modeset=Y fbdev=N and the DRM node on
+# both hosts, build the .so in the image if stale, and resolve the mode.
+# GLM53_DISPLAY_KV=1 dies on any failure; auto downgrades to 0 with a warning;
+# 0 skips everything. The parameters are root-readable only on DGX OS, so a
+# non-interactive sudo is tried and an unreadable value is treated as unknown.
+_drm_param() {  # host(head|worker) name -> value or "?"
+    local cmd="cat /sys/module/nvidia_drm/parameters/$2 2>/dev/null || sudo -n cat /sys/module/nvidia_drm/parameters/$2 2>/dev/null || echo '?'"
+    if [ "$1" = head ]; then bash -c "$cmd"; else worker_ssh "$cmd"; fi
+}
+preflight_display_kv() {
+    case "$GLM53_DISPLAY_KV" in
+        0) return 0 ;;
+        1|auto) ;;
+        *) die "GLM53_DISPLAY_KV=${GLM53_DISPLAY_KV}: expected 1, auto or 0" ;;
+    esac
+    [[ "$GLM53_DISPLAY_KV_MIB" =~ ^[0-9]+$ ]] && [ "$GLM53_DISPLAY_KV_MIB" -gt 0 ] && [ $((GLM53_DISPLAY_KV_MIB % 16)) -eq 0 ] \
+        || die "GLM53_DISPLAY_KV_MIB=${GLM53_DISPLAY_KV_MIB}: positive multiple of 16 required"
+    [ "$GLM53_DISPLAY_KV_MIB" -le 2032 ] || warn "GLM53_DISPLAY_KV_MIB=${GLM53_DISPLAY_KV_MIB}: more than 2032 MiB has never fit the 2 GiB reservation on this kit"
+    local problems=() h card m f
+    for h in head worker; do
+        card="$HEAD_DRM_CARD"; [ "$h" = worker ] && card="$WORKER_DRM_CARD"
+        if [ "$h" = head ]; then [ -e "$card" ] || problems+=("head: $card missing")
+        else worker_ssh "test -e '$card'" || problems+=("worker: $card missing"); fi
+        m=$(_drm_param "$h" modeset); f=$(_drm_param "$h" fbdev)
+        [ "$m" = Y ] || problems+=("$h: nvidia_drm modeset=$m (need Y)")
+        [ "$f" = N ] || problems+=("$h: nvidia_drm fbdev=$f (need N)")
+    done
+    if [ "${#problems[@]}" -gt 0 ]; then
+        local p; for p in "${problems[@]}"; do warn "display-kv: $p"; done
+        warn "display-kv: see docs/display-kv.md (options nvidia_drm modeset=1 fbdev=0, headless, then reload or reboot)"
+        if [ "$GLM53_DISPLAY_KV" = "1" ]; then die "GLM53_DISPLAY_KV=1 but the display reserve is not usable"; fi
+        warn "display-kv: auto -> disabled for this launch"
+        GLM53_DISPLAY_KV=0
+        return 0
+    fi
+    IMAGE="$IMAGE" bash "$DISPLAY_KV_DIR_HOST/build.sh" "$IMAGE" || die "display-kv: building libglm53_display_kv.so in $IMAGE failed"
+    [ -f "$DISPLAY_KV_DIR_HOST/libglm53_display_kv.so" ] || die "display-kv: $DISPLAY_KV_DIR_HOST/libglm53_display_kv.so missing after build"
+    log "display-kv: ${GLM53_DISPLAY_KV} (${GLM53_DISPLAY_KV_MIB} MiB per rank from the display reservation; head=${HEAD_DRM_CARD} worker=${WORKER_DRM_CARD})"
+}
+
 preflight() {
     command -v docker  >/dev/null 2>&1 || die "docker not found on head"
     command -v curl    >/dev/null 2>&1 || die "curl not found on head"
@@ -1112,6 +1167,10 @@ preflight() {
     [ -f "$ADAPTIVE_K_PATCH_HOST" ] || die "$ADAPTIVE_K_PATCH_HOST missing"
     [ -f "$DENSE_FP8_PATCH_HOST" ] || die "$DENSE_FP8_PATCH_HOST missing"
     [ -f "$DEFAULT_TOKENS_PATCH_HOST" ] || die "$DEFAULT_TOKENS_PATCH_HOST missing"
+    [ -f "$DISPLAY_KV_PATCH_HOST" ] || die "$DISPLAY_KV_PATCH_HOST missing"
+    [ -f "$DISPLAY_KV_DIR_HOST/display_kv.c" ] || die "$DISPLAY_KV_DIR_HOST/display_kv.c missing"
+    [ -f "$DISPLAY_KV_DIR_HOST/glm53_display_kv.py" ] || die "$DISPLAY_KV_DIR_HOST/glm53_display_kv.py missing"
+    preflight_display_kv
     [ -f "$EXL3_OVERLAY_HOST" ] || die "$EXL3_OVERLAY_HOST missing"
     [ -f "$SCRIPT_DIR/overlay/patch_ablit.py" ] || die "$SCRIPT_DIR/overlay/patch_ablit.py missing"
     [ -f "$SCRIPT_DIR/overlay/ablit_runtime.py" ] || die "$SCRIPT_DIR/overlay/ablit_runtime.py missing"
@@ -1613,6 +1672,7 @@ GLM53_OVERLAY_ORDER=(
     patch_adaptive_k.py
     patch_dense_fp8.py
     patch_default_max_new_tokens.py
+    patch_display_kv.py
     patch_indexer_workspace.py
     patch_cache_reset.py
     patch_ablit.py
@@ -1868,6 +1928,13 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$DENSE_FP8_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_dense_fp8.py"
     [ -f "$DEFAULT_TOKENS_PATCH_HOST" ] || die "missing $DEFAULT_TOKENS_PATCH_HOST"
     scp -q -o BatchMode=yes "$DEFAULT_TOKENS_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_default_max_new_tokens.py"
+    [ -f "$DISPLAY_KV_PATCH_HOST" ] || die "missing $DISPLAY_KV_PATCH_HOST"
+    scp -q -o BatchMode=yes "$DISPLAY_KV_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_display_kv.py"
+    worker_ssh "rm -rf /tmp/glm53-display_kv && mkdir -p /tmp/glm53-display_kv"
+    scp -q -o BatchMode=yes "$DISPLAY_KV_DIR_HOST/glm53_display_kv.py" "$DISPLAY_KV_DIR_HOST/display_kv.c" "${WORKER_SSH}:/tmp/glm53-display_kv/"
+    if [ "$GLM53_DISPLAY_KV" != "0" ]; then
+        scp -q -o BatchMode=yes "$DISPLAY_KV_DIR_HOST/libglm53_display_kv.so" "${WORKER_SSH}:/tmp/glm53-display_kv/"
+    fi
     scp -q -o BatchMode=yes "$EXL3_OVERLAY_HOST" "${WORKER_SSH}:/tmp/glm53-exl3.py"
     _glm53_stage_coop_runtime_worker
 
@@ -1978,10 +2045,19 @@ launch_cluster() {
              GLM53_ADAPTIVE_K GLM53_ADAPTIVE_K_SET GLM53_ADAPTIVE_K_ALPHA GLM53_ADAPTIVE_K_MARGIN \
              GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST GLM53_DENSE_FP8 \
              GLM53_EXL3_MOE_FAST \
-             GLM53_COOP_GEOMETRY; do
+             GLM53_COOP_GEOMETRY GLM53_DISPLAY_KV GLM53_DISPLAY_KV_MIB; do
         serve_env+=" -e $v='${!v:-}'"
         serve_env_names+=("$v")
     done
+    # Worker rank sees its DRM node as /dev/dri/card0 inside the container.
+    serve_env+=" -e GLM53_DRM_CARD=/dev/dri/card0"
+    serve_env_names+=(GLM53_DRM_CARD)
+    local worker_drm_device=""
+    local -a head_drm_device=()
+    if [ "$GLM53_DISPLAY_KV" != "0" ]; then
+        worker_drm_device="--device '${WORKER_DRM_CARD}:/dev/dri/card0'"
+        head_drm_device=(--device "${HEAD_DRM_CARD}:/dev/dri/card0")
+    fi
 
     # Extra container env for diagnostics (space-separated NAME=VALUE list, e.g.
     # GLM53_EXTRA_ENV="VLLM_DEBUG_WORKSPACE=1"). Forwarded to both ranks as -e pairs.
@@ -2063,6 +2139,9 @@ launch_cluster() {
         -v '/tmp/patch_adaptive_k.py:/opt/glm53/patch_adaptive_k.py:ro' \
         -v '/tmp/patch_dense_fp8.py:/opt/glm53/patch_dense_fp8.py:ro' \
         -v '/tmp/patch_default_max_new_tokens.py:/opt/glm53/patch_default_max_new_tokens.py:ro' \
+        -v '/tmp/patch_display_kv.py:/opt/glm53/patch_display_kv.py:ro' \
+        -v '/tmp/glm53-display_kv:/opt/glm53/display_kv:ro' \
+        ${worker_drm_device} \
         -v '/tmp/glm53-exl3.py:/opt/glm53/exl3.py:ro' \
         -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
         -v '/tmp/glm53-ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro' \
@@ -2104,6 +2183,9 @@ launch_cluster() {
         -v "$ADAPTIVE_K_PATCH_HOST:/opt/glm53/patch_adaptive_k.py:ro" \
         -v "$DENSE_FP8_PATCH_HOST:/opt/glm53/patch_dense_fp8.py:ro" \
         -v "$DEFAULT_TOKENS_PATCH_HOST:/opt/glm53/patch_default_max_new_tokens.py:ro" \
+        -v "$DISPLAY_KV_PATCH_HOST:/opt/glm53/patch_display_kv.py:ro" \
+        -v "$DISPLAY_KV_DIR_HOST:/opt/glm53/display_kv:ro" \
+        "${head_drm_device[@]}" \
         -v "$EXL3_OVERLAY_HOST:/opt/glm53/exl3.py:ro" \
         -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
         -v "$SCRIPT_DIR/overlay/ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro" \
@@ -2163,6 +2245,9 @@ launch_cluster() {
         -e GLM53_DENSE_FP8="$GLM53_DENSE_FP8" \
         -e GLM53_EXL3_MOE_FAST="$GLM53_EXL3_MOE_FAST" \
         -e GLM53_COOP_GEOMETRY="$GLM53_COOP_GEOMETRY" \
+        -e GLM53_DISPLAY_KV="$GLM53_DISPLAY_KV" \
+        -e GLM53_DISPLAY_KV_MIB="$GLM53_DISPLAY_KV_MIB" \
+        -e GLM53_DRM_CARD=/dev/dri/card0 \
         -e MODEL_DIR="$MODEL_DIR" \
         -e VLLM_API_KEY \
         -e EXTRA_ARGS="${EXTRA_ARGS:-}" \
