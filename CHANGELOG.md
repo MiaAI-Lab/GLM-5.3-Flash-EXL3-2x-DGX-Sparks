@@ -53,6 +53,16 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   Receipts on this 2× kit (k=3, dense FP8, mixed prefill off): c8 pure decode
   91.9 tok/s at 98.6 % of ceiling with `[[1,2,3],[3,4,2],[5,8,1]]`; k=0 at c8
   measured 75.3.
+- **NVMe-direct prefix cache** (`OFFLOAD_NVME=1`, `overlay/kvoffload/`,
+  `docs/nvme-prefix-cache.md`). vLLM's `OffloadingConnector` with an
+  out-of-tree `NvmeDirectOffloadingSpec`: no CPU tier, per-IO-thread pinned
+  bounce buffers, GPU<->NVMe files per rank, restart-restore (46,796-token
+  prompt: 32.4 s cold -> 1.58 s TTFT after an engine restart). Draft-tower KV
+  groups detected by name or root-prefix minority; `KpoolTailSpec` excluded from
+  hashing/offload. Capacity auto-sized from the smaller node's free space minus
+  `OFFLOAD_RESERVE_GB`; optional TTL cron. `EXTRA_MOUNT` adds one extra
+  read-only bind on both ranks. `Dockerfile.nvme-layer` layers this and the
+  cold-load patch on the published image.
 
 - Opt-in SM121 **thin-decode** kernels for the EXL3 routed experts
   (`GLM53_EXL3_MOE_FAST`, default `0`): `overlay/patch_exl3_decode_pipeline.py`

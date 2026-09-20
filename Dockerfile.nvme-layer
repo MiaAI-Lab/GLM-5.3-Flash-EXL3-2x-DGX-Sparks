@@ -1,0 +1,46 @@
+# NVMe prefix cache + UMA cold-load layer on the published :exl3-instanttensor
+# image. Same additions the full Dockerfile makes (its last block), without the
+# exllamav3 recompile. Every other overlay is bind-mounted by start.sh at boot.
+#
+# Build (repo root):
+#   docker build -f Dockerfile.nvme-layer \
+#     --build-arg GLM53_RECIPE_STAMP=$(./start.sh stamp) \
+#     -t glm53-flash-sm121:nvme .
+# Serve: IMAGE=glm53-flash-sm121:nvme LOAD_FORMAT=instanttensor in .env
+# (local tag, no slash: start.sh ships it with docker save | ssh docker load).
+ARG BASE=ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3-instanttensor
+FROM ${BASE}
+
+ARG VPKG=/usr/local/lib/python3.12/dist-packages/vllm
+
+COPY overlay/patch_cold_load_uma.py /opt/glm53/patch_cold_load_uma.py
+COPY tests/test_cold_load_uma.py /opt/glm53/test_cold_load_uma.py
+RUN GLM53_REQUIRE_TARGET=1 python3 /opt/glm53/test_cold_load_uma.py \
+    && python3 /opt/glm53/patch_cold_load_uma.py
+
+COPY overlay/kvoffload/offloading_scheduler.py ${VPKG}/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
+COPY overlay/kvoffload/offloading_config.py    ${VPKG}/distributed/kv_transfer/kv_connector/v1/offloading/config.py
+COPY overlay/kvoffload/kv_offload_config.py    ${VPKG}/v1/kv_offload/config.py
+COPY overlay/kvoffload/nvme_direct.py          ${VPKG}/v1/kv_offload/nvme_direct.py
+RUN python3 - <<'PY'
+from pathlib import Path
+site = Path("/usr/local/lib/python3.12/dist-packages/vllm")
+checks = {
+    "distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py": ['"dflash" in n', "is_offloadable", "root-prefix minority"],
+    "distributed/kv_transfer/kv_connector/v1/offloading/config.py": ["participates_in_prefix_caching", "KpoolTail"],
+    "v1/kv_offload/config.py": ["offloadable: bool = True"],
+    "v1/kv_offload/nvme_direct.py": ["NvmeDirectOffloadingSpec", "NvmeDirectWorker", "capacity_bytes"],
+    "model_executor/model_loader/weight_utils.py": ["[glm53-cold-load-uma:v1]", "_glm53_uma_prepare_instanttensor_budget"],
+}
+for rel, needles in checks.items():
+    src = (site / rel).read_text()
+    compile(src, rel, "exec")
+    for needle in needles:
+        assert needle in src, f"{rel}: missing {needle!r}"
+from vllm.v1.kv_offload.nvme_direct import NvmeDirectOffloadingSpec  # noqa: F401
+from vllm.model_executor.model_loader.weight_utils import _glm53_uma_prepare_instanttensor_budget  # noqa: F401
+print("kv-offload + cold-load overlay verify OK")
+PY
+
+ARG GLM53_RECIPE_STAMP=unknown
+LABEL glm53.recipe.stamp=${GLM53_RECIPE_STAMP}

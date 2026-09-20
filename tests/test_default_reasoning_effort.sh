@@ -24,7 +24,7 @@ printf '%s\n' "$guard" > "/tmp/_effort_guard.$$"
 guard_rc() { # reads the value from the environment; echoes validate_numeric_config's rc
     GLM53_DEFAULT_REASONING_EFFORT="$1" bash -c '
         source "/tmp/_effort_guard.'$$'"
-        GPU_MEM_UTIL=0.87 MAX_MODEL_LEN=1000000 MAX_NUM_SEQS=4 MAX_NUM_BATCHED_TOKENS=2048 GLM53_SPINWAIT_MS=stock GLM53_HOST_MEM_HYGIENE=0
+        GPU_MEM_UTIL=0.87 MAX_MODEL_LEN=1000000 MAX_NUM_SEQS=4 MAX_NUM_BATCHED_TOKENS=2048 GLM53_SPINWAIT_MS=stock GLM53_HOST_MEM_HYGIENE=0 OFFLOAD_NVME=0
         validate_numeric_config' >/dev/null 2>&1
     echo $?
 }
@@ -50,7 +50,7 @@ check_guard 'high;id' 2
 
 # an UNSET knob must also pass (the guard reads ${VAR-}, not $VAR under set -u)
 if bash -c 'set -u; source "/tmp/_effort_guard.'$$'"
-    GPU_MEM_UTIL=0.87 MAX_MODEL_LEN=1000000 MAX_NUM_SEQS=4 MAX_NUM_BATCHED_TOKENS=2048 GLM53_SPINWAIT_MS=stock GLM53_HOST_MEM_HYGIENE=0
+    GPU_MEM_UTIL=0.87 MAX_MODEL_LEN=1000000 MAX_NUM_SEQS=4 MAX_NUM_BATCHED_TOKENS=2048 GLM53_SPINWAIT_MS=stock GLM53_HOST_MEM_HYGIENE=0 OFFLOAD_NVME=0
     validate_numeric_config' >/dev/null 2>&1; then
     echo "ok   guard [<unset>] -> rc 0"
 else
@@ -60,7 +60,7 @@ fi
 # the rejection message must name the knob and the four legal values
 msg="$(GLM53_DEFAULT_REASONING_EFFORT=medium bash -c '
     source "/tmp/_effort_guard.'$$'"
-    GPU_MEM_UTIL=0.87 MAX_MODEL_LEN=1000000 MAX_NUM_SEQS=4 MAX_NUM_BATCHED_TOKENS=2048 GLM53_SPINWAIT_MS=stock GLM53_HOST_MEM_HYGIENE=0
+    GPU_MEM_UTIL=0.87 MAX_MODEL_LEN=1000000 MAX_NUM_SEQS=4 MAX_NUM_BATCHED_TOKENS=2048 GLM53_SPINWAIT_MS=stock GLM53_HOST_MEM_HYGIENE=0 OFFLOAD_NVME=0
     validate_numeric_config' 2>&1 >/dev/null || true)"
 case "$msg" in
     *GLM53_DEFAULT_REASONING_EFFORT*low*high*max*) echo "ok   guard error names knob and enum" ;;
