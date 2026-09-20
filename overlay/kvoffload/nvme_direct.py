@@ -65,6 +65,29 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 logger = init_logger(__name__)
 
 
+def _write_all(fd: int, view: memoryview) -> None:
+    """os.write may return short on large buffers; loop until every byte is out."""
+    mv = memoryview(view).cast("B")
+    off = 0
+    while off < len(mv):
+        n = os.write(fd, mv[off:])
+        if n <= 0:
+            raise OSError(f"write returned {n} at offset {off}/{len(mv)}")
+        off += n
+
+
+def _read_all(fd: int, view: memoryview) -> int:
+    """Fill the buffer; returns bytes read (< len(view) only at EOF)."""
+    mv = memoryview(view).cast("B")
+    off = 0
+    while off < len(mv):
+        n = os.readv(fd, [mv[off:]])
+        if n == 0:
+            break
+        off += n
+    return off
+
+
 def _key_relpath(key: OffloadKey) -> str:
     """Relative file path for an offload key (hash+group bytes)."""
     h = bytes(key).hex()
@@ -105,11 +128,14 @@ class NvmeDirectManager(OffloadingManager):
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         if key in self._pending_stores:
             return LookupResult.HIT_PENDING
-        if key in self._exists:
-            return LookupResult.HIT
+        # Always ask the filesystem: an external sweeper (OFFLOAD_TTL_MINUTES)
+        # or an operator may delete files while the server runs, and a false
+        # HIT turns into an unrecoverable load failure. exists() on a local
+        # NVMe dentry is microseconds; _exists only short-circuits prepare_store.
         if os.path.exists(self._path(key)):
             self._exists.add(key)
             return LookupResult.HIT
+        self._exists.discard(key)
         return LookupResult.MISS
 
     @override
@@ -125,11 +151,12 @@ class NvmeDirectManager(OffloadingManager):
     ) -> PrepareStoreOutput | None:
         keys_to_store = []
         for k in keys:
-            if k in self._pending_stores or k in self._exists:
+            if k in self._pending_stores:
                 continue
             if os.path.exists(self._path(k)):
                 self._exists.add(k)
                 continue
+            self._exists.discard(k)
             keys_to_store.append(k)
         self._pending_stores.update(keys_to_store)
         return PrepareStoreOutput(
@@ -264,7 +291,7 @@ class NvmeDirectWorker(OffloadingWorker):
             tmp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
             try:
-                os.write(fd, buf_np[:off].data)
+                _write_all(fd, buf_np[:off].data)
                 os.fsync(fd)
                 try:
                     os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
@@ -288,7 +315,7 @@ class NvmeDirectWorker(OffloadingWorker):
             expected = sum(ref.page_size_bytes for ref in self._group_refs[g_idx])
             fd = os.open(path, os.O_RDONLY)
             try:
-                got = os.readv(fd, [buf_np[:expected].data])
+                got = _read_all(fd, buf_np[:expected].data)
                 if got != expected:
                     raise OSError(f"short read {got}/{expected} on {path}")
                 try:

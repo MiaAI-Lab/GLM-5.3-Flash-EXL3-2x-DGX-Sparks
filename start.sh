@@ -445,10 +445,6 @@ VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
 # the glm53-hicache-ttl cron (OFFLOAD_TTL_MINUTES, 0 = no cron).
 # OFFLOAD_CAPACITY_BYTES: the spec refuses to start unless that much is free on
 # the target (empty = auto: free space minus OFFLOAD_RESERVE_GB, both nodes).
-# DFlash2 dynamic draft schedule: JSON [[batch_lo,batch_hi,k],...] forwarded as
-# num_speculative_tokens_per_batch_size (upstream Dynamic SD). Empty = fixed
-# DFLASH_TOKENS at every batch size. Example taper: [[1,2,7],[3,4,3],[5,8,2]].
-DFLASH_SCHEDULE="${DFLASH_SCHEDULE:-}"
 OFFLOAD_NVME="${OFFLOAD_NVME:-0}"
 OFFLOAD_FS_DIR="${OFFLOAD_FS_DIR:-/kv-nvme}"
 OFFLOAD_HOST_DIR="${OFFLOAD_HOST_DIR:-$HOME/kv-cache-nvme}"
@@ -1965,8 +1961,11 @@ prepare_offload_dirs() {
     fi
     log "nvme prefix cache: head $OFFLOAD_HOST_DIR ($((head_free/1073741824)) GiB free, $(( ${used_head:-0}/1073741824 )) GiB cached), worker $WORKER_OFFLOAD_HOST_DIR ($((worker_free/1073741824)) GiB free, $(( ${used_worker:-0}/1073741824 )) GiB cached) -> $OFFLOAD_FS_DIR; capacity=$((OFFLOAD_CAPACITY_BYTES/1073741824)) GiB/node threads=$OFFLOAD_IO_THREADS"
     if [ "$OFFLOAD_TTL_MINUTES" != "0" ]; then
-        local cron_line="17 * * * * find $OFFLOAD_HOST_DIR -type f -mmin +$OFFLOAD_TTL_MINUTES -delete # glm53-hicache-ttl"
-        local wcron_line="17 * * * * find $WORKER_OFFLOAD_HOST_DIR -type f -mmin +$OFFLOAD_TTL_MINUTES -delete # glm53-hicache-ttl"
+        local qdir wqdir cron_line wcron_line
+        printf -v qdir '%q' "$OFFLOAD_HOST_DIR"
+        printf -v wqdir '%q' "$WORKER_OFFLOAD_HOST_DIR"
+        cron_line="17 * * * * find $qdir -type f -mmin +$OFFLOAD_TTL_MINUTES -delete # glm53-hicache-ttl"
+        wcron_line="17 * * * * find $wqdir -type f -mmin +$OFFLOAD_TTL_MINUTES -delete # glm53-hicache-ttl"
         { crontab -l 2>/dev/null | grep -v 'glm53-hicache-ttl'; echo "$cron_line"; } | crontab - 2>/dev/null \
             || warn "could not install head TTL cron"
         worker_ssh "{ crontab -l 2>/dev/null | grep -v 'glm53-hicache-ttl'; echo '$wcron_line'; } | crontab -" 2>/dev/null \

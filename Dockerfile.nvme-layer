@@ -22,6 +22,8 @@ COPY overlay/kvoffload/offloading_scheduler.py ${VPKG}/distributed/kv_transfer/k
 COPY overlay/kvoffload/offloading_config.py    ${VPKG}/distributed/kv_transfer/kv_connector/v1/offloading/config.py
 COPY overlay/kvoffload/kv_offload_config.py    ${VPKG}/v1/kv_offload/config.py
 COPY overlay/kvoffload/nvme_direct.py          ${VPKG}/v1/kv_offload/nvme_direct.py
+COPY tests/test_nvme_direct_io.py /opt/glm53/test_nvme_direct_io.py
+RUN GLM53_NVME_DIRECT_PY=${VPKG}/v1/kv_offload/nvme_direct.py python3 /opt/glm53/test_nvme_direct_io.py
 RUN python3 - <<'PY'
 from pathlib import Path
 site = Path("/usr/local/lib/python3.12/dist-packages/vllm")
