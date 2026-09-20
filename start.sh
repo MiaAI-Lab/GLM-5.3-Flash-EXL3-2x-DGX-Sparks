@@ -420,6 +420,11 @@ GLM53_DENSE_FP8="${GLM53_DENSE_FP8:-off}"
 # TP=3 local shape [8726x4096] (64→66 head pad). Changes target numerics
 # (see docs/kda-bf16-large-m.md); default off.
 GLM53_KDA_BF16_LARGE_M="${GLM53_KDA_BF16_LARGE_M-0}"
+# SENS8 request-local decode routing (overlay/exl3.py integration). 1 =
+# restrict speculative verify blocks to a frozen C=28 expert coreset;
+# 0 = stock routing (integration not installed, zero overhead).
+# Opt-in; TP2/SM121 scope (see docs/sens8-router.md); default off.
+GLM53_SENS8_ROUTER="${GLM53_SENS8_ROUTER-0}"
 # Cooperative MoE tile geometry (0 both-narrow, 1 both-wide, 2 A-wide/B-narrow).
 # Empty uses the adapter default (1). Must be identical on both ranks and set
 # before native prepare / CUDA-graph capture; it is not a live graph switch.
@@ -686,6 +691,7 @@ validate_numeric_config() {
     fi
     _glm53_validate_bool_flag GLM53_EXL3_MOE_FAST "${GLM53_EXL3_MOE_FAST-0}" || return
     _glm53_validate_bool_flag GLM53_KDA_BF16_LARGE_M "${GLM53_KDA_BF16_LARGE_M-0}" || return
+    _glm53_validate_bool_flag GLM53_SENS8_ROUTER "${GLM53_SENS8_ROUTER-0}" || return
     _glm53_validate_spinwait_ms || return
     _glm53_validate_bool_flag GLM53_APC_NO_STORE "${GLM53_APC_NO_STORE-1}" || return
     _glm53_validate_bool_flag GLM53_KV_CAPACITY_LOG "${GLM53_KV_CAPACITY_LOG-1}" || return
@@ -2031,7 +2037,7 @@ launch_cluster() {
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP \
              GLM53_ADAPTIVE_K GLM53_ADAPTIVE_K_SET GLM53_ADAPTIVE_K_ALPHA GLM53_ADAPTIVE_K_MARGIN \
              GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST GLM53_DENSE_FP8 \
-             GLM53_EXL3_MOE_FAST GLM53_KDA_BF16_LARGE_M \
+             GLM53_EXL3_MOE_FAST GLM53_KDA_BF16_LARGE_M GLM53_SENS8_ROUTER \
              GLM53_COOP_GEOMETRY; do
         serve_env+=" -e $v='${!v:-}'"
         serve_env_names+=("$v")
@@ -2221,6 +2227,7 @@ launch_cluster() {
         -e GLM53_DENSE_FP8="$GLM53_DENSE_FP8" \
         -e GLM53_EXL3_MOE_FAST="$GLM53_EXL3_MOE_FAST" \
         -e GLM53_KDA_BF16_LARGE_M="$GLM53_KDA_BF16_LARGE_M" \
+        -e GLM53_SENS8_ROUTER="$GLM53_SENS8_ROUTER" \
         -e GLM53_COOP_GEOMETRY="$GLM53_COOP_GEOMETRY" \
         -e MODEL_DIR="$MODEL_DIR" \
         -e VLLM_API_KEY \
