@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static + dry-run regression for the two-rank launcher (start.sh).
+"""Static + dry-run regression for TP2 and dedup staging on TP3/TP4.
 
 Hardening asked for by the production-like tester run on PRs #83/#84:
 
@@ -15,7 +15,7 @@ Hardening asked for by the production-like tester run on PRs #83/#84:
      overlay, exits 2 BEFORE the first docker or ssh call, so healthy
      containers are never stopped for a launch that cannot succeed.
   C  Overlay order -- one list (GLM53_OVERLAY_ORDER) pinned
-     hybrid -> per-group -> no-store -> kv-capacity-log is emitted into BOTH
+     hybrid -> per-group -> dedup -> no-store -> kv-capacity-log is emitted into BOTH
      rank inner scripts.
   D  Rank parity -- for every /opt/glm53 patch the head bind-mounts host
      file S, the worker's mount is fed from /tmp/X and the scp that produced
@@ -27,7 +27,10 @@ Hardening asked for by the production-like tester run on PRs #83/#84:
   E  Host template interpreter selection -- caller PATH, fallback order, strict
      explicit overrides, and actual Jinja parse failures before either stop.
 
-Everything drives the shipped start.sh under bash from an allow-listed
+TP3/TP4 checks cover dedup staging, mounts, and apply order on every rank.
+The pre-stop gate cases above apply to TP2.
+
+Everything drives the shipped launchers under bash from an allow-listed
 environment (PATH with docker / ssh / scp / rsync / curl / ip / nvidia-smi
 stubbed first, HOME pointed at a temp dir, no BASH_ENV / PYTHONPATH / HF_*
 / GLM53_* / VLLM_* leakage). Nothing talks to a real host. The test is
@@ -88,9 +91,11 @@ CONTAINER_NAMES = LAUNCHER_KNOBS + (
 # per-group retention slot.
 KVCAP = "patch_kv_capacity_log.py"
 DRAFTER = "patch_glm5_drafter_group.py"
+DEDUP = "patch_apc_free_duplicates.py"
 APC_HOST_VARS = {
     "APC_PATCH_HOST": "patch_hybrid_prefix_hit.py",
     "PERGROUP_PATCH_HOST": "patch_apc_per_group_retention.py",
+    "DEDUP_PATCH_HOST": DEDUP,
     "NOSTORE_PATCH_HOST": "patch_apc_no_store.py",
     "KVCAP_PATCH_HOST": KVCAP,
 }
@@ -284,13 +289,16 @@ def part_f() -> None:
 class Harness:
     """A throwaway copy of the launcher checkout plus a stub PATH."""
 
-    def __init__(self, tmp: Path) -> None:
+    def __init__(self, tmp: Path, launcher: str = "start.sh") -> None:
         self.tmp = tmp
         self.repo = tmp / "repo"
         self.repo.mkdir()
-        shutil.copy2(START, self.repo / "start.sh")
+        shutil.copy2(ROOT / launcher, self.repo / "start.sh")
         shutil.copy2(ROOT / ".env.example", self.repo / ".env.example")
         (self.repo / ".env").write_text((ROOT / ".env.example").read_text())
+        if launcher != "start.sh":
+            suffix = launcher.removeprefix("start-").removesuffix(".sh")
+            (self.repo / f".env.{suffix}").write_text("")
         for sub in ("overlay", "files", "ablit"):
             if (ROOT / sub).is_dir():
                 shutil.copytree(ROOT / sub, self.repo / sub)
@@ -536,6 +544,12 @@ def part_c(h: Harness) -> None:
         check(hs == order, f"C3 head applies exactly GLM53_OVERLAY_ORDER ({len(hs)} entries)")
         check(ws == order, f"C3 worker applies exactly GLM53_OVERLAY_ORDER ({len(ws)} entries)")
         check(hs == ws, "C3 head and worker apply sequences are identical")
+        for seq in (hs, ws):
+            retention = seq.index("patch_apc_per_group_retention.py")
+            check(
+                seq.count(DEDUP) == 1 and seq[retention + 1] == DEDUP,
+                "C3 dedup applies exactly once, immediately after per-group retention",
+            )
         for s in (head, worker):
             body = s.read_text()
             check(
@@ -850,6 +864,50 @@ def part_e(h: Harness) -> None:
         CHAT_TEMPLATE_HOST=str(loop_template),
     )
 
+
+def multi_rank_dedup() -> None:
+    """Check the real TP3/TP4 staging and launch commands with stubbed hosts."""
+    destination = f"/opt/glm53/{DEDUP}"
+    for ranks in (3, 4):
+        with tempfile.TemporaryDirectory() as raw:
+            h = Harness(Path(raw), launcher=f"start-tp{ranks}.sh")
+            result = h.run("write_inner_scripts", entry="start.fn.sh")
+            check(result.returncode == 0, f"TP{ranks} inner scripts render: {result.stderr}")
+            for role in ("head", "worker"):
+                script = h.repo / f".glm53-exl3-tp{ranks}-{role}.inner.sh"
+                sequence = apply_sequence(script)
+                retention = sequence.index("patch_apc_per_group_retention.py")
+                check(
+                    sequence.count(DEDUP) == 1 and sequence[retention + 1] == DEDUP,
+                    f"TP{ranks} {role} applies dedup immediately after per-group retention",
+                )
+            override = h.tmp / DEDUP
+            shutil.copy2(h.repo / "overlay" / DEDUP, override)
+            for patch_path in (h.repo / "overlay" / DEDUP, override):
+                result = h.run(
+                    "launch_cluster", entry="start.fn.sh",
+                    MODEL_DIR="/root/.cache/huggingface/x", DEDUP_PATCH_HOST=str(patch_path),
+                )
+                check(result.returncode == 0, f"TP{ranks} launch commands: {result.stderr}")
+                heads, workers, staged = [], [], {}
+                for call in h.calls():
+                    if call[:2] == ["docker", "run"]:
+                        heads.append(Rank(call[2:]))
+                    elif call[0] == "ssh" and call[-1].lstrip().startswith("docker run"):
+                        workers.append((call[-2], Rank(shlex.split(call[-1])[2:])))
+                    elif call[0] == "scp" and call[-1].endswith(f":/tmp/{DEDUP}"):
+                        staged[call[-1].split(":", 1)[0]] = call[-2]
+                check(len(heads) == 1 and len(workers) == ranks - 1,
+                      f"TP{ranks} captures all {ranks} rank launches")
+                check(len(heads) == 1 and heads[0].mounts.get(destination) == str(patch_path),
+                      f"TP{ranks} head mounts the selected dedup artifact")
+                check(len(staged) == ranks - 1 and all(
+                    staged.get(host) == str(patch_path)
+                    and rank.mounts.get(destination) == f"/tmp/{DEDUP}"
+                    for host, rank in workers
+                ), f"TP{ranks} every worker mounts the same staged dedup artifact")
+
+
 # ------------------------------------------------------------------- main --
 
 
@@ -868,6 +926,7 @@ def main() -> int:
         allocator_overrides(h)
     with tempfile.TemporaryDirectory() as raw:
         part_e(Harness(Path(raw)))
+    multi_rank_dedup()
     print()
     if FAILURES:
         print(f"FAILED ({len(FAILURES)}): " + "; ".join(FAILURES))

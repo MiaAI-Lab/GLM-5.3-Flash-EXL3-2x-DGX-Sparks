@@ -131,7 +131,7 @@ def run_preflight(tmp_path, head_count=2, worker_count=2, broken=None):
         "WORKER_HOME": str(tmp_path), "WORKER_CACHE_DIR": str(tmp_path / "worker-cache"),
     }
     for key in ("STOP_PATCH_HOST", "SCHED_PATCH_HOST", "DRAFTER_PATCH_HOST",
-                "APC_PATCH_HOST", "PERGROUP_PATCH_HOST", "NOSTORE_PATCH_HOST",
+                "APC_PATCH_HOST", "PERGROUP_PATCH_HOST", "DEDUP_PATCH_HOST", "NOSTORE_PATCH_HOST",
                 "KVCAP_PATCH_HOST", "TOOLCHOICE_PATCH_HOST", "XGRAMMAR_PATCH_HOST",
                 "CACHE_RESET_PATCH_HOST", "KPOOL_TAIL_PATCH_HOST",
                 "SPINWAIT_PATCH_HOST", "ADAPTIVE_K_PATCH_HOST",

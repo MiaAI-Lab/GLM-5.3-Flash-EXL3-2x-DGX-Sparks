@@ -243,6 +243,7 @@ SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode
 DRAFTER_PATCH_HOST="${DRAFTER_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm5_drafter_group.py}"
 APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py}"
 PERGROUP_PATCH_HOST="${PERGROUP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_per_group_retention.py}"
+DEDUP_PATCH_HOST="${DEDUP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_free_duplicates.py}"
 NOSTORE_PATCH_HOST="${NOSTORE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_no_store.py}"
 KVCAP_PATCH_HOST="${KVCAP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kv_capacity_log.py}"
 TOOLCHOICE_PATCH_HOST="${TOOLCHOICE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_tool_choice_none.py}"
@@ -743,6 +744,7 @@ validate_overlay_artifacts() {
         "$DRAFTER_PATCH_HOST|vllm/v1/core/kv_cache_utils.py|$main_guard"
         "$APC_PATCH_HOST|[glm53-hybrid-apc]|$main_guard"
         "$PERGROUP_PATCH_HOST|glm53-apc-per-group-contract:explicit-v1|$main_guard"
+        "$DEDUP_PATCH_HOST|[glm53-apc-free-duplicates]|$main_guard"
         "$NOSTORE_PATCH_HOST|[glm53-apc-no-store]|$main_guard"
         "$KVCAP_PATCH_HOST|[glm53-kv-capacity-log]|$main_guard"
         "$TOOLCHOICE_PATCH_HOST|[glm53-tool-choice-none]|$main_guard"
@@ -1112,6 +1114,7 @@ preflight() {
     [ -f "$DRAFTER_PATCH_HOST" ] || die "$DRAFTER_PATCH_HOST missing"
     [ -f "$APC_PATCH_HOST" ] || die "$APC_PATCH_HOST missing"
     [ -f "$PERGROUP_PATCH_HOST" ] || die "$PERGROUP_PATCH_HOST missing"
+    [ -f "$DEDUP_PATCH_HOST" ] || die "$DEDUP_PATCH_HOST missing"
     [ -f "$NOSTORE_PATCH_HOST" ] || die "$NOSTORE_PATCH_HOST missing"
     [ -f "$KVCAP_PATCH_HOST" ] || die "$KVCAP_PATCH_HOST missing"
     [ -f "$TOOLCHOICE_PATCH_HOST" ] || die "$TOOLCHOICE_PATCH_HOST missing"
@@ -1614,6 +1617,7 @@ GLM53_OVERLAY_ORDER=(
     patch_glm5_drafter_group.py
     patch_hybrid_prefix_hit.py
     patch_apc_per_group_retention.py
+    patch_apc_free_duplicates.py
     patch_apc_no_store.py
     patch_kv_capacity_log.py
     patch_tool_choice_none.py
@@ -1860,6 +1864,8 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$APC_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_hybrid_prefix_hit.py"
     [ -f "$PERGROUP_PATCH_HOST" ] || die "missing $PERGROUP_PATCH_HOST"
     scp -q -o BatchMode=yes "$PERGROUP_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_apc_per_group_retention.py"
+    [ -f "$DEDUP_PATCH_HOST" ] || die "missing $DEDUP_PATCH_HOST"
+    scp -q -o BatchMode=yes "$DEDUP_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_apc_free_duplicates.py"
     [ -f "$NOSTORE_PATCH_HOST" ] || die "missing $NOSTORE_PATCH_HOST"
     scp -q -o BatchMode=yes "$NOSTORE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_apc_no_store.py"
     [ -f "$KVCAP_PATCH_HOST" ] || die "missing $KVCAP_PATCH_HOST"
@@ -2064,6 +2070,7 @@ launch_cluster() {
         -v '/tmp/patch_glm5_drafter_group.py:/opt/glm53/patch_glm5_drafter_group.py:ro' \
         -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
         -v '/tmp/patch_apc_per_group_retention.py:/opt/glm53/patch_apc_per_group_retention.py:ro' \
+        -v '/tmp/patch_apc_free_duplicates.py:/opt/glm53/patch_apc_free_duplicates.py:ro' \
         -v '/tmp/patch_apc_no_store.py:/opt/glm53/patch_apc_no_store.py:ro' \
         -v '/tmp/patch_kv_capacity_log.py:/opt/glm53/patch_kv_capacity_log.py:ro' \
         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
@@ -2105,6 +2112,7 @@ launch_cluster() {
         -v "$DRAFTER_PATCH_HOST:/opt/glm53/patch_glm5_drafter_group.py:ro" \
         -v "$APC_PATCH_HOST:/opt/glm53/patch_hybrid_prefix_hit.py:ro" \
         -v "$PERGROUP_PATCH_HOST:/opt/glm53/patch_apc_per_group_retention.py:ro" \
+        -v "$DEDUP_PATCH_HOST:/opt/glm53/patch_apc_free_duplicates.py:ro" \
         -v "$NOSTORE_PATCH_HOST:/opt/glm53/patch_apc_no_store.py:ro" \
         -v "$KVCAP_PATCH_HOST:/opt/glm53/patch_kv_capacity_log.py:ro" \
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
