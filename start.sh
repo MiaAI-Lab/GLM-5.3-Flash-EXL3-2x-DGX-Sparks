@@ -246,6 +246,8 @@ KVCAP_PATCH_HOST="${KVCAP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kv_capacity_log.
 TOOLCHOICE_PATCH_HOST="${TOOLCHOICE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_tool_choice_none.py}"
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 CACHE_RESET_PATCH_HOST="${CACHE_RESET_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_cache_reset.py}"
+COLD_LOAD_PATCH_HOST="${COLD_LOAD_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_cold_load_uma.py}"
+SKIP_CGPROF_PATCH_HOST="${SKIP_CGPROF_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_skip_cudagraph_profile.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
 ADAPTIVE_K_PATCH_HOST="${ADAPTIVE_K_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_adaptive_k.py}"
@@ -434,6 +436,40 @@ GLM53_SPINWAIT_MS="${GLM53_SPINWAIT_MS-stock}"
 # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
 # exceed that without being a true hang. NCCL watchdog is still 600s.
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
+# --- NVMe prefix cache (overlay/kvoffload/, docs/nvme-prefix-cache.md) -----
+# OFFLOAD_NVME=1 adds the OffloadingConnector with the NvmeDirectOffloadingSpec:
+# no CPU tier (UMA has none to spare), GPU<->NVMe files under OFFLOAD_FS_DIR
+# in each container (host dir OFFLOAD_HOST_DIR / WORKER_OFFLOAD_HOST_DIR, one
+# r<rank>/ tree per rank). Files survive restarts: a restarted engine restores
+# a 44k-token prompt in 9.5 s instead of 55 s cold (TRIAL boot 6). Cleanup is
+# the glm53-hicache-ttl cron (OFFLOAD_TTL_MINUTES, 0 = no cron).
+# OFFLOAD_CAPACITY_BYTES: the spec refuses to start unless that much is free on
+# the target (empty = auto: free space minus OFFLOAD_RESERVE_GB, both nodes).
+OFFLOAD_NVME="${OFFLOAD_NVME:-0}"
+OFFLOAD_FS_DIR="${OFFLOAD_FS_DIR:-/kv-nvme}"
+OFFLOAD_HOST_DIR="${OFFLOAD_HOST_DIR:-$HOME/kv-cache-nvme}"
+WORKER_OFFLOAD_HOST_DIR="${WORKER_OFFLOAD_HOST_DIR:-$WORKER_HOME/kv-cache-nvme}"
+OFFLOAD_IO_THREADS="${OFFLOAD_IO_THREADS:-8}"
+OFFLOAD_CAPACITY_BYTES="${OFFLOAD_CAPACITY_BYTES:-}"
+OFFLOAD_RESERVE_GB="${OFFLOAD_RESERVE_GB:-24}"
+OFFLOAD_TTL_MINUTES="${OFFLOAD_TTL_MINUTES:-0}"
+# --- host memory hygiene before launch (docs/uvm-livelock-gb10.md) ----------
+# On UMA the page cache is "used" device memory to the CUDA driver: after a
+# 164 GiB rsync or a previous serve, MemFree is ~2 GiB and the InstantTensor
+# loader either dies (buffer > budget) or shrinks io_depth to double digits.
+# 1 = drop clean page cache + cycle swap on BOTH nodes (needs passwordless
+# sudo; skipped with a warning otherwise), then wait until CUDA free memory
+# clears GPU_MEM_UTIL x total (the driver returns a torn-down context a few
+# GiB behind MemFree). Set 0 to leave the host alone.
+GLM53_HOST_MEM_HYGIENE="${GLM53_HOST_MEM_HYGIENE:-1}"
+# Optional extra bind mount (same host path on both nodes, docker -v syntax,
+# e.g. a read-only tree the HF snapshot symlinks into). Empty = none.
+EXTRA_MOUNT="${EXTRA_MOUNT:-}"
+# DFlash2 dynamic draft schedule: JSON [[batch_lo,batch_hi,k],...] forwarded as
+# num_speculative_tokens_per_batch_size (upstream Dynamic SD, honoured per step
+# by the scheduler's dynamic_sd_lookup). Empty = fixed DFLASH_TOKENS at every
+# batch size. Measured taper on this kit: [[1,2,3],[3,4,2],[5,8,1]].
+DFLASH_SCHEDULE="${DFLASH_SCHEDULE:-}"
 # 1 = after /health, burn DFlash2 BLOCK / sampler / kpool shapes. Nonfatal.
 GLM53_BOOT_SHAPE_WARMUP="${GLM53_BOOT_SHAPE_WARMUP:-1}"
 GLM53_WARMUP_REQ_TIMEOUT="${GLM53_WARMUP_REQ_TIMEOUT:-240}"
@@ -465,6 +501,12 @@ WORKER_VLLM_CACHE="${WORKER_VLLM_CACHE:-$WORKER_HOME/.cache/vllm-glm53-flash}"
 # Overlay FS ~/.triton and ~/.tilelang die on container recreate (TP=2 JIT
 # stall → 600s NCCL watchdog). Persist next to the vLLM cache.
 TRITON_HOST_CACHE="${TRITON_HOST_CACHE:-$CACHE_ROOT/triton}"
+# NVIDIA driver JIT/ptxas cache (~/.nv/ComputeCache). Lives in the container
+# overlay by default and dies on every docker rm: the DFlash2 graph capture
+# then re-JITs a 31 MiB cubin on each boot (29 s vs 3 s for the target's
+# graphs). Persist it next to the Triton cache.
+NV_HOST_CACHE="${NV_HOST_CACHE:-$CACHE_ROOT/nv}"
+WORKER_NV_CACHE="${WORKER_NV_CACHE:-$WORKER_VLLM_CACHE/nv}"
 TILELANG_HOST_CACHE="${TILELANG_HOST_CACHE:-$CACHE_ROOT/tilelang}"
 WORKER_TRITON_CACHE="${WORKER_TRITON_CACHE:-$WORKER_VLLM_CACHE/triton}"
 WORKER_TILELANG_CACHE="${WORKER_TILELANG_CACHE:-$WORKER_VLLM_CACHE/tilelang}"
@@ -569,6 +611,28 @@ _glm53_validate_retention_interval() {
 
 # Validate no-store and KV-capacity-log switches before restart stops anything;
 # both overlays reject values other than exactly 0 or 1 at runtime.
+# DFLASH_SCHEDULE is a JSON list of [batch_lo, batch_hi, k] triples with
+# 1 <= batch_lo <= batch_hi and k >= 0 (0 = no drafting in that band).
+_glm53_validate_dflash_schedule() {
+    local value="$1"
+    DFLASH_SCHEDULE_VALUE="$value" python3 - <<'PY' 2>/dev/null && return 0
+import json, os, sys
+try:
+    s = json.loads(os.environ["DFLASH_SCHEDULE_VALUE"])
+except ValueError:
+    sys.exit(1)
+ok = isinstance(s, list) and len(s) > 0 and all(
+    isinstance(e, list) and len(e) == 3
+    and all(isinstance(x, int) and not isinstance(x, bool) for x in e)
+    and 1 <= e[0] <= e[1] and e[2] >= 0
+    for e in s
+)
+sys.exit(0 if ok else 1)
+PY
+    echo "DFLASH_SCHEDULE must be a JSON list of [batch_lo,batch_hi,k] triples with 1 <= lo <= hi and k >= 0 (got: $value)" >&2
+    return 2
+}
+
 _glm53_validate_bool_flag() {
     local name="$1" value="$2"
     if [ "$value" != 0 ] && [ "$value" != 1 ]; then
@@ -667,6 +731,20 @@ validate_numeric_config() {
     _glm53_validate_bool_flag GLM53_EXL3_MOE_FAST "${GLM53_EXL3_MOE_FAST-0}" || return
     _glm53_validate_spinwait_ms || return
     _glm53_validate_bool_flag GLM53_APC_NO_STORE "${GLM53_APC_NO_STORE-1}" || return
+    _glm53_validate_bool_flag OFFLOAD_NVME "$OFFLOAD_NVME" || return
+    if [ "$OFFLOAD_NVME" = "1" ]; then
+        _glm53_canonical_positive_int OFFLOAD_IO_THREADS "$OFFLOAD_IO_THREADS" 64 || return
+        _glm53_canonical_positive_int OFFLOAD_RESERVE_GB "$OFFLOAD_RESERVE_GB" 4096 || return
+        [[ "$OFFLOAD_TTL_MINUTES" =~ ^[0-9]+$ ]] || { echo "OFFLOAD_TTL_MINUTES must be a non-negative integer (got: $OFFLOAD_TTL_MINUTES)" >&2; return 2; }
+        if [ -n "$OFFLOAD_CAPACITY_BYTES" ]; then
+            _glm53_canonical_positive_int OFFLOAD_CAPACITY_BYTES "$OFFLOAD_CAPACITY_BYTES" 9007199254740992 || return
+        fi
+        case "$OFFLOAD_FS_DIR" in /*) ;; *) echo "OFFLOAD_FS_DIR must be an absolute in-container path (got: $OFFLOAD_FS_DIR)" >&2; return 2;; esac
+    fi
+    _glm53_validate_bool_flag GLM53_HOST_MEM_HYGIENE "$GLM53_HOST_MEM_HYGIENE" || return
+    if [ -n "${DFLASH_SCHEDULE-}" ]; then
+        _glm53_validate_dflash_schedule "$DFLASH_SCHEDULE" || return
+    fi
     _glm53_validate_bool_flag GLM53_KV_CAPACITY_LOG "${GLM53_KV_CAPACITY_LOG-1}" || return
     # The template treats medium as max, so do not advertise it as a level.
     if [ -n "${GLM53_DEFAULT_REASONING_EFFORT-}" ]; then
@@ -743,6 +821,8 @@ validate_overlay_artifacts() {
         "$DENSE_FP8_PATCH_HOST|[glm53-dense-fp8]|$main_guard"
         "$DEFAULT_TOKENS_PATCH_HOST|[glm53-default-max-new-tokens]|    raise SystemExit(main(sys.argv))"
         "$CACHE_RESET_PATCH_HOST|# [glm53-cache-reset]|$main_guard"
+        "$COLD_LOAD_PATCH_HOST|[glm53-cold-load-uma:v1]|    sys.exit(main())"
+        "$SKIP_CGPROF_PATCH_HOST|[glm53-skip-cudagraph-profile]|    sys.exit(main())"
         "$SCRIPT_DIR/overlay/patch_ablit.py|$ablit_marker|    main()"
         "$SCRIPT_DIR/overlay/ablit_runtime.py|o_proj abliteration (ABLIT)|    return report"
     )
@@ -1107,6 +1187,8 @@ preflight() {
     [ -f "$TOOLCHOICE_PATCH_HOST" ] || die "$TOOLCHOICE_PATCH_HOST missing"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "$XGRAMMAR_PATCH_HOST missing"
     [ -f "$CACHE_RESET_PATCH_HOST" ] || die "$CACHE_RESET_PATCH_HOST missing"
+    [ -f "$COLD_LOAD_PATCH_HOST" ] || die "$COLD_LOAD_PATCH_HOST missing"
+    [ -f "$SKIP_CGPROF_PATCH_HOST" ] || die "$SKIP_CGPROF_PATCH_HOST missing"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "$KPOOL_TAIL_PATCH_HOST missing"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "$SPINWAIT_PATCH_HOST missing"
     [ -f "$ADAPTIVE_K_PATCH_HOST" ] || die "$ADAPTIVE_K_PATCH_HOST missing"
@@ -1598,6 +1680,8 @@ sync_weights() {
 # kv_cache_utils.py and follows patch_glm5_drafter_group.py, the other overlay
 # editing that file.
 GLM53_OVERLAY_ORDER=(
+    patch_cold_load_uma.py
+    patch_skip_cudagraph_profile.py
     patch_glm_video_placeholders.py
     patch_suppress_stops_in_reasoning.py
     patch_scheduler_decode_floor.py
@@ -1668,6 +1752,9 @@ spec={"method":"dflash","model":os.environ["DFLASH_MODEL_DIR"],"num_speculative_
 tp=os.environ.get("DFLASH_DRAFT_TP","").strip()
 if tp:
     spec["draft_tensor_parallel_size"]=int(tp)
+sched=os.environ.get("DFLASH_SCHEDULE","").strip()
+if sched:
+    spec["num_speculative_tokens_per_batch_size"]=json.loads(sched)
 print(json.dumps(spec,separators=(",",":")))')")
 elif [ "${SPEC_METHOD:-mtp}" = "none" ]; then
     :
@@ -1687,6 +1774,16 @@ else
     [ -n "${MM_PROCESSOR_CACHE_GB:-}" ] && ARGS+=(--mm-processor-cache-gb "${MM_PROCESSOR_CACHE_GB}")
     [ "${SKIP_MM_PROFILING:-1}" = "1" ] && ARGS+=(--skip-mm-profiling)
     say "vision on: limit-mm=${LIMIT_MM:-} image-tokens=${MM_IMAGE_TOKENS:-8000} video-frames=${VIDEO_NUM_FRAMES:-32} mm-cache-gb=${MM_PROCESSOR_CACHE_GB:-4} skip-mm-profiling=${SKIP_MM_PROFILING:-1} chat-template=${CHAT_TEMPLATE:-}"
+fi
+if [ -n "${OFFLOAD_FS_DIR:-}" ] && [ "${OFFLOAD_NVME:-0}" = "1" ]; then
+    ARGS+=(--kv-transfer-config "{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"spec_name\":\"NvmeDirectOffloadingSpec\",\"spec_module_path\":\"vllm.v1.kv_offload.nvme_direct\",\"root_dir\":\"${OFFLOAD_FS_DIR}\",\"n_io_threads\":${OFFLOAD_IO_THREADS:-8},\"capacity_bytes\":${OFFLOAD_CAPACITY_BYTES:-0}}}")
+    ARGS+=(--enable-prompt-tokens-details)
+    # vLLM rejects any KV connector with expandable_segments (VMM remaps).
+    PYTORCH_CUDA_ALLOC_CONF="$(echo "${PYTORCH_CUDA_ALLOC_CONF:-}" | sed 's/expandable_segments:True//;s/^,//;s/,$//')"
+    if [ -z "${PYTORCH_CUDA_ALLOC_CONF}" ]; then unset PYTORCH_CUDA_ALLOC_CONF; else export PYTORCH_CUDA_ALLOC_CONF; fi
+    # Stable prefix hashes across ranks and restarts (restart-restore).
+    export PYTHONHASHSEED="${PYTHONHASHSEED:-0}"
+    say "kv offload: nvme-direct fs=${OFFLOAD_FS_DIR} threads=${OFFLOAD_IO_THREADS:-8} capacity=${OFFLOAD_CAPACITY_BYTES:-0} alloc_conf='${PYTORCH_CUDA_ALLOC_CONF:-}'"
 fi
 if [ -n "${EXTRA_ARGS:-}" ]; then
     # shellcheck disable=SC2206
@@ -1748,6 +1845,9 @@ spec={"method":"dflash","model":os.environ["DFLASH_MODEL_DIR"],"num_speculative_
 tp=os.environ.get("DFLASH_DRAFT_TP","").strip()
 if tp:
     spec["draft_tensor_parallel_size"]=int(tp)
+sched=os.environ.get("DFLASH_SCHEDULE","").strip()
+if sched:
+    spec["num_speculative_tokens_per_batch_size"]=json.loads(sched)
 print(json.dumps(spec,separators=(",",":")))')")
 elif [ "${SPEC_METHOD:-mtp}" = "none" ]; then
     :
@@ -1765,6 +1865,13 @@ else
     [ -n "${VIDEO_NUM_FRAMES:-}" ] && ARGS+=(--media-io-kwargs "{\"video\":{\"num_frames\":${VIDEO_NUM_FRAMES}}}")
     [ -n "${MM_PROCESSOR_CACHE_GB:-}" ] && ARGS+=(--mm-processor-cache-gb "${MM_PROCESSOR_CACHE_GB}")
     [ "${SKIP_MM_PROFILING:-1}" = "1" ] && ARGS+=(--skip-mm-profiling)
+fi
+if [ -n "${OFFLOAD_FS_DIR:-}" ] && [ "${OFFLOAD_NVME:-0}" = "1" ]; then
+    ARGS+=(--kv-transfer-config "{\"kv_connector\":\"OffloadingConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"spec_name\":\"NvmeDirectOffloadingSpec\",\"spec_module_path\":\"vllm.v1.kv_offload.nvme_direct\",\"root_dir\":\"${OFFLOAD_FS_DIR}\",\"n_io_threads\":${OFFLOAD_IO_THREADS:-8},\"capacity_bytes\":${OFFLOAD_CAPACITY_BYTES:-0}}}")
+    PYTORCH_CUDA_ALLOC_CONF="$(echo "${PYTORCH_CUDA_ALLOC_CONF:-}" | sed 's/expandable_segments:True//;s/^,//;s/,$//')"
+    if [ -z "${PYTORCH_CUDA_ALLOC_CONF}" ]; then unset PYTORCH_CUDA_ALLOC_CONF; else export PYTORCH_CUDA_ALLOC_CONF; fi
+    export PYTHONHASHSEED="${PYTHONHASHSEED:-0}"
+    say "kv offload: nvme-direct fs=${OFFLOAD_FS_DIR} threads=${OFFLOAD_IO_THREADS:-8} capacity=${OFFLOAD_CAPACITY_BYTES:-0} alloc_conf='${PYTORCH_CUDA_ALLOC_CONF:-}'"
 fi
 if [ -n "${EXTRA_ARGS:-}" ]; then
     # shellcheck disable=SC2206
@@ -1827,12 +1934,119 @@ _glm53_stage_coop_runtime_worker() {
 }
 
 # ------------------------------- launch ------------------------------------
+# ----------------------- NVMe prefix cache + host hygiene -------------------
+# Free bytes on the filesystem holding $1 (local) or $2 (remote via worker_ssh).
+_fs_free_bytes() { df -Pk "$1" 2>/dev/null | awk 'NR==2{print $4*1024}'; }
+_worker_fs_free_bytes() { worker_ssh "df -Pk '$1' 2>/dev/null" | awk 'NR==2{print $4*1024}'; }
+
+# Creates the per-node cache dirs, resolves OFFLOAD_CAPACITY_BYTES (auto = the
+# smaller node's free space minus OFFLOAD_RESERVE_GB, so the spec's in-container
+# free-space check passes on both ranks) and installs/refreshes the TTL cron.
+prepare_offload_dirs() {
+    mkdir -p "$OFFLOAD_HOST_DIR"
+    worker_ssh "mkdir -p '$WORKER_OFFLOAD_HOST_DIR'" || die "cannot create $WORKER_OFFLOAD_HOST_DIR on worker"
+    local head_free worker_free reserve used_head used_worker
+    head_free="$(_fs_free_bytes "$OFFLOAD_HOST_DIR")"
+    worker_free="$(_worker_fs_free_bytes "$WORKER_OFFLOAD_HOST_DIR")"
+    used_head="$(du -sb "$OFFLOAD_HOST_DIR" 2>/dev/null | awk '{print $1}')"
+    used_worker="$(worker_ssh "du -sb '$WORKER_OFFLOAD_HOST_DIR' 2>/dev/null" | awk '{print $1}')"
+    reserve=$((OFFLOAD_RESERVE_GB * 1024 * 1024 * 1024))
+    if [ -z "$OFFLOAD_CAPACITY_BYTES" ]; then
+        # The spec demands this much *free* at boot (raw free, existing cache
+        # files not counted), so auto = min(head free, worker free) - reserve.
+        local m="$head_free"
+        [ "${worker_free:-0}" -lt "$m" ] && m="$worker_free"
+        OFFLOAD_CAPACITY_BYTES=$(( m - reserve ))
+        [ "$OFFLOAD_CAPACITY_BYTES" -gt 0 ] || die "NVMe prefix cache: less than OFFLOAD_RESERVE_GB=${OFFLOAD_RESERVE_GB} GiB free (head $((head_free/1073741824)) GiB, worker $((worker_free/1073741824)) GiB)"
+    fi
+    log "nvme prefix cache: head $OFFLOAD_HOST_DIR ($((head_free/1073741824)) GiB free, $(( ${used_head:-0}/1073741824 )) GiB cached), worker $WORKER_OFFLOAD_HOST_DIR ($((worker_free/1073741824)) GiB free, $(( ${used_worker:-0}/1073741824 )) GiB cached) -> $OFFLOAD_FS_DIR; capacity=$((OFFLOAD_CAPACITY_BYTES/1073741824)) GiB/node threads=$OFFLOAD_IO_THREADS"
+    if [ "$OFFLOAD_TTL_MINUTES" != "0" ]; then
+        local qdir wqdir cron_line wcron_line
+        printf -v qdir '%q' "$OFFLOAD_HOST_DIR"
+        printf -v wqdir '%q' "$WORKER_OFFLOAD_HOST_DIR"
+        cron_line="17 * * * * find $qdir -type f -mmin +$OFFLOAD_TTL_MINUTES -delete # glm53-hicache-ttl"
+        wcron_line="17 * * * * find $wqdir -type f -mmin +$OFFLOAD_TTL_MINUTES -delete # glm53-hicache-ttl"
+        { crontab -l 2>/dev/null | grep -v 'glm53-hicache-ttl'; echo "$cron_line"; } | crontab - 2>/dev/null \
+            || warn "could not install head TTL cron"
+        worker_ssh "{ crontab -l 2>/dev/null | grep -v 'glm53-hicache-ttl'; echo '$wcron_line'; } | crontab -" 2>/dev/null \
+            || warn "could not install worker TTL cron"
+        log "nvme prefix cache TTL: ${OFFLOAD_TTL_MINUTES} min (cron glm53-hicache-ttl on both nodes)"
+    else
+        # Explicit 0: remove any earlier sweeper so files persist indefinitely
+        # (capacity is the spec's boot-time free-space gate; no runtime eviction).
+        if crontab -l 2>/dev/null | grep -q 'glm53-hicache-ttl'; then
+            crontab -l | grep -v 'glm53-hicache-ttl' | crontab - || true
+            log "removed head TTL cron (OFFLOAD_TTL_MINUTES=0)"
+        fi
+        worker_ssh "if crontab -l 2>/dev/null | grep -q glm53-hicache-ttl; then crontab -l | grep -v glm53-hicache-ttl | crontab -; fi" 2>/dev/null || true
+    fi
+}
+
+# Drop clean page cache and cycle swap on both nodes while no engine runs.
+# Needs passwordless sudo (sudo -n); otherwise warns and continues. The
+# in-container patch_cold_load_uma.py cannot drop caches (no CAP_SYS_ADMIN)
+# and only rescales the InstantTensor budget, so this host step is what keeps
+# the 164 GiB load at the NVMe ceiling instead of a double-digit io_depth.
+host_memory_hygiene() {
+    [ "$GLM53_HOST_MEM_HYGIENE" = "1" ] || { log "host memory hygiene skipped (GLM53_HOST_MEM_HYGIENE=0)"; return 0; }
+    # One POSIX sh script, sent to `sudo -n sh -s` on stdin on each node: drop
+    # clean page cache, cycle swap only if any is in use, report the result.
+    local hygiene_script
+    hygiene_script="$(cat <<'HYG'
+set -e
+sync
+echo 1 > /proc/sys/vm/drop_caches
+used_kib=$(awk '$1 != "Filename" { s += $4 } END { print s + 0 }' /proc/swaps)
+if [ "$used_kib" -gt 0 ]; then
+    swapoff -a && swapon -a
+fi
+free_gib=$(awk '/^MemFree:/ { print int($2 / 1048576) }' /proc/meminfo)
+echo "MemFree=${free_gib}GiB swap_used_before=${used_kib}KiB"
+HYG
+)"
+    # After a teardown the driver returns ~80 GiB of weights asynchronously;
+    # vLLM's startup check reads cuda free (== MemFree on UMA) against
+    # GPU_MEM_UTIL x total, so wait until MemFree clears that bar (+1 GiB).
+    # The gate has to be the number vLLM reads: cudaMemGetInfo free, which
+    # trails host MemFree by a few GiB while the previous context unwinds.
+    local need_mib i free_mib
+    need_mib=$(awk -v u="$GPU_MEM_UTIL" '/MemTotal/{printf "%d", $2*u/1024 + 1536}' /proc/meminfo)
+    for i in $(seq 1 45); do
+        free_mib=$(docker run --rm --gpus all --entrypoint python3 "$IMAGE" -c 'import torch; print(torch.cuda.mem_get_info()[0]//1048576)' 2>/dev/null || awk '/MemFree/{print int($2/1024)}' /proc/meminfo)
+        [ "${free_mib:-0}" -ge "$need_mib" ] && break
+        [ "$i" = 1 ] && log "waiting for CUDA free ($((free_mib/1024)) GiB) to reach $((need_mib/1024)) GiB (GPU_MEM_UTIL x total + 1.5 GiB) ..."
+        sync; sudo -n sh -c 'echo 1 > /proc/sys/vm/drop_caches' 2>/dev/null || true
+        sleep 2
+    done
+    log "cuda free before launch: $((free_mib/1024)) GiB (need $((need_mib/1024)))"
+    local out
+    if out="$(printf '%s\n' "$hygiene_script" | sudo -n sh -s 2>/dev/null)"; then
+        log "host hygiene head: $out"
+    else
+        warn "head: passwordless sudo unavailable — page cache not dropped (cold load may run below the NVMe ceiling)"
+    fi
+    if out="$(printf '%s\n' "$hygiene_script" | worker_ssh "sudo -n sh -s" 2>/dev/null)"; then
+        log "host hygiene worker: $out"
+    else
+        warn "worker: passwordless sudo unavailable — page cache not dropped"
+    fi
+}
+
 launch_cluster() {
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || true
     worker_ssh "docker rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 || true
 
-    mkdir -p "$CACHE_ROOT" "$TRITON_HOST_CACHE" "$TILELANG_HOST_CACHE"
-    worker_ssh "mkdir -p '$WORKER_VLLM_CACHE' '$WORKER_TRITON_CACHE' '$WORKER_TILELANG_CACHE'"
+    local -a head_offload_mount=()
+    local worker_offload_mount=""
+    if [ "$OFFLOAD_NVME" = "1" ]; then
+        prepare_offload_dirs
+        head_offload_mount=(-v "$OFFLOAD_HOST_DIR:$OFFLOAD_FS_DIR")
+        worker_offload_mount="-v '$WORKER_OFFLOAD_HOST_DIR:$OFFLOAD_FS_DIR'"
+    fi
+    host_memory_hygiene
+
+    mkdir -p "$CACHE_ROOT" "$TRITON_HOST_CACHE" "$TILELANG_HOST_CACHE" "$NV_HOST_CACHE"
+    worker_ssh "mkdir -p '$WORKER_VLLM_CACHE' '$WORKER_TRITON_CACHE' '$WORKER_TILELANG_CACHE' '$WORKER_NV_CACHE'"
     scp -q -o BatchMode=yes "$WORKER_SCRIPT" "${WORKER_SSH}:/tmp/${CONTAINER_WORKER}.sh"
     [ -f "$CHAT_TEMPLATE_HOST" ] || die "missing chat template: $CHAT_TEMPLATE_HOST"
     scp -q -o BatchMode=yes "$CHAT_TEMPLATE_HOST" "${WORKER_SSH}:/tmp/glm53-chat_template.jinja"
@@ -1858,6 +2072,9 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
     [ -f "$CACHE_RESET_PATCH_HOST" ] || die "missing $CACHE_RESET_PATCH_HOST"
     scp -q -o BatchMode=yes "$CACHE_RESET_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_cache_reset.py"
+    [ -f "$COLD_LOAD_PATCH_HOST" ] || die "missing $COLD_LOAD_PATCH_HOST"
+    scp -q -o BatchMode=yes "$COLD_LOAD_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_cold_load_uma.py"
+    scp -q -o BatchMode=yes "$SKIP_CGPROF_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_skip_cudagraph_profile.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "missing $SPINWAIT_PATCH_HOST"
@@ -1977,7 +2194,8 @@ launch_cluster() {
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP \
              GLM53_ADAPTIVE_K GLM53_ADAPTIVE_K_SET GLM53_ADAPTIVE_K_ALPHA GLM53_ADAPTIVE_K_MARGIN \
              GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST GLM53_DENSE_FP8 \
-             GLM53_EXL3_MOE_FAST \
+             GLM53_EXL3_MOE_FAST DFLASH_SCHEDULE \
+             OFFLOAD_NVME OFFLOAD_FS_DIR OFFLOAD_IO_THREADS OFFLOAD_CAPACITY_BYTES \
              GLM53_COOP_GEOMETRY; do
         serve_env+=" -e $v='${!v:-}'"
         serve_env_names+=("$v")
@@ -2042,9 +2260,11 @@ launch_cluster() {
         --device /dev/infiniband --cap-add IPC_LOCK \
         --ulimit memlock=-1 --ulimit stack=67108864 \
         -v '$(_hf_mount)' \
+        ${EXTRA_MOUNT:+-v '$EXTRA_MOUNT'} \
         -v '$WORKER_VLLM_CACHE:/root/.cache/vllm' \
         -v '$WORKER_TRITON_CACHE:/root/.triton/cache' \
         -v '$WORKER_TILELANG_CACHE:/root/.tilelang/cache' \
+        -v '$WORKER_NV_CACHE:/root/.nv/ComputeCache' \
         -v '/tmp/${CONTAINER_WORKER}.sh:/start.sh:ro' \
         -v '/tmp/glm53-chat_template.jinja:${CHAT_TEMPLATE}:ro' \
         -v '/tmp/patch_glm_video_placeholders.py:/opt/glm53/patch_glm_video_placeholders.py:ro' \
@@ -2058,6 +2278,9 @@ launch_cluster() {
         -v '/tmp/patch_kv_capacity_log.py:/opt/glm53/patch_kv_capacity_log.py:ro' \
         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
         -v '/tmp/patch_cache_reset.py:/opt/glm53/patch_cache_reset.py:ro' \
+        -v '/tmp/patch_cold_load_uma.py:/opt/glm53/patch_cold_load_uma.py:ro' \
+        -v '/tmp/patch_skip_cudagraph_profile.py:/opt/glm53/patch_skip_cudagraph_profile.py:ro' \
+        ${worker_offload_mount} \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
         -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
         -v '/tmp/patch_adaptive_k.py:/opt/glm53/patch_adaptive_k.py:ro' \
@@ -2083,9 +2306,11 @@ launch_cluster() {
         --device /dev/infiniband --cap-add IPC_LOCK \
         --ulimit memlock=-1 --ulimit stack=67108864 \
         -v "$HF_CACHE_DIR:/root/.cache/huggingface" \
+        ${EXTRA_MOUNT:+-v "$EXTRA_MOUNT"} \
         -v "$CACHE_ROOT:/root/.cache/vllm" \
         -v "$TRITON_HOST_CACHE:/root/.triton/cache" \
         -v "$TILELANG_HOST_CACHE:/root/.tilelang/cache" \
+        -v "$NV_HOST_CACHE:/root/.nv/ComputeCache" \
         -v "$HEAD_SCRIPT:/start.sh:ro" \
         -v "$CHAT_TEMPLATE_HOST:$CHAT_TEMPLATE:ro" \
         -v "$VIDEO_PATCH_HOST:/opt/glm53/patch_glm_video_placeholders.py:ro" \
@@ -2099,6 +2324,9 @@ launch_cluster() {
         -v "$KVCAP_PATCH_HOST:/opt/glm53/patch_kv_capacity_log.py:ro" \
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$CACHE_RESET_PATCH_HOST:/opt/glm53/patch_cache_reset.py:ro" \
+        -v "$COLD_LOAD_PATCH_HOST:/opt/glm53/patch_cold_load_uma.py:ro" \
+        -v "$SKIP_CGPROF_PATCH_HOST:/opt/glm53/patch_skip_cudagraph_profile.py:ro" \
+        "${head_offload_mount[@]}" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
         -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
         -v "$ADAPTIVE_K_PATCH_HOST:/opt/glm53/patch_adaptive_k.py:ro" \
@@ -2163,6 +2391,11 @@ launch_cluster() {
         -e GLM53_DENSE_FP8="$GLM53_DENSE_FP8" \
         -e GLM53_EXL3_MOE_FAST="$GLM53_EXL3_MOE_FAST" \
         -e GLM53_COOP_GEOMETRY="$GLM53_COOP_GEOMETRY" \
+        -e DFLASH_SCHEDULE="${DFLASH_SCHEDULE:-}" \
+        -e OFFLOAD_NVME="$OFFLOAD_NVME" \
+        -e OFFLOAD_FS_DIR="$OFFLOAD_FS_DIR" \
+        -e OFFLOAD_IO_THREADS="$OFFLOAD_IO_THREADS" \
+        -e OFFLOAD_CAPACITY_BYTES="$OFFLOAD_CAPACITY_BYTES" \
         -e MODEL_DIR="$MODEL_DIR" \
         -e VLLM_API_KEY \
         -e EXTRA_ARGS="${EXTRA_ARGS:-}" \
@@ -2193,6 +2426,11 @@ wait_for_health() {
     local elapsed=0 healthy=0 exited=0 dead_side="" worker_fail=0 head_fail=0
     while [ "$elapsed" -lt "$READY_TIMEOUT" ]; do
         if curl -fsS -m 5 "$url" >/dev/null 2>&1; then healthy=1; break; fi
+        # Probe /health every second; the container liveness checks below
+        # (a docker inspect and an ssh round trip) only every 10 s.
+        if [ $((elapsed % 10)) -ne 0 ]; then
+            sleep 1; elapsed=$((elapsed + 1)); continue
+        fi
         # Keep the inspect result out of a grep -q pipeline. With pipefail,
         # grep can close early and make a running container look dead.
         # Same 3-strike window as the worker: one transient docker miss must
@@ -2224,7 +2462,7 @@ wait_for_health() {
                 exited=1; dead_side="worker"; break
             fi
         fi
-        sleep 10; elapsed=$((elapsed + 10))
+        sleep 1; elapsed=$((elapsed + 1))
     done
 
     _stop_logtail
@@ -2342,11 +2580,15 @@ start() {
 }
 
 stop_containers() {
-    log "stopping head container ..."
+    # docker rm -f sends SIGTERM and waits --stop-timeout (60 s) for vLLM's
+    # shutdown; there is nothing to flush (vLLM keeps no durable state, and an
+    # NVMe prefix tier fsyncs per chunk), so kill first and remove. Both nodes in parallel.
+    log "stopping head + worker containers ..."
+    worker_ssh "docker kill '$CONTAINER_WORKER' >/dev/null 2>&1; docker rm -f '$CONTAINER_WORKER' >/dev/null 2>&1" &
+    local wpid=$!
+    docker kill "$CONTAINER_HEAD" >/dev/null 2>&1 || true
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || log "  (no head container was running)"
-    log "stopping worker container on ${WORKER_SSH} ..."
-    worker_ssh "docker rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 \
-        || log "  (no worker container was running)"
+    wait "$wpid" || log "  (no worker container was running)"
     if [ "${NFS_SHARE:-0}" = "1" ]; then
         log "removing the worker NFS volume (the exporter stays up) ..."
         nfs_unmount_workers
@@ -2402,6 +2644,7 @@ main() {
     case "$cmd" in
         stop)     banner stop.sh ;;
         download) banner download.sh ;;
+        stamp)    ;;
         *)        banner start.sh ;;
     esac
     case "$cmd" in
@@ -2415,6 +2658,7 @@ main() {
             ;;
         status)   status ;;
         logs)     shift || true; logs "$@" ;;
+        stamp)    overlay_recipe_hash ;;
         share)    [ "${NFS_SHARE:-0}" = "1" ] || die "NFS_SHARE=0 in .env — set NFS_SHARE=1 to share the head HF cache over NFS"
                   nfs_share_weights ;;
         -h|--help|help) usage ;;

@@ -19,6 +19,51 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   in #128 / #159, ported with attribution from the MIT recipe qualified on a 4x
   GB10 kit; it does not fix the underlying race. `start.sh` / `start-tp3.sh`
   untouched. (#223)
+
+- **Cold load on GB10 UMA: boot with a full page cache + 64 KiB mmap staging**
+  (`overlay/patch_cold_load_uma.py`, `tests/test_cold_load_uma.py`,
+  `docs/cold-load-uma.md`). On GB10 `torch.cuda.mem_get_info()` free is host
+  `MemFree`, so a full page cache (after the 164 GiB rsync or a previous serve)
+  made InstantTensor either abort (`buffer_size … exceeds device memory budget`,
+  reproduced) or run with `io_depth` shrunk from 512 to double digits. The patch
+  measures `MemAvailable`, drops clean cache when it can, and pins an explicit
+  budget/buffer. With the cache full stock never reaches `/health` (exit 1 at
+  168 s) while this boots in 230 s streaming 164 GiB in 36 s; with a clean
+  cache both are identical (36 s @ ~4.9 GB/s, `/health` 230 s) — this is a
+  correctness fix at the drive ceiling, not a speedup.
+  On kernels whose page size is not 4 KiB it also stages file-backed safetensors
+  tensors into anonymous memory before H2D (`cuMemcpyHtoDAsync` wedges on
+  file-backed 64 KiB mappings); byte-identical to stock on 4 KiB kernels and
+  discrete GPUs. Launcher: `GLM53_HOST_MEM_HYGIENE=1` (default) drops page cache,
+  cycles swap and waits for CUDA free memory to clear the `GPU_MEM_UTIL` request
+  on both nodes before `docker run`. Kill switches `GLM53_COLD_LOAD_UMA=0`,
+  `GLM53_COLD_LOAD_STAGE_MMAP=0`.
+- **Boot time 259 s → 122 s on `./start.sh restart`** (`/health` 230 → 99 s from
+  `docker run`): the video-placeholder `.pth` no longer imports vLLM on every
+  interpreter start (container → first log line 100 → 6 s); the NVIDIA JIT
+  cache is persisted next to the Triton cache (DFlash2 graph capture 30 → 0 s);
+  `overlay/patch_skip_cudagraph_profile.py` skips the CUDA-graph memory
+  dry-capture when `CG_ESTIMATE=0` discards it anyway (KV profile 18 → 7 s);
+  kill-first parallel stop and a 1 s `/health` poll. Receipts in
+  `docs/cold-load-uma.md`.
+- `DFLASH_SCHEDULE` (launcher knob for upstream `num_speculative_tokens_per_batch_size`),
+  `./start.sh stamp`, and three benches: `tests/bench_ceiling.py` (server-side
+  step time vs a bytes/step model against the 236 GB/s measured ceiling),
+  `tests/bench_c8.py` (agent-shaped c1…c8 ladder), `tests/bench_nvme_restore.py`.
+  Receipts on this 2× kit (k=3, dense FP8, mixed prefill off): c8 pure decode
+  91.9 tok/s at 98.6 % of ceiling with `[[1,2,3],[3,4,2],[5,8,1]]`; k=0 at c8
+  measured 75.3.
+- **NVMe-direct prefix cache** (`OFFLOAD_NVME=1`, `overlay/kvoffload/`,
+  `docs/nvme-prefix-cache.md`). vLLM's `OffloadingConnector` with an
+  out-of-tree `NvmeDirectOffloadingSpec`: no CPU tier, per-IO-thread pinned
+  bounce buffers, GPU<->NVMe files per rank, restart-restore (46,796-token
+  prompt: 32.4 s cold -> 1.58 s TTFT after an engine restart). Draft-tower KV
+  groups detected by name or root-prefix minority; `KpoolTailSpec` excluded from
+  hashing/offload. Capacity auto-sized from the smaller node's free space minus
+  `OFFLOAD_RESERVE_GB`; optional TTL cron. `EXTRA_MOUNT` adds one extra
+  read-only bind on both ranks. `Dockerfile.nvme-layer` layers this and the
+  cold-load patch on the published image.
+
 - Opt-in SM121 **thin-decode** kernels for the EXL3 routed experts
   (`GLM53_EXL3_MOE_FAST`, default `0`): `overlay/patch_exl3_decode_pipeline.py`
   adds two K4/N256 fast kernels (shared / independent gate-up input transform)
