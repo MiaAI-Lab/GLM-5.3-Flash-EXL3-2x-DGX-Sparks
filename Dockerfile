@@ -377,6 +377,11 @@ COPY overlay/exl3_fat_gemm.cuh /opt/glm53/exl3-fat-kernel/exl3_fat_gemm.cuh
 COPY overlay/exl3_fat_moe.cu /opt/glm53/exl3-fat-kernel/exl3_fat_moe.cu
 COPY overlay/exl3_fat_moe.cuh /opt/glm53/exl3-fat-kernel/exl3_fat_moe.cuh
 
+# SENS8 graph-safe router sources (compiled at first use via load_inline;
+# baked so serving does not depend on repo mounts).
+COPY kernel_lab/sens8/sens8g_router.cu /opt/glm53/sens8/sens8g_router.cu
+COPY kernel_lab/sens8/sens8g_loader.py /opt/glm53/sens8/sens8g_loader.py
+
 ARG EXLLAMAV3_COMMIT=c5d9c657966ffeeaa9353f0cc899f18629da4a13
 ENV TORCH_CUDA_ARCH_LIST=12.1a
 ENV FLASHINFER_CUDA_ARCH_LIST=12.1a
