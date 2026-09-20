@@ -14,6 +14,6 @@ echo "[display-kv] building $(basename "$OUT") in $IMAGE" >&2
 docker run --rm --user "$(id -u):$(id -g)" -v "$HERE:/w" -w /w --entrypoint bash "$IMAGE" -c \
     'gcc -O2 -fPIC -shared -Wall -I/usr/local/cuda/include -o /tmp/lib.so display_kv.c -L/usr/local/cuda/lib64/stubs -lcuda \
      && cp /tmp/lib.so libglm53_display_kv.so.tmp'
-mv -f "$OUT.tmp" "$OUT"
+mv -f "${OUT}.tmp" "$OUT"
 chmod 755 "$OUT"
 echo "[display-kv] built $OUT" >&2
