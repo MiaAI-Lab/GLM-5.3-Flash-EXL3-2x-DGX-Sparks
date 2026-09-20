@@ -20,3 +20,8 @@ results/
 
 # Cooperative MoE native artifacts are staged, not committed.
 extensions/cooperative_moe/*.so
+
+# Display-KV native artifact is built by the launcher inside the serving image.
+overlay/display_kv/*.so
+overlay/display_kv/probe_display_kv
+overlay/display_kv/bw_pinned

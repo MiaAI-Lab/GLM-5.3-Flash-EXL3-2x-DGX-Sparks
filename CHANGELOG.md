@@ -19,6 +19,24 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   in #128 / #159, ported with attribution from the MIT recipe qualified on a 4x
   GB10 kit; it does not fix the underlying race. `start.sh` / `start-tp3.sh`
   untouched. (#223)
+
+- **Display-reserve KV: +1.75 GiB of KV cache per Spark from the framebuffer
+  carveout** (`overlay/display_kv/`, `overlay/patch_display_kv.py`,
+  `tests/test_display_kv_patch.py`, `docs/display-kv.md`). GB10 firmware
+  reserves ~2 GiB for display that CUDA never sees. With `nvidia_drm modeset=1
+  fbdev=0` each rank creates a DRM dumb buffer there, registers it with CUDA
+  (`cuMemHostRegister DEVICEMAP|IOMEMORY`, UVA pointer asserted) and ADDS it to
+  the profiled KV budget; the largest KV tensors that fit are carved from it
+  (first-fit decreasing, 11 MiB stranded on this kit). Ordinary KV,
+  `GPU_MEM_UTIL` and host-RAM preflight are unchanged. Knobs `GLM53_DISPLAY_KV`
+  (`1`/`auto`/`0`, default `auto`), `GLM53_DISPLAY_KV_MIB` (1792; 2032 max
+  fits), `HEAD_DRM_CARD`/`WORKER_DRM_CARD`. Preflight verifies both hosts'
+  module parameters, builds the `.so` inside the serving image and passes only
+  `--device <card>:/dev/dri/card0`. Pool bandwidth equals registered host
+  memory (162 GB/s read vs 235 GB/s `cudaMalloc`). Measured: 13.7 → 16.5 GiB KV
+  on the head at 262k/util 0.87, 530 → 610 blocks; cold 133k needle retrieval
+  correct at 1,315 tok/s prefill, c4 decode unchanged. Idea and reference
+  implementation: coolbho3k/DeepSeek-v4.1-Flash-2x-DGX-Spark (AGPL-3.0).
 - Opt-in SM121 **thin-decode** kernels for the EXL3 routed experts
   (`GLM53_EXL3_MOE_FAST`, default `0`): `overlay/patch_exl3_decode_pipeline.py`
   adds two K4/N256 fast kernels (shared / independent gate-up input transform)
