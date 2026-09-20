@@ -533,6 +533,17 @@ RUN EXL3_SELFCHECK_GPU=0 python3 /opt/glm53/test_exl3_overlay.py \
 RUN pip install --no-deps --no-cache-dir instanttensor==0.2.0 \
     && python3 -c "import instanttensor; print('instanttensor', instanttensor.__file__)"
 
+# Cold-load fixes for UMA / 64 KiB-page GB10 hosts (overlay/patch_cold_load_uma.py):
+# InstantTensor budget vs page cache, and file-backed mmap staging. Applied at
+# build so the draft/secondary safetensors paths are covered before start.sh
+# re-applies it (idempotent) at boot. No-op on 4 KiB kernels / discrete GPUs.
+COPY overlay/patch_cold_load_uma.py /opt/glm53/patch_cold_load_uma.py
+COPY tests/test_cold_load_uma.py /opt/glm53/test_cold_load_uma.py
+RUN python3 /opt/glm53/test_cold_load_uma.py && python3 /opt/glm53/patch_cold_load_uma.py
+COPY overlay/patch_skip_cudagraph_profile.py /opt/glm53/patch_skip_cudagraph_profile.py
+COPY tests/test_skip_cudagraph_profile.py /opt/glm53/test_skip_cudagraph_profile.py
+RUN GLM53_REQUIRE_TARGET=1 python3 /opt/glm53/test_skip_cudagraph_profile.py && python3 /opt/glm53/patch_skip_cudagraph_profile.py
+
 # Baked by start.sh --build-arg so a git pull that changes overlay/Dockerfile
 # misses this label and rebuilds once. Keep last so stamp-only rebuilds are cheap.
 ARG GLM53_RECIPE_STAMP=unknown
