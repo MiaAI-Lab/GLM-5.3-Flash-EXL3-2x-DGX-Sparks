@@ -1,0 +1,85 @@
+{
+  "date": "2026-09-16",
+  "recipe": "MiaAI-Lab GLM-5.3-Flash EXL3 TP=4 switchless ring",
+  "image": {
+    "ref": "ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3-instanttensor",
+    "digest": "sha256:447114ee77d14c9b4732ee23978ada2a0ee9027868a231d6fd42700a8b25be1d",
+    "id": "sha256:ef9f5013c41adf93a5171abb809283be0f202b88fd14098e4434337715614c62",
+    "platform": "linux/arm64"
+  },
+  "weights": {
+    "model": "Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw",
+    "revision": "25a44fdbf16862a46b7cc9921142c6c81350af2f",
+    "shards": 120,
+    "shard_gib": 163.65,
+    "draft": "incoai/GLM-5.3-Flash-DFlash2",
+    "draft_snapshot": "bf582e4e"
+  },
+  "hardware": {
+    "nodes": 4,
+    "gpu": "NVIDIA GB10",
+    "driver": "580.173.02",
+    "fabric": "switchless 4x 200GbE DAC ring, MTU 9000, no RoCE switch",
+    "nccl": "host libnccl.so.2.30.7 with SWITCHLESS_RING_ONLY overlay (no LD_PRELOAD)"
+  },
+  "served_model": "GLM-5.3-Flash-EXL3",
+  "protocol": "idle server; short prompts; streaming /v1/chat/completions; thinking off unless noted; not tests/bench_decode.py",
+  "production_profile": {
+    "max_model_len": 262144,
+    "max_num_seqs": 8,
+    "gpu_memory_utilization": 0.75,
+    "max_num_batched_tokens": 2048,
+    "spec_method": "dflash",
+    "dflash_tokens": 3,
+    "dflash_draft_tp": 4,
+    "nccl_nchannels": 8,
+    "mixed_prefill": "fair",
+    "kv_pool_tokens": 3400000
+  },
+  "correctness": {
+    "models_endpoint": "GLM-5.3-Flash-EXL3 max_model_len=262144",
+    "tool_call": "get_weather(Vigo) OK",
+    "thinking": "17*19=323",
+    "preemptions": 0
+  },
+  "short_decode": {
+    "commissioning_dflash_off_4ch_4seq": {
+      "c1_structured_tok_s": 24,
+      "c4_structured_agg_tok_s": 72,
+      "c8_structured_agg_tok_s": 73,
+      "c8_ttft_s": 8.8
+    },
+    "production_dflash_k3_tp4_8ch_8seq": {
+      "c1_structured_tok_s": 65,
+      "c1_structured_ttft_s": 0.33,
+      "c1_prose_tok_s": 35,
+      "c4_structured_agg_tok_s": 145,
+      "c8_structured_agg_tok_s_range": [179, 195],
+      "c8_ttft_p50_s": 1.3,
+      "c8_ttft_p95_s": 2.7
+    }
+  },
+  "ablations": {
+    "dflash_draft_tp_1": {
+      "c1_tok_s": 64.5,
+      "c4_agg_tok_s": 130,
+      "c8_agg_tok_s": 176,
+      "kept": false
+    },
+    "gpu_mem_util_0_85": {
+      "result": "NV_ERR_NO_MEMORY",
+      "kept": false
+    },
+    "max_model_len_512k_with_dflash": {
+      "result": "hang on ~32k cold prefill",
+      "kept": false
+    }
+  },
+  "not_claimed": [
+    "1M needle",
+    "512k production",
+    "30-150min soak",
+    "bench_decode.py medians",
+    "fix for issues 128/159/113"
+  ]
+}

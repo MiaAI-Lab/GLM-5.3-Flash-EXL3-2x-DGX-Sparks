@@ -1186,10 +1186,10 @@ and the FP8 path stay this repo's.
 
 ### Experimental: 4× Spark (TP=4)
 
-Untested here (no 4-Spark kit). Optional sibling of `./start.sh` — same image
-and weights, does not change the supported 2× path. First run copies
-`.env.tp4.example` → `.env.tp4` (gitignored). Stop with `./start-tp4.sh stop`;
-`./start.sh stop` does not know ranks 2/3.
+Optional sibling of `./start.sh` — same image and weights, does not change the
+supported 2× path. First run copies `.env.tp4.example` → `.env.tp4`
+(gitignored). Stop with `./start-tp4.sh stop`; `./start.sh stop` does not know
+ranks 2/3.
 
 ```bash
 # edit WORKER2_IP / WORKER3_IP / CX7 pins in .env.tp4
@@ -1197,6 +1197,18 @@ and weights, does not change the supported 2× path. First run copies
 ./start-tp4.sh stop
 ./start-tp4.sh logs            # head; logs 1|2|3 for a worker rank
 ```
+
+**Switchless DAC ring (opt-in).** Four GB10s cabled as a ring with no RoCE
+switch need a patched host NCCL (`SWITCHLESS_RING_ONLY`) and
+`NCCL_SWITCHLESS_RING_ONLY=1`. Stock image NCCL still tries a tree QP on the
+missing rank0↔rank2 diagonal and dies in `ncclTransportTreeConnect`. Copy
+`.env.tp4.ring.example` over the ring knobs, run `./start-tp4.sh doctor-ring`
+(no containers replaced), then `start`. Cabling, overlay-without-`LD_PRELOAD`,
+and fail-closed preflight: [`docs/switchless-ring.md`](docs/switchless-ring.md).
+Measured 256k / 8-seq / DFlash k=3 / draft TP=4 numbers from a 4× 200 GbE ring:
+[`docs/tp4-switchless-ring-results.md`](docs/tp4-switchless-ring-results.md).
+Do not combine DFlash with 512k/1M on that fabric. Switched TP=4 below is a
+different kit.
 
 **Stall mitigation (opt-in).** `VLLM_SM120_SPARSE_MLA_SLICE_TOKENS=64` in `.env.tp4` (or
 exported before `./start-tp4.sh`) applies `overlay/patch_sparse_mla_slice.py` on every rank at
