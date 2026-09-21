@@ -967,6 +967,12 @@ EXTRA_ARGS="--your-existing-flags --kv-cache-memory-bytes 15032385536"   # keep 
 SKIP_BUILD=1 ./start.sh restart
 ```
 
+A plain `./start.sh restart` re-checks the recipe stamp **after** the pull: if the
+published image does not match this repo's Dockerfile/overlay inputs, the
+launcher rebuilds locally instead of launching it, so a local `BUILD=1` overlay
+build is never silently replaced. Use `SKIP_BUILD=1` when you deliberately want
+the published GHCR image.
+
 If `.env` has `SKIP_PULL=1`, override it for this restart:
 
 ```bash

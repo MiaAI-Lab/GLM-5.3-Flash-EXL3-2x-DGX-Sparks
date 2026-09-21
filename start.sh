@@ -1368,6 +1368,25 @@ ensure_image() {
         else
             worker_ok=0
         fi
+        # A pull can replace an image whose recipe stamp already matched the repo
+        # (a local BUILD=1 overlay build) with the published one, whose stamp may
+        # not match. The rebuild decision above used the pre-pull image, so
+        # re-check the stamp on the image that will actually run: a local build
+        # must not be silently discarded, and an image without this repo's recipe
+        # must not be launched (e.g. GLM53_EXL3_MOE_FAST=1 needs the patched
+        # extension only the Dockerfile build adds — the overlay fails closed at
+        # load, so the pair never becomes healthy).
+        if [ "${BUILD:-0}" != "1" ] && [ "${SKIP_BUILD:-0}" != "1" ]; then
+            local pulled_stamp
+            pulled_stamp="$(image_recipe_stamp)"
+            if [ "$pulled_stamp" != "$wanted_stamp" ]; then
+                warn "pulled ${IMAGE} recipe ${pulled_stamp:0:12} != repo ${wanted_stamp:0:12} — rebuilding from this Dockerfile"
+                build_image
+                BUILD=1
+                head_key="$(local_image_key || true)"
+                worker_ok=0
+            fi
+        fi
     elif [ "$head_ok" = "0" ]; then
         if image_from_registry && [ "$skip_pull" = "1" ]; then
             die "SKIP_PULL=1 but ${IMAGE} is not on the head"

@@ -158,6 +158,18 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   throughput and 1.18% higher cold long-C2 wall time. No universal decode
   speedup or VRAM reduction is claimed. Default remains off; see README
   for the full matrix, cache-residency limits and source-pinned receipt.
+- `start.sh`: a GHCR pull could silently replace an image whose recipe stamp
+  already matched the repo — a local `BUILD=1` overlay build — and then launch
+  the published image. `ensure_image` decided the rebuild from the image present
+  *before* the pull, so a matching local build scheduled no rebuild, and the pull
+  then swapped in the published image (different stamp, no locally compiled
+  artifacts). A config that needs the Dockerfile build then failed closed at
+  load and the pair never became healthy (reproduced with `GLM53_EXL3_MOE_FAST=1`,
+  which needs the patched extension: `GLM53_EXL3_MOE_FAST=1 requires the fused
+  exl3_moe path on an image built with overlay/patch_exl3_decode_pipeline.py`).
+  The recipe stamp is now re-checked on the image actually pulled, and the
+  launcher rebuilds from this Dockerfile when it no longer matches the repo.
+  `SKIP_BUILD=1` still keeps GHCR on purpose, unchanged.
 
 ## [1.6.0] — 2026-09-17
 

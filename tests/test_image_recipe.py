@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -50,8 +51,99 @@ def test_overlay_recipe_hash_runs() -> None:
     assert re.fullmatch(r"[0-9a-f]{64}", digest), digest
 
 
+# A pull must never silently replace an image whose recipe stamp already
+# matched the repo. ``ensure_image`` decides the rebuild from the image present
+# *before* the pull; with a locally built (BUILD=1) image the stamp matched, so
+# no rebuild was scheduled — and the pull then swapped in the published image
+# (different stamp, no locally compiled artifacts). That image was launched, and
+# a config that needs the Dockerfile build (``GLM53_EXL3_MOE_FAST=1`` requires the
+# patched extension) failed closed at load, so the pair never became healthy.
+# The stamp is therefore re-checked on the image that will actually run.
+ENSURE_IMAGE_HARNESS = """
+set -u
+STATE=__STATE__
+IMAGE=ghcr.io/example/kit:exl3-instanttensor
+LOGDIR="$STATE/logs"; mkdir -p "$LOGDIR"
+docker() { return 0; }
+log()  { printf '[log] %s\\n' "$*"; }
+warn() { printf '[warn] %s\\n' "$*"; }
+die()  { printf '[die] %s\\n' "$*"; exit 9; }
+overlay_recipe_hash() { printf 'REPOSTAMP\\n'; }
+image_recipe_stamp()  { cat "$STATE/stamp" 2>/dev/null || true; }
+build_image() { printf 'REPOSTAMP' > "$STATE/stamp"; printf 'BUILD\\n' >> "$STATE/actions"; }
+pull_image()  { printf 'PUBLISHED' > "$STATE/stamp"; printf 'PULL\\n' >> "$STATE/actions"; }
+pull_image_on_worker() { printf 'WORKERPULL\\n' >> "$STATE/actions"; return 1; }
+ship_image_to_worker() { printf 'SHIP\\n' >> "$STATE/actions"; }
+image_from_registry() { return 0; }
+local_image_key()  { printf 'headkey\\n'; }
+worker_image_key() { printf 'workerkey\\n'; }
+images_match() { [ "$1" = "$2" ]; }
+worker_ssh() { return 0; }
+worker_ok=0
+SKIP_OVERLAY_VERIFY=1
+__BODY__
+"""
+
+RUN_TAIL = """
+ensure_image
+printf 'FINAL_STAMP=%s\\n' "$(cat "$STATE/stamp")"
+printf 'ACTIONS=%s\\n' "$(tr '\\n' ',' < "$STATE/actions" 2>/dev/null)"
+"""
+
+
+def _ensure_image_body() -> str:
+    source = START.read_text()
+    begin = source.index("ensure_image() {")
+    end = source.index("adopt_complete_weights() {", begin)
+    body = source[begin:end]
+    return body[: body.rindex("}") + 1]
+
+
+def test_pull_rechecks_recipe_stamp_on_the_image_that_runs() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state = Path(raw_tmp) / "state"
+        state.mkdir()
+        # the local image is a BUILD=1 overlay build: its stamp equals the repo's
+        (state / "stamp").write_text("REPOSTAMP")
+
+        harness = (
+            ENSURE_IMAGE_HARNESS.replace("__STATE__", str(state))
+            .replace("__BODY__", _ensure_image_body())
+            + RUN_TAIL
+        )
+        result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    final = [line for line in result.stdout.splitlines() if line.startswith("FINAL_STAMP=")]
+    actions = [line for line in result.stdout.splitlines() if line.startswith("ACTIONS=")]
+    assert final == ["FINAL_STAMP=REPOSTAMP"], result.stdout
+    assert "BUILD" in actions[0], result.stdout
+    assert "not rebuilding" not in result.stdout, result.stdout
+
+
+def test_pull_recheck_respects_skip_build() -> None:
+    """``SKIP_BUILD=1`` still means "keep GHCR" — the re-check must not fight it."""
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state = Path(raw_tmp) / "state"
+        state.mkdir()
+        (state / "stamp").write_text("REPOSTAMP")
+
+        harness = (
+            ENSURE_IMAGE_HARNESS.replace("__STATE__", str(state))
+            .replace("__BODY__", _ensure_image_body())
+            + "\nSKIP_BUILD=1\n"
+            + RUN_TAIL
+        )
+        result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "FINAL_STAMP=PUBLISHED" in result.stdout, result.stdout
+
+
 if __name__ == "__main__":
     test_documented_defaults()
     test_recipe_stamp_wiring()
     test_overlay_recipe_hash_runs()
+    test_pull_rechecks_recipe_stamp_on_the_image_that_runs()
+    test_pull_recheck_respects_skip_build()
     print("image recipe tests: PASS")
