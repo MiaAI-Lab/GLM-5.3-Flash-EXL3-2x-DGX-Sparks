@@ -207,8 +207,11 @@ SOCKET_IFNAME="${SOCKET_IFNAME:-}"
 HEAD_SOCKET_IFNAME="${HEAD_SOCKET_IFNAME:-$SOCKET_IFNAME}"
 WORKER_SOCKET_IFNAME="${WORKER_SOCKET_IFNAME:-$SOCKET_IFNAME}"
 WORKER2_SOCKET_IFNAME="${WORKER2_SOCKET_IFNAME:-$SOCKET_IFNAME}"
-# The address each rank advertises for the process group. Must live on the
-# socket interface above. Empty = the rank's 10.0.0.x address.
+# VLLM_HOST_IP for each rank, including the TCP worker message queues. These
+# addresses must be mutually reachable, but need not live on SOCKET_IFNAME:
+# Gloo/NCCL bootstrap can stay on management while bulk RPC uses routed CX7.
+# Empty = the rank's HEAD_IP / WORKER_IP / WORKER2_IP address.
+# See docs/tp3-cx7-rpc.md before selecting addresses on a switchless triangle.
 HEAD_HOST_IP="${HEAD_HOST_IP:-}"
 WORKER_HOST_IP="${WORKER_HOST_IP:-}"
 WORKER2_HOST_IP="${WORKER2_HOST_IP:-}"
