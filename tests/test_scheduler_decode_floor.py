@@ -385,6 +385,102 @@ class FairTests(unittest.TestCase):
         self.p.note_scheduled(self.b, 0)
         self.assertEqual(self.p.cap_for(self.s, c), 256)
 
+    def blocked_waiter_rotation(self, max_chunks):
+        self.p = self.policy(GLM53_FAIR_PREFILL_MAX_CHUNKS=str(max_chunks),
+                             GLM53_FAIR_PREFILL_MAX_STEP_MS='2000')
+        resident = Req('resident', 30000, 10000)
+        blocked = [Req(f'blocked-{i}', 100000) for i in range(max_chunks + 3)]
+        self.s.running = [self.a, resident]
+        self.s.waiting = blocked
+        self.s.refresh()
+        self.p.last_service[resident.request_id] = self.clock() - 1
+        served = 0
+        peak_grants = 0
+        peak_reserved = 0.0
+        first_resident_cap = None
+        first_blocked_attempts = 0
+        for step in range(3):
+            self.p.begin_step(self.s)
+            counts = {'A': 8}
+            cap = self.p.cap_for(self.s, resident)
+            if step == 0:
+                first_resident_cap = cap
+            if cap > 0:
+                counts[resident.request_id] = cap
+                served += cap
+            else:
+                # The real running loop reports post-policy zero progress.
+                self.p.note_scheduled(resident, 0)
+            for request in blocked:
+                cap = self.p.cap_for(self.s, request)
+                if cap > 0:
+                    if step == 0:
+                        first_blocked_attempts += 1
+                    # Model the real post-policy KV allocation failure.
+                    self.p.note_scheduled(request, 0)
+            grants = self.p._open_rec['grants']
+            peak_grants = max(peak_grants, len(grants))
+            peak_reserved = max(peak_reserved, sum(g[1] for g in grants.values()))
+            out = self.submit(counts)
+            self.complete(out, max(0.05, counts.get(resident.request_id, 0) / 1300))
+            resident.num_computed_tokens += counts.get(resident.request_id, 0)
+            if served:
+                break
+        self.assertGreater(served, 0)
+        self.assertEqual(first_resident_cap, 0)
+        self.assertGreater(first_blocked_attempts, 0)
+        self.assertLessEqual(peak_grants, max_chunks)
+        self.assertLessEqual(peak_reserved, self.p.max_step_s + 1e-9)
+        self.assertIn(resident.request_id, self.p.last_service)
+
+    def test_blocked_waiters_cannot_starve_resident_with_max_chunks_1(self):
+        self.blocked_waiter_rotation(1)
+
+    def test_blocked_waiters_beyond_window_cannot_starve_resident_with_max_chunks_8(self):
+        self.blocked_waiter_rotation(8)
+
+    def test_failed_waiter_rotates_so_later_allocatable_waiter_is_served(self):
+        self.p = self.policy(GLM53_FAIR_PREFILL_MAX_CHUNKS='1',
+                             GLM53_FAIR_PREFILL_MAX_STEP_MS='2000')
+        resident = Req('resident', 30000, 10000)
+        blocked = Req('A-blocked-long', 100000)
+        allocatable = Req('B-allocatable-short', 1000)
+        self.s.running = [self.a, resident]
+        self.s.waiting = [blocked, allocatable]
+        self.s.refresh()
+        self.p.last_service[resident.request_id] = self.clock() - 1
+        attempts = []
+        served = set()
+        for _ in range(4):
+            self.p.begin_step(self.s)
+            counts = {'A': 8}
+            cap = self.p.cap_for(self.s, resident)
+            if cap > 0:
+                counts[resident.request_id] = cap
+            else:
+                self.p.note_scheduled(resident, 0)
+            for request in (blocked, allocatable):
+                cap = self.p.cap_for(self.s, request)
+                if cap <= 0:
+                    continue
+                attempts.append(request.request_id)
+                if request is blocked:
+                    self.p.note_scheduled(request, 0)
+                else:
+                    counts[request.request_id] = cap
+            out = self.submit(counts)
+            self.complete(out, 0.2)
+            for rid in counts:
+                if rid != 'A':
+                    served.add(rid)
+            resident.num_computed_tokens += counts.get(resident.request_id, 0)
+            allocatable.num_computed_tokens += counts.get(allocatable.request_id, 0)
+            if {'resident', 'B-allocatable-short'} <= served:
+                break
+        self.assertEqual(attempts[:2], ['A-blocked-long', 'B-allocatable-short'])
+        self.assertIn('resident', served)
+        self.assertIn('B-allocatable-short', served)
+
     def test_full_prefix_hit_is_not_blocked_as_cold_prefill(self):
         self.p.begin_step(self.s)
         self.p.credit = -10
@@ -452,16 +548,20 @@ def installation_tests():
                            Path('/tmp/sched-live.py')] if p.is_file()), None)
     if src is None:
         raise SystemExit('Set GLM53_SCHEDULER_PY_SRC to the pinned scheduler source')
-    clean = src.read_text()
-    for marker, fn in [(mod.MARK_V5, mod.unpatch_v5), (mod.MARK_V4, mod.unpatch_v4), (mod.MARK_V3, mod.unpatch_v3), (mod.MARK_V2, mod.unpatch_v2)]:
+    source_text = src.read_text()
+    if mod.MARK_V5 not in source_text and mod.MARK_V6 not in source_text:
+        raise SystemExit('Pinned source must contain the supported v5 or this v6 scheduler')
+    clean = source_text
+    for marker, fn in [(mod.MARK_V6, mod.unpatch_v6), (mod.MARK_V5, mod.unpatch_v5), (mod.MARK_V4, mod.unpatch_v4), (mod.MARK_V3, mod.unpatch_v3), (mod.MARK_V2, mod.unpatch_v2)]:
         if marker in clean:
             clean = fn(clean)
     if mod.V1_HELPER_START in clean:
         clean = mod.unpatch_v1(clean)
     with tempfile.TemporaryDirectory() as temp:
-        for version in (0, 1, 2, 3, 4):
-            text = clean
-            if version:
+        versions = (0, 1, 2, 3, 4, 5) if mod.MARK_V5 in source_text else (0, 1, 2, 3, 4, 6)
+        for version in versions:
+            text = source_text if version in (5, 6) else clean
+            if version and version not in (5, 6):
                 marker = mod.MARK if version == 1 else getattr(mod, f'MARK_V{version}')
                 helper = ('\ndef _glm53_mixed_prefill_policy(running, current):\n    return 0\n\n' if version == 1 else
                           f'\nclass _Glm53MixedPrefill:  {marker}\n    pass\n\n')
@@ -483,7 +583,7 @@ def installation_tests():
             subprocess.run([sys.executable, str(PATCH)], env=env, check=True, capture_output=True)
             installed = target.read_text()
             compile(installed, str(target), 'exec')
-            assert mod.MARK_V5 in installed and mod.MARK_V4 not in installed and mod.MARK_V3 not in installed and mod.MARK_V2 not in installed
+            assert mod.MARK_V6 in installed and mod.MARK_V5 not in installed and mod.MARK_V4 not in installed and mod.MARK_V3 not in installed and mod.MARK_V2 not in installed
             subprocess.run([sys.executable, str(PATCH)], env=env, check=True, capture_output=True)
             assert target.read_text() == installed
             # Marker alone must not suppress validation or overwrite source drift.

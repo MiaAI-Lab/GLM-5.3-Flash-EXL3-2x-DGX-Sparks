@@ -16,7 +16,7 @@ GLM53_MIXED_PREFILL_CHUNK:
                still makes sub-block progress. 128 still stalls ~10 tok/s.
   0 / off    — disable the extra isolation policy.
   fair       — service-time mixing (default on TP=2/3/4 since 2026-09-15,
-               v5). Decode-only
+               v6). Decode-only
                steps between prefill turns; at most
                GLM53_FAIR_PREFILL_MAX_CHUNKS chunks per turn (default 1).
                Only prefill that contends with a decoder is charged (solo
@@ -32,8 +32,11 @@ GLM53_MIXED_PREFILL_CHUNK:
                afterwards a 2s age override may borrow one such chunk, only
                after all shared debt is repaid. In-flight async prefill
                blocks the next mixed turn. Prefills are selected by last
-               completed positive prefill service plus round-robin. Decode
-               token/input budget is allocated first by the base scheduler.
+               completed positive prefill service plus round-robin. Fair
+               ordering is allocation-aware: a runnable candidate passed by
+               the scheduler is carried one step when a later candidate
+               fails KV allocation, preventing blocked-head reset starvation.
+               Decode token/input budget is allocated first by the base scheduler.
                Solo prefill retains the base scheduler's limits. Timing is a
                host busy-time proxy.
 
@@ -44,12 +47,13 @@ Fair knobs (read at runtime; identical on every rank):
   GLM53_FAIR_PREFILL_MAX_STEP_MS      default 2000 (estimated mixed-step limit)
   GLM53_FAIR_PREFILL_MAX_CHUNKS       default 1
 
-Versioned installer: `# [glm53-decode-floor:v5]`. v1 (no version), v2, v3
-and v4 images are unpatched then re-patched. Fail closed if anchors drift.
+Versioned installer: `# [glm53-decode-floor:v6]`. v1 (no version), v2, v3,
+v4 and v5 images are unpatched then re-patched. Fail closed if anchors drift.
 """
 from __future__ import annotations
 
 import inspect
+import hashlib
 import os
 import sys
 import time
@@ -66,6 +70,7 @@ MARK_V2 = "# [glm53-decode-floor:v2]"
 MARK_V3 = "# [glm53-decode-floor:v3]"
 MARK_V4 = "# [glm53-decode-floor:v4]"
 MARK_V5 = "# [glm53-decode-floor:v5]"
+MARK_V6 = "# [glm53-decode-floor:v6]"
 
 IMPORT_OLD = """import itertools
 import time
@@ -252,7 +257,7 @@ V3_WAITING_MAMBA_NEW = """                        num_new_tokens = self._mamba_b
                             break
 """
 
-class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
+class _Glm53MixedPrefill:  # [glm53-decode-floor:v6]
     """Bound contention using completion feedback, without synchronizing GPUs."""
 
     LADDER = (128, 256, 512, 768, 1024, 1536, 2048)
@@ -285,6 +290,8 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
         self.selected = set()
         self._candidates = []
         self._tried = set()
+        self._passed = set()
+        self._carry = set()
         self.step_mode = "solo"
         self.defer_reason = "none"
         self.missed_prefill = 0
@@ -341,7 +348,7 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
             self.max_step_s = 2.0
         if self.mode == "fair" and not self.logged_boot:
             print(
-                f"[glm53-decode-floor] fair v5 probe_chunk={self.chunk} "
+                f"[glm53-decode-floor] fair v6 probe_chunk={self.chunk} "
                 f"ladder={min(self.LADDER)}..{max(self.LADDER)} share={self.share} "
                 f"interval_s={self.interval_s} max_step_s={self.max_step_s} "
                 f"max_chunks={self.max_chunks}",
@@ -388,7 +395,8 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
         return ids
 
     def _prune(self, live):
-        for store in (self.last_service, self.arrival, self.rr_seq, self.served_tokens):
+        for store in (self.last_service, self.arrival, self.rr_seq,
+                      self.served_tokens):
             dead = [k for k in store if k not in live]
             for k in dead:
                 store.pop(k, None)
@@ -472,17 +480,31 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
             self.last_service.get(r.request_id, 0.0),
             self.rr_seq.get(r.request_id, 0), self.arrival[r.request_id], r.request_id))
 
-    def _promote_next(self):
+    def _promote_next(self, prefer_passed=False):
         grants = (self._open_rec or {}).get("grants", {})
-        for r in self._candidates:
+        candidates = self._candidates
+        if prefer_passed:
+            candidates = ([r for r in candidates if r.request_id in self._passed]
+                          + [r for r in candidates if r.request_id not in self._passed])
+        for r in candidates:
             if len(self.selected | set(grants)) >= self.max_chunks:
                 break
             if r.request_id not in self._tried:
                 self.selected.add(r.request_id)
+                if prefer_passed and r.request_id in self._passed:
+                    # Allocation failed after this request's scheduler position
+                    # had already passed. Carry it into the next step instead of
+                    # resetting to the same blocked head of the fair queue.
+                    self._carry.add(r.request_id)
 
     def _release(self, rid, reason="allocation"):
         rec = self._open_rec
         if rec is None:
+            return
+        # The running loop reports zero even when policy returned cap=0 for an
+        # unselected request. That request was passed, not attempted; keep it
+        # eligible for allocation-aware carry if a later selected request fails.
+        if rid not in self.selected and rid not in rec["grants"]:
             return
         grant = rec["grants"].pop(rid, None)
         if grant:
@@ -491,8 +513,14 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
                 rec["borrowed"] = False
         self.selected.discard(rid)
         self._tried.add(rid)
+        if reason == "zero_progress":
+            # A selected request that could not make progress rotates behind
+            # never-served peers. Credit/gap deferrals are not admissions and
+            # retain their fair rank.
+            self.rr_n += 1
+            self.rr_seq[rid] = self.rr_n
         self.defer_reason = reason
-        self._promote_next()
+        self._promote_next(prefer_passed=True)
 
     def note_scheduled(self, request, num_new_tokens):
         # Called after alignment/encoder caps; final allocation is sealed below.
@@ -513,6 +541,7 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
         if self._sched_id is not None and self._sched_id != sid:
             self.inflight.clear()
             self._open_rec = None
+            self._carry.clear()
             self.credit = 0.0
             self.in_contention = False
             self.last_account_mono = None
@@ -538,6 +567,9 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
         self._candidates = self._rank_prefills(prefills)
         self._tried = set()
         self.selected = set()
+        self._passed = set()
+        live_prefills = {r.request_id for r in prefills}
+        self._carry.intersection_update(live_prefills)
         sched._glm53_align_prefill_limit = None
         self._open_rec = {
             "step_id": int(sched.current_step), "t_submit": now,
@@ -549,6 +581,7 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
         if not decodes and not any(r["had_decode"] for r in self.inflight.values()):
             self.in_contention = False
             self.credit = 0.0
+            self._carry.clear()
         self.step_mode = "legacy" if self.mode != "fair" else "solo"
         self.defer_reason = "none"
         if self.mode != "fair" or not prefills or not decodes:
@@ -561,6 +594,11 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
             self.defer_reason = "async_inflight"
         else:
             self.step_mode = "prefill_turn"
+            for r in self._candidates:
+                if r.request_id in self._carry:
+                    self.selected.add(r.request_id)
+                    if len(self.selected) >= self.max_chunks:
+                        break
             self._promote_next()
         self._maybe_log()
 
@@ -584,8 +622,10 @@ class _Glm53MixedPrefill:  # [glm53-decode-floor:v5]
         rec = self._open_rec
         if rid in rec["grants"]:
             return rec["grants"][rid][0]
+        self._passed.add(rid)
         if self.step_mode != "prefill_turn" or rid not in self.selected:
             return 0
+        self._carry.discard(rid)
         reserved = sum(g[1] for g in rec["grants"].values())
         gap_room = max(0.0, self.max_step_s - reserved)
         age = self._now() - self.last_service.get(rid, self.arrival[rid])
@@ -738,8 +778,8 @@ def _helper_text() -> str:
     return (
         "\n"
         + body
-        + "\n_GLM53_MIXED = _Glm53MixedPrefill()  # [glm53-decode-floor:v5]\n\n"
-        + "def _glm53_mixed_prefill_policy(sched, request, computed=None):  # [glm53-decode-floor:v5]\n"
+        + "\n_GLM53_MIXED = _Glm53MixedPrefill()  # [glm53-decode-floor:v6]\n\n"
+        + "def _glm53_mixed_prefill_policy(sched, request, computed=None):  # [glm53-decode-floor:v6]\n"
         + "    return _GLM53_MIXED.cap_for(sched, request, computed)\n\n\n"
     )
 
@@ -953,7 +993,8 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
-def _strip_helper(text: str, label: str, *, expected: str | None = None) -> str:
+def _strip_helper(text: str, label: str, *, expected: str | None = None,
+                  expected_sha256: str | None = None) -> str:
     start = text.find("class _Glm53MixedPrefill:")
     if start < 0:
         raise SystemExit(f"{P}: {label} helper start not found")
@@ -965,7 +1006,11 @@ def _strip_helper(text: str, label: str, *, expected: str | None = None) -> str:
     if not candidates:
         raise SystemExit(f"{P}: {label} helper end not found")
     end = min(candidates)
-    if expected is not None and text[start:end].strip() != expected.strip():
+    actual = text[start:end].strip()
+    if expected is not None and actual != expected.strip():
+        raise SystemExit(f"{P}: {label} helper drifted")
+    if (expected_sha256 is not None
+            and hashlib.sha256(actual.encode()).hexdigest() != expected_sha256):
         raise SystemExit(f"{P}: {label} helper drifted")
     return text[:start] + text[end:]
 
@@ -1060,23 +1105,36 @@ def unpatch_v4(text: str) -> str:
 # v5 uses the same scheduler anchors as v4 with the marker advanced; the v4
 # insertions above stay frozen so a v4 image can be unpatched exactly.
 V5_PAIRS = tuple((new.replace(MARK_V4, MARK_V5), old, label) for new, old, label in V4_PAIRS)
+V5_HELPER_SHA256 = "d8009ae8ecdc9e731a8f2109f0d89a8f27140c83808674da54c0f6e30788cd5c"
 
 
 def unpatch_v5(text: str) -> str:
     for new, old, label in V5_PAIRS:
         text = replace_once(text, new, old, label)
-    text = _strip_helper(text, "v5", expected=_helper_text())
+    text = _strip_helper(text, "v5", expected_sha256=V5_HELPER_SHA256)
     if MARK_V5 in text:
         raise SystemExit(f"{P}: v5 leftover after unpatch")
     return text
 
 
-def apply_v5(text: str) -> str:
+V6_PAIRS = tuple((new.replace(MARK_V4, MARK_V6), old, label) for new, old, label in V4_PAIRS)
+
+
+def unpatch_v6(text: str) -> str:
+    for new, old, label in V6_PAIRS:
+        text = replace_once(text, new, old, label)
+    text = _strip_helper(text, "v6", expected=_helper_text())
+    if MARK_V6 in text:
+        raise SystemExit(f"{P}: v6 leftover after unpatch")
+    return text
+
+
+def apply_v6(text: str) -> str:
     if "import os\n" not in text.split("import time\n", 1)[0]:
         text = replace_once(text, IMPORT_OLD, IMPORT_NEW, "import os")
     needle = "from vllm.compilation.cuda_graph import CUDAGraphStat\n"
     text = replace_once(text, needle, _helper_text() + needle, "helper")
-    for new, old, label in V5_PAIRS:
+    for new, old, label in V6_PAIRS:
         text = replace_once(text, old, new, label)
     compile(text, str(P), "exec")
     return text
@@ -1087,22 +1145,24 @@ def main() -> int:
         raise SystemExit(f"missing {P}")
     text = P.read_text()
     original = text
-    if MARK_V5 in text:
+    if MARK_V6 in text:
         # Validate existing anchors/helper instead of trusting the marker alone.
-        # unpatch_v5 checks every v5 insertion occurs exactly once, strips the
+        # unpatch_v6 checks every v6 insertion occurs exactly once, strips the
         # helper, and rejects leftover markers. The result is discarded: a
         # later overlay may legitimately sit between the helper and the
         # cuda_graph import anchor, so re-applying at that fixed anchor would
         # relocate the helper and fail a byte-compare on a healthy file.
-        unpatch_v5(text)
+        unpatch_v6(text)
         # The import edit is part of the applied state; the byte-compare used
         # to cover it implicitly.
         if "import os\n" not in text.split("import time\n", 1)[0]:
-            raise SystemExit(f"{P}: v5 import drifted")
+            raise SystemExit(f"{P}: v6 import drifted")
         compile(text, str(P), "exec")
-        print(f"{P.name}: {MARK_V5} already present — verified")
+        print(f"{P.name}: {MARK_V6} already present - verified")
         return 0
-    if MARK_V4 in text:
+    if MARK_V5 in text:
+        text = unpatch_v5(text)
+    elif MARK_V4 in text:
         text = unpatch_v4(text)
     elif MARK_V3 in text:
         text = unpatch_v3(text)
@@ -1110,12 +1170,12 @@ def main() -> int:
         text = unpatch_v2(text)
     elif MARK in text or V1_HELPER_START in text:
         text = unpatch_v1(text)
-    text = apply_v5(text)
-    if MARK_V2 in text or MARK_V3 in text or MARK_V4 in text:
+    text = apply_v6(text)
+    if MARK_V2 in text or MARK_V3 in text or MARK_V4 in text or MARK_V5 in text:
         raise SystemExit(f"{P}: older marker left after migration")
     if text != original:
         P.write_text(text)
-    print(f"patched {P.name} ({MARK_V5})")
+    print(f"patched {P.name} ({MARK_V6})")
     return 0
 
 
