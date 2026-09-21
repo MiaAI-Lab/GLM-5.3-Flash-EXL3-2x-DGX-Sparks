@@ -625,6 +625,12 @@ before selecting a policy or a cache budget for another kit.
 If `IMAGE` is still `:exl3`, or `.env` has `SKIP_PULL=1`, you stay on the
 wheel-less image and InstantTensor will not load.
 
+A live pair that must not move when the tag does should pin the digest
+(`IMAGE=ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks@sha256:…`) and set
+`SKIP_PULL=1 SKIP_BUILD=1`. Diff a **separate** clone before cutting over —
+`git pull` on the serving checkout can rebuild from the recipe stamp.
+Optional reboot units: [examples/systemd/README.md](examples/systemd/README.md).
+
 1. Update the kit:
 
 ```bash
@@ -721,6 +727,11 @@ BUILD=1 SKIP_DOWNLOAD=1 SKIP_SYNC=1 ./start.sh restart  # force rebuild overlay 
 ./start.sh logs worker
 ./start.sh stop                # or ./stop.sh
 ```
+
+`./start.sh` exits after `/health`. Docker restart policy is **no**, so a power
+cycle does not bring the pair back. Optional systemd units that start the
+worker watcher first, then the head, then `docker wait` the containers:
+[examples/systemd/README.md](examples/systemd/README.md).
 
 Concurrent lifecycle commands on the same checkout are serialized by a `flock`
 on `logs/cluster.lock`: `start`/`restart` refuse immediately when another
@@ -1017,6 +1028,26 @@ that are now documented/enforced:
   it by well under 1 GiB and fail the startup memory check; `GPU_MEM_UTIL=0.86`
   with `MAX_MODEL_LEN=800000` (the previously published pair) fits with margin.
   If :8888 is taken on your head node, `PORT` moves the API cleanly.
+- **Cold InstantTensor after this kit's own rsync can abort before a tensor
+  is read** (`buffer_size … exceeds device memory budget`). On GB10, page
+  cache counts as used to `cudaMemGetInfo` while `MemAvailable` still passes
+  preflight (#205). Drop cache on both nodes before `docker run`. Do not raise
+  the `0.85` default; `CG_ESTIMATE=0` recovered KV on one pair. In-tree fix:
+  [PR #230](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/pull/230).
+
+## Reboot persistence (systemd)
+
+`./start.sh` is a one-shot launcher: `docker run -d` both ranks, poll `/health`,
+exit. Docker `--restart` stays off so the two ranks cannot race. Copy
+[examples/systemd](examples/systemd) to a host path, edit `env.sh` and the
+unit `User=` / paths, enable `glm53-worker.service` on rank 1 and
+`glm53-head.service` on rank 0. The head unit SSHes a `systemctl restart` of
+the worker watcher (`StrictHostKeyChecking=yes`), then runs `./start.sh`, then
+`docker wait`s the head container. `ExecStartPost` matches `/health` and
+`/v1/models` — not a log line. Allow 10–12 minutes; HTTP 200 on one pair was
+4–6 minutes after a cached power-cycle start, with DFlash2 warmup continuing
+after that. Pin `IMAGE` by digest for production. Full receipts, sudoers, and
+the #205 workaround: [examples/systemd/README.md](examples/systemd/README.md).
 
 ## .env
 
@@ -1029,7 +1060,7 @@ that are now documented/enforced:
 | `MODEL` | `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` | Hub repo into the HF cache (mirror) |
 | `MODEL_FALLBACK` | `brandonmusic/GLM-5.3-Flash-tr3-4bpw` | Used if the mirror 404s or has fewer than 120 shards |
 | `SERVED_MODEL_NAME` | `GLM-5.3-Flash-EXL3` | OpenAI `model` id (`/v1/models`) |
-| `IMAGE` | `ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3-instanttensor` | public GHCR tag with InstantTensor 0.2.0. Existing kits must pull this tag — `git pull` does not replace a leftover `:exl3` or `SKIP_PULL=1` ([Existing installs](#existing-installs-pull-the-instanttensor-image)). Rebuilt when the overlay recipe stamp drifts (`BUILD=1` forces; `SKIP_BUILD=1` keeps GHCR). `SKIP_PULL=1` skips pull. Wheel-less fallback: `:exl3` |
+| `IMAGE` | `ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3-instanttensor` | public GHCR tag with InstantTensor 0.2.0. Existing kits must pull this tag — `git pull` does not replace a leftover `:exl3` or `SKIP_PULL=1` ([Existing installs](#existing-installs-pull-the-instanttensor-image)). Rebuilt when the overlay recipe stamp drifts (`BUILD=1` forces; `SKIP_BUILD=1` keeps GHCR). `SKIP_PULL=1` skips pull. Wheel-less fallback: `:exl3`. Production pin: `IMAGE=…@sha256:<digest>` plus `SKIP_PULL=1 SKIP_BUILD=1` so a tag move cannot replace a live pair ([examples/systemd](examples/systemd/README.md)) |
 | `LOAD_FORMAT` | `instanttensor` when `IMAGE` contains `instanttensor`; else empty | `--load-format`. Direct-I/O safetensors. Explicit empty (`LOAD_FORMAT=`) restores vLLM auto. Required empty on the wheel-less `:exl3` tag |
 | `GHCR_TOKEN` / `GHCR_USER` | *(unset)* | optional login if anonymous GHCR pull is rate-limited |
 | `PORT` | `8888` | OpenAI API on the head |
@@ -1061,7 +1092,8 @@ that are now documented/enforced:
 | `MAX_NUM_SEQS` | `4` | decode batch; MTP adds k+1 tokens/seq |
 | `MAX_NUM_BATCHED_TOKENS` | `7168` | current maintainer default at `MAX_NUM_SEQS=4`. MNBT 2048 was the clean PR77 A/B configuration and the best measured balance on an independent `MAX_NUM_SEQS=16` geometry. Tune per deployment; change after a repeated same-kit comparison |
 | `MAX_MODEL_LEN` | `850000` | default context since 2026-09-07 (E3 default; 1M fits again with `EXL3_FAT_GROUPED=0`). 1M allocates on the 1.75M padded-slot-share pool. Do not drop to 256k to “free” KV — logged tokens ≈ concurrency × this cap; hybrid block-id overhead then shrinks the pool. At MNBT 7168 one 1M request needs **14.52 GiB** KV (10.98 GiB at 500k; ~7.4 GiB fixed + 7.1 GiB per 1M); the E3 recipe runs 500k |
-| `GPU_MEM_UTIL` | `0.85` | GB10 UMA budget (default lowered from 0.87 on 2026-09-07: each 0.01 is 1.2 GiB of host headroom, and long prefills need it — see *Cold prefill (E3)*). E3 at 900k / 0.85: pool ~1.05M tokens / 1.17× (0.87: 16.2 GiB / 1,051,648 tokens). Pre-E3 receipts at 1M / 0.87: 1,754,237 tokens / 18.67 GiB (MNBT 2048); 1,243,902 tokens / 1.24× (7168, rightsize, E2) |
+| `GPU_MEM_UTIL` | `0.85` | GB10 UMA budget (default lowered from 0.87 on 2026-09-07: each 0.01 is 1.2 GiB of host headroom, and long prefills need it — see *Cold prefill (E3)*). E3 at 900k / 0.85: pool ~1.05M tokens / 1.17× (0.87: 16.2 GiB / 1,051,648 tokens). Pre-E3 receipts at 1M / 0.87: 1,754,237 tokens / 18.67 GiB (MNBT 2048); 1,243,902 tokens / 1.24× (7168, rightsize, E2). InstantTensor at 850k after a full page-cache rsync can still miss KV (#204 / #205); `CG_ESTIMATE=0` plus a cache drop booted one pair — do not raise this default. Loader/hygiene: [PR #230](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/pull/230) |
+| `CG_ESTIMATE` | `1` | vLLM CUDA-graph memory estimate deducted from the KV pool. `0` keeps graphs on and returns the over-deduction (the InstantTensor 850k workaround on one pair after #205). Leave `1` unless that KV shortfall shows up |
 | `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` when unset | TP=2 `start.sh` passes the effective value to both ranks. An explicit empty value disables this option; caller exports, including empty, override `.env`. Changing allocator settings requires a restart and separate memory/connector qualification; TP=4 is unchanged |
 | `KV_CACHE_DTYPE` | `fp8` | packed `fp8_ds_mla`; not `nvfp4`, not bf16 |
 | `DEFAULT_MAX_NEW_TOKENS` | `65536` | Omitted-only output-token default (`1..1000000`) for chat and completion requests, implemented by `overlay/patch_default_max_new_tokens.py`. Explicit `max_tokens`/`max_completion_tokens` overrides this default; independent server, platform and remaining-context caps still apply. Empty preserves stock model/server defaults and caps. Does not reserve admission capacity or fix long-prefill contention; admission is chunk-based. Caller exports (including empty) override `.env`. TP=2 launcher only; `start-tp4.sh` is unchanged. |
@@ -1282,6 +1314,9 @@ gate and isolated SM121 tuning command.
 - `--kv-cache-dtype nvfp4` or bf16 (no sparse-MLA kernel)
 - `"attention_backend": "TRITON_ATTN"` in speculative-config (causal-in-block on this image)
 - Change TP / CX7 pins / `USE_HOST_NCCL` in `.env` unless you are re-plumbing NCCL. Three nodes is `./start-tp3.sh`, not `TP=3` in `.env`
+- `git pull` on the live serving checkout — recipe-stamp drift rebuilds the image under `./start.sh`. Diff a separate clone
+- Docker `--restart unless-stopped` on these containers. It races the two ranks and fights the systemd units in `examples/systemd`
+- Raise `GPU_MEM_UTIL` above `0.85` as a new default. `0.87` is a measured InstantTensor workaround, not host-headroom policy
 - Force-push
 
 ## License

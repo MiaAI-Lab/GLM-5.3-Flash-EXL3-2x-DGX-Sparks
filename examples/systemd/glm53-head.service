@@ -1,0 +1,36 @@
+# Edit User=, Group=, WorkingDirectory=, and the Exec* paths before install.
+# Docker restart policy stays off. systemd tracks `docker wait` on the head
+# container. Conflicts= any other GPU unit on this node.
+
+[Unit]
+Description=GLM 5.3 Flash EXL3 tensor-parallel API head (rank 0)
+Documentation=file:///home/spark/glm53-deploy/README.md
+Wants=network-online.target
+After=network-online.target docker.service systemd-sysctl.service swap.target
+Requires=docker.service
+# Conflicts=other-gpu.service
+StartLimitIntervalSec=2h
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=spark
+Group=spark
+SupplementaryGroups=docker
+Environment=HOME=/home/spark
+WorkingDirectory=/home/spark/glm53-deploy
+ExecStartPre=/bin/bash -lc 'test "$(cat /proc/sys/vm/swappiness)" = 0 && test -n "$(/usr/sbin/swapon --show --noheadings)"'
+ExecStartPre=/home/spark/glm53-deploy/coordinate-glm53-worker.sh
+ExecStartPre=-/usr/bin/docker rm -f glm53-exl3-head
+ExecStart=/home/spark/glm53-deploy/run-glm53-systemd.sh 0
+ExecStartPost=/home/spark/glm53-deploy/wait-glm53-health.sh
+ExecStop=-/usr/bin/docker stop --timeout 60 glm53-exl3-head
+TimeoutStartSec=35min
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

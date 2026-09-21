@@ -1,0 +1,32 @@
+# Edit User=, Group=, WorkingDirectory=, and the Exec* paths before install.
+# This unit does not run start.sh. It waits for the container the head
+# creates over SSH, then docker-wait so a worker crash is a real unit failure.
+# Restart=no: a dead rank 1 cannot recover without rank 0; the head unit
+# restarts the watcher first.
+
+[Unit]
+Description=GLM 5.3 Flash EXL3 tensor-parallel worker (rank 1)
+Documentation=file:///home/spark/glm53-deploy/README.md
+Wants=network-online.target
+After=network-online.target docker.service systemd-sysctl.service swap.target
+Requires=docker.service
+# Conflicts=other-gpu.service
+
+[Service]
+Type=simple
+User=spark
+Group=spark
+SupplementaryGroups=docker
+Environment=HOME=/home/spark
+WorkingDirectory=/home/spark/glm53-deploy
+ExecStartPre=/bin/bash -lc 'test "$(cat /proc/sys/vm/swappiness)" = 0 && test -n "$(/usr/sbin/swapon --show --noheadings)"'
+ExecStart=/home/spark/glm53-deploy/run-glm53-systemd.sh 1
+ExecStop=-/usr/bin/docker stop --timeout 60 glm53-exl3-worker
+TimeoutStartSec=35min
+TimeoutStopSec=90
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

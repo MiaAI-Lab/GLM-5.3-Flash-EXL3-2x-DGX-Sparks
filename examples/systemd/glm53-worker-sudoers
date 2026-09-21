@@ -1,0 +1,4 @@
+# Command-scoped sudo on the worker so the head can restart only this unit.
+# Install as /etc/sudoers.d/glm53-worker and replace `spark` with GLM53_USER.
+# visudo -c -f /etc/sudoers.d/glm53-worker before relying on it.
+spark ALL=(root) NOPASSWD: /usr/bin/systemctl restart glm53-worker.service

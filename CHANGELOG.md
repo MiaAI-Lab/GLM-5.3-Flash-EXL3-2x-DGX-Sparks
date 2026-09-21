@@ -11,6 +11,12 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Added
 
+- Optional systemd reboot units in `examples/systemd`: worker watcher first,
+  head runs `./start.sh` then `docker wait`, `ExecStartPost` matches HTTP
+  `/health` + `/v1/models`. Docker `--restart` stays off. Receipts from an
+  independent 2× GB10 power cycle, image-digest pinning, and an independent
+  #205 InstantTensor page-cache abort (`CG_ESTIMATE=0` + cache drop; the
+  `GPU_MEM_UTIL=0.85` default is unchanged). In-tree loader fix remains #230.
 - Experimental TP2/SM121 KDA large-M BF16 prefill path
   (`GLM53_KDA_BF16_LARGE_M`, default `0`): uses retained FP8-derived BF16
   weights for scheduled M > 512, with approximately 3.26 GiB extra retained
