@@ -1582,20 +1582,45 @@ sync_repo_marker_rev() {
     printf '%s' "$rev"
 }
 
+worker_repo_snapshot_complete() {
+    local cache_name="$1" rev="$2" label="$3"
+    local dir="${WORKER_CACHE_DIR}/hub/${cache_name}/snapshots/${rev}"
+    if [ "$label" = "DFlash2 draft" ]; then
+        worker_ssh "test -s '$dir/model.safetensors'"
+    else
+        worker_ssh "test -s '$dir/config.json' \
+            && test -s '$dir/model.safetensors.index.json' \
+            && [ \"\$(find -L '$dir' -maxdepth 1 -type f -name '*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]')\" -ge '$EXPECTED_SHARDS' ]"
+    fi
+}
+
 sync_repo_to_worker() {
     local src="$1" cache_name="$2" label="$3" preferred="${4:-}"
-    local marker rev
+    local marker rev remote_dir
     marker="${WORKER_CACHE_DIR}/hub/${cache_name}/.glm53-exl3-synced"
     rev="$(sync_repo_marker_rev "$src" "$preferred")"
+    remote_dir="${WORKER_CACHE_DIR}/hub/${cache_name}/snapshots/${rev}"
     if [ "${FORCE_SYNC:-0}" != "1" ] \
        && [ "$(worker_ssh "cat '$marker' 2>/dev/null" || true)" = "$rev" ]; then
-        log "worker ${cache_name} already at ${rev} — rsync skipped (FORCE_SYNC=1 to force)"
-        return 0
+        if worker_repo_snapshot_complete "$cache_name" "$rev" "$label"; then
+            log "worker ${cache_name} already at ${rev} — rsync skipped (FORCE_SYNC=1 to force)"
+            return 0
+        fi
+        warn "worker ${cache_name} marker matches ${rev}, but snapshot is incomplete — repairing"
     fi
     log "syncing ${label} to worker (first run moves ~164 GiB over the p2p link) ..."
     worker_ssh "mkdir -p '${WORKER_CACHE_DIR}/hub/${cache_name}'"
     rsync -a --partial --info=progress2 \
         "$src/" "${WORKER_SSH}:${WORKER_CACHE_DIR}/hub/${cache_name}/"
+    if [ "$label" = "DFlash2 draft" ] \
+       && ! worker_repo_snapshot_complete "$cache_name" "$rev" "$label"; then
+        warn "DFlash2 snapshot symlink is unreadable on worker — copying the 2.3 GiB weight by value"
+        worker_ssh "mkdir -p '$remote_dir'"
+        rsync -aL --partial --info=progress2 \
+            "$src/snapshots/$rev/model.safetensors" "${WORKER_SSH}:${remote_dir}/"
+    fi
+    worker_repo_snapshot_complete "$cache_name" "$rev" "$label" \
+        || die "synced ${label} snapshot is incomplete on worker: $remote_dir"
     worker_ssh "printf '%s' '$rev' > '$marker'"
 }
 
