@@ -104,6 +104,11 @@ in-image gate — this collector does not attest declarations against the server
 
 ### Historical serving evidence (earlier head, author-measured)
 
+An independent [2026-09-22 operator field A/B](benchmarks/fast-moe-field-ab-20260922/README.md)
+used a customized TP2 fair-prefill profile at recipe `ca85576`, not current
+`main`. Its eight matched mixed-request repetitions and two bursts are additional
+evidence, not a resolution of the slow-run reports in #227.
+
 * TheGrill A/B/A2 decode, `FAST=1` vs stock, `GLM53_DENSE_FP8=off` in both
   arms: **+4.8% to +8.4%** across all cells (structured-1 +8.3%); the A2 stock
   repeat sat within **±2.4%**.
