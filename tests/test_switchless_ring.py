@@ -106,6 +106,19 @@ class RingTests(unittest.TestCase):
         self.assertNotIn("LD_PRELOAD", r.stdout)
         self.run_script('NCCL_SWITCHLESS_RING_ONLY=0; args=(); ring_env_args args; [[ ${#args[@]} == 0 ]]')
 
+    def test_launcher_propagates_ring_env_to_all_ranks(self):
+        src = (ROOT / "start-tp4.sh").read_text(encoding="utf-8")
+        launch = src.split("launch_cluster() {", 1)[1].split("\n}", 1)[0]
+        self.assertLess(launch.index("ring_env_args nccl_common"),
+                        launch.index('for e in "${nccl_common[@]}"'))
+        worker_run = launch.split('worker_ssh_n "$r" "docker run', 1)[1].split('" >/dev/null', 1)[0]
+        head_run = launch.split('docker run -d --name "$CONTAINER_HEAD"', 1)[1]
+        self.assertIn('${worker_nccl}', worker_run)
+        self.assertIn('"${nccl_common[@]}"', head_run)
+        self.assertIn('${serve_env}', worker_run)
+        self.assertIn('EXTRA_ARGS', launch)
+        self.assertIn('-e EXTRA_ARGS=', head_run)
+
     def test_launcher_syntax(self):
         for path in (ROOT / "start-tp4.sh", ROOT / "files/switchless-ring.sh", ROOT / ".env.tp4.ring.example"):
             r = subprocess.run([BASH, "-n"], input=path.read_text(encoding="utf-8"), text=True,

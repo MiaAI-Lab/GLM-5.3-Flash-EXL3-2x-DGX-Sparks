@@ -86,6 +86,14 @@ Provenance from the DeepSeek ring PRs: NCCL commit
 
 `doctor-ring` checks the marker and that the SHA-256, image id and in-image pip
 NCCL path match on all four ranks. That is consistency, not authenticity.
+It also checks two active RoCEv2 HCA ports with nonzero GIDs **on each rank**;
+it does not prove the physical cables lead to the intended peers. Before a
+first boot or after recabling, confirm each of the four fabric links separately:
+inspect `ip -br addr` and `ip route get <adjacent-fabric-IP>` at both ends,
+then `ping -I <cable-facing-interface> <adjacent-fabric-IP>` in each direction.
+Use the site-specific fabric addresses from the operator inventory; do not
+substitute the management network. A passing doctor alone is not a topology
+or end-to-end inference test.
 
 The launcher bind-mounts that one `.so` **over** the image pip path discovered
 at preflight. It does **not** use `LD_PRELOAD` in ring mode (two NCCL runtimes
