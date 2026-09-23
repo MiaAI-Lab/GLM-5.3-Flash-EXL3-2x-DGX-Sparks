@@ -130,6 +130,14 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   shipped that local image instead of pulling the mismatched GHCR tag.
   `SKIP_BUILD=1` still keeps GHCR. Supersedes the rebuild-after-pull approach
   in #248.
+- `scripts/boot-shape-warmup.sh`: the post-`/health` sweep now fires one
+  serve-default burst at every width from 5 up to `MAX_NUM_SEQS`, instead
+  of stopping at C=4 with a warning. On a kit running `MAX_NUM_SEQS` above
+  4, a live batch that first reached width N used to take N's first
+  in-process kernel launches mid-serve (#90). The new
+  `GLM53_WARMUP_BURST_MAX` (default `MAX_NUM_SEQS`) caps the width for
+  operators who want a shorter sweep. The C≤4 arms are unchanged, so the
+  default `MAX_NUM_SEQS=4` sweep is the same 24 requests.
 - `overlay/patch_mamba_align_state_free.py`: release every superseded
   Mamba "align" state block. The manager tracked one superseded block per
   request and released it only once the processed prefix (computed minus

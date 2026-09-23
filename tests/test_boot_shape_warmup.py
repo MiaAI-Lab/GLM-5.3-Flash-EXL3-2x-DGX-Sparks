@@ -16,6 +16,11 @@ Three consumer-visible outcomes:
                 rest of the sweep still runs, exit 1 with "23/24"
   small-context a deployment that refuses the 65536 prefill (HTTP 400) still
                 warms the other 23 shapes and exits 1 — the launcher WARNs
+  wide          GLM53_WARMUP_MAX_CONCURRENCY=10 fires one C=N serve-default
+                burst for every N in 5..10 (exactly N chat requests each,
+                69 total) and no longer warns that shapes above C=4 are cold
+  capped        GLM53_WARMUP_BURST_MAX=6 at concurrency 10 stops at C=6
+                (35 total) and warns that widths above C=6 are not pre-warmed
 
 Run:  python3 tests/test_boot_shape_warmup.py   (or pytest)
 """
@@ -41,6 +46,9 @@ MODEL = "GLM-5.3-Flash-EXL3"
 RUNGS = (1, 24, 56, 120, 248, 3584, 7168, 14336, 65536)
 # 5 ladder + 4 prefill + 15 batch arms at the configured concurrency of 4.
 TOTAL = 24
+# Each width N above 4 adds one C=N burst of N chat requests.
+WIDE = 10
+CAP = 6
 # One prefill rung is enough to trip the check: the reported count is compared
 # against the requested s, so a single disagreement fails that rung only.
 MISMATCH_S = 7168
@@ -78,7 +86,12 @@ for flag in ("--data-binary", "-d"):
         break
 prompt = payload.get("prompt", "")
 words = len(prompt.split())
-record = json.dumps({"path": path, "words": words, "bytes": len(prompt),
+# Chat arms tag their prompt "[warmup <nonce> <arm>-<i>] ..."; keep the arm.
+content = "".join(m.get("content", "") for m in payload.get("messages", []))
+arm = None
+if "[warmup " in content:
+    arm = content.split("[warmup ", 1)[1].split("]", 1)[0].split(" ", 1)[1].rsplit("-", 1)[0]
+record = json.dumps({"path": path, "words": words, "bytes": len(prompt), "arm": arm,
                      "sha256": hashlib.sha256(prompt.encode()).hexdigest()}) + "\\n"
 fd = os.open(os.environ["WARMUP_FAKE_LOG"], os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
 os.write(fd, record.encode())
@@ -107,15 +120,17 @@ def ladder_prompt(n: int) -> str:
     return " ".join(["hello"] * n)
 
 
-def run(mode: str, tmp: Path) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
+def run(mode: str, tmp: Path, label: str | None = None,
+        **overrides: str) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
     """Execute the shipped script with the stub curl; return (process, records).
 
-    Allow-listed environment: only the seam and the stub's own variables.
+    Allow-listed environment: only the seam, the stub's own variables and any
+    GLM53_WARMUP_* ``overrides``. ``label`` keeps each run's log separate.
     """
     stub = tmp / "curl"
     stub.write_text(FAKE_CURL)
     stub.chmod(0o755)
-    log = tmp / f"{mode}.jsonl"
+    log = tmp / f"{label or mode}.jsonl"
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(tmp),
@@ -125,6 +140,7 @@ def run(mode: str, tmp: Path) -> tuple[subprocess.CompletedProcess[str], list[di
         "GLM53_WARMUP_MAX_CONCURRENCY": "4",
         "WARMUP_FAKE_MODE": mode,
         "WARMUP_FAKE_LOG": str(log),
+        **overrides,
     }
     done = subprocess.run(["bash", str(SCRIPT), BASE, MODEL], env=env, text=True,
                           capture_output=True, timeout=60)
@@ -157,6 +173,63 @@ def part_pass(tmp: Path) -> None:
                 wrong.append(f"{path} s={n}: {len(hits)} prompt(s), bytes={[h['bytes'] for h in hits]}")
     check(not wrong,
           f"P3 every ladder/prefill prompt reaches the API byte-exact, incl. s=65536 (wrong={wrong})")
+    wider = sorted(a for a in arm_counts(records) if burst_width(a) > 4)
+    check(not wider, f"P4 concurrency 4 fires no burst wider than C=4 (got {wider})")
+
+
+def arm_counts(records: list[dict]) -> dict[str, int]:
+    """Chat requests per warmup arm, keyed by the arm tag in the prompt."""
+    counts: dict[str, int] = {}
+    for r in records:
+        if r["path"] == "/v1/chat/completions" and r["arm"]:
+            counts[r["arm"]] = counts.get(r["arm"], 0) + 1
+    return counts
+
+
+def burst_width(arm: str) -> int:
+    """N for a "short-cN" burst arm, 0 for any other arm."""
+    m = re.fullmatch(r"short-c(\d+)", arm)
+    return int(m.group(1)) if m else 0
+
+
+def part_wide(tmp: Path) -> None:
+    total = TOTAL + sum(range(5, WIDE + 1))
+    print(f"wide: concurrency {WIDE} bursts every width 5..{WIDE}")
+    done, records = run("pass", tmp, "wide", GLM53_WARMUP_MAX_CONCURRENCY=str(WIDE))
+    check(done.returncode == 0,
+          f"W1 exit 0 (got {done.returncode}; stderr={done.stderr.strip()[:200]!r})")
+    check(summary(done.stdout) == (total, total),
+          f"W2 summary {total}/{total} requests ok (got {summary(done.stdout)})")
+    counts = arm_counts(records)
+    wrong = {n: counts.get(f"short-c{n}") for n in range(5, WIDE + 1)
+             if counts.get(f"short-c{n}") != n}
+    check(not wrong, f"W3 each C=N burst sends exactly N chat requests (width: got {wrong})")
+    check("not pre-warmed" not in done.stderr,
+          f"W4 no cold-shape warning when every width is covered (stderr={done.stderr.strip()[:200]!r})")
+
+
+def part_capped(tmp: Path) -> None:
+    total = TOTAL + sum(range(5, CAP + 1))
+    print(f"capped: GLM53_WARMUP_BURST_MAX={CAP} at concurrency {WIDE}")
+    done, records = run("pass", tmp, "capped", GLM53_WARMUP_MAX_CONCURRENCY=str(WIDE),
+                        GLM53_WARMUP_BURST_MAX=str(CAP))
+    check(done.returncode == 0,
+          f"C1 exit 0 (got {done.returncode}; stderr={done.stderr.strip()[:200]!r})")
+    check(summary(done.stdout) == (total, total),
+          f"C2 summary {total}/{total} requests ok (got {summary(done.stdout)})")
+    widths = sorted(burst_width(a) for a in arm_counts(records) if burst_width(a) > 4)
+    check(widths == list(range(5, CAP + 1)),
+          f"C3 bursts run for widths 5..{CAP} only (got {widths})")
+    check(f"above C={CAP} are not pre-warmed" in done.stderr,
+          f"C4 warns that widths above the cap are cold (stderr={done.stderr.strip()[:200]!r})")
+    # A cap above MAX_NUM_SEQS is clamped to it; a non-numeric cap falls back to it.
+    for label, cap in (("cap-high", "20"), ("cap-junk", "abc")):
+        done, records = run("pass", tmp, label, GLM53_WARMUP_MAX_CONCURRENCY=str(CAP),
+                            GLM53_WARMUP_BURST_MAX=cap)
+        widths = sorted(burst_width(a) for a in arm_counts(records) if burst_width(a) > 4)
+        check(done.returncode == 0 and widths == list(range(5, CAP + 1)),
+              f"C5 GLM53_WARMUP_BURST_MAX={cap} at concurrency {CAP} bursts 5..{CAP} "
+              f"(exit {done.returncode}, got {widths})")
 
 
 def part_mismatch(tmp: Path) -> None:
@@ -192,6 +265,8 @@ def main() -> int:
         part_pass(tmp)
         part_mismatch(tmp)
         part_small_context(tmp)
+        part_wide(tmp)
+        part_capped(tmp)
     print()
     if FAILURES:
         print(f"FAILED ({len(FAILURES)}): " + "; ".join(FAILURES))

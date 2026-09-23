@@ -14,6 +14,8 @@
 # Env:
 #   GLM53_WARMUP_REQ_TIMEOUT       per-request curl --max-time (default 240)
 #   GLM53_WARMUP_MAX_CONCURRENCY   resolved --max-num-seqs (default 4)
+#   GLM53_WARMUP_BURST_MAX         cap on burst width (default: MAX_CONCURRENCY);
+#                                  each width above 4 adds one C=N burst
 #   GLM53_WARMUP_DFLASH_K          speculative tokens (default 7)
 #   GLM53_WARMUP_TRITON_CACHE_DIR  host Triton cache (sampler postcondition)
 #   GLM53_WARMUP_BEARER / VLLM_API_KEY
@@ -32,6 +34,14 @@ case "$MAX_CONCURRENCY" in
     MAX_CONCURRENCY=4
     ;;
 esac
+BURST_MAX="${GLM53_WARMUP_BURST_MAX:-$MAX_CONCURRENCY}"
+case "$BURST_MAX" in
+  ''|*[!0-9]*|0)
+    echo "boot-shape-warmup: invalid GLM53_WARMUP_BURST_MAX=${BURST_MAX@Q}; using ${MAX_CONCURRENCY}" >&2
+    BURST_MAX=$MAX_CONCURRENCY
+    ;;
+esac
+if [ "$BURST_MAX" -gt "$MAX_CONCURRENCY" ]; then BURST_MAX=$MAX_CONCURRENCY; fi
 case "$DFLASH_K" in
   ''|*[!0-9]*) DFLASH_K=7 ;;
 esac
@@ -241,8 +251,14 @@ if [ "$MAX_CONCURRENCY" -ge 4 ]; then
   burst short-c4 4 8 serve-default
   EXPECTED_CHAT_REQUESTS=$((EXPECTED_CHAT_REQUESTS + 4))
 fi
-if [ "$MAX_CONCURRENCY" -gt 4 ]; then
-  echo "boot-shape-warmup: WARN: MAX_NUM_SEQS=${MAX_CONCURRENCY}; batch shapes above C=4 are not pre-warmed" >&2
+# Widths 5..MAX_NUM_SEQS: a live batch that first reaches width N would
+# otherwise take N's first-in-process kernel launch mid-serve (#90).
+for ((c = 5; c <= BURST_MAX; c++)); do
+  burst "short-c${c}" "$c" 8 serve-default
+  EXPECTED_CHAT_REQUESTS=$((EXPECTED_CHAT_REQUESTS + c))
+done
+if [ "$MAX_CONCURRENCY" -gt 4 ] && [ "$BURST_MAX" -lt "$MAX_CONCURRENCY" ]; then
+  echo "boot-shape-warmup: WARN: MAX_NUM_SEQS=${MAX_CONCURRENCY}; batch shapes above C=$((BURST_MAX > 4 ? BURST_MAX : 4)) are not pre-warmed (GLM53_WARMUP_BURST_MAX=${BURST_MAX})" >&2
 fi
 
 SAMPLER_POSTCOND=ok
