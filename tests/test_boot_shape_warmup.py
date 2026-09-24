@@ -17,6 +17,15 @@ Three consumer-visible outcomes:
   small-context a deployment that refuses the 65536 prefill (HTTP 400) still
                 warms the other 23 shapes and exits 1 — the launcher WARNs
 
+Degenerate-engine canary (GLM53_WARMUP_CANARY):
+
+  degenerate    every chat reply is "!!!!" and DFlash accepts nothing (#249):
+                the canary exits 3 with DEGENERATE ENGINE — the launcher fails
+  zero-accept   replies look fine but DFlash accepted 0 drafted tokens over the
+                sweep: exit 3 on the acceptance check alone
+  canary-off    the degenerate server with GLM53_WARMUP_CANARY=0 keeps the old
+                behaviour (exit 0, no canary verdict)
+
 Run:  python3 tests/test_boot_shape_warmup.py   (or pytest)
 """
 
@@ -56,6 +65,10 @@ Modes (WARMUP_FAKE_MODE):
   pass          report {"count": <prompt words>} as the tokenizer would
   mismatch      over-report one prefill rung's token count
   small-context refuse the oversized prefill with the deployment's limit
+  degenerate    chat replies are "!!!!" and DFlash never accepts a draft
+  zero-accept   chat replies are fine but DFlash never accepts a draft
+/metrics is a counter file next to the log: every scrape reports 100 more
+drafted tokens, and 40 more accepted ones unless the mode says 0.
 """
 import hashlib
 import json
@@ -84,7 +97,17 @@ fd = os.open(os.environ["WARMUP_FAKE_LOG"], os.O_WRONLY | os.O_APPEND | os.O_CRE
 os.write(fd, record.encode())
 os.close(fd)
 mode = os.environ["WARMUP_FAKE_MODE"]
-if path == "/tokenize":
+if path == "/metrics":
+    counter = os.environ["WARMUP_FAKE_LOG"] + ".scrapes"
+    n = int(open(counter).read()) + 1 if os.path.exists(counter) else 1
+    open(counter, "w").write(str(n))
+    accepted = 0 if mode in ("degenerate", "zero-accept") else 40 * n
+    print('vllm:spec_decode_num_draft_tokens_total{engine="0",model_name="m"} %d' % (100 * n))
+    print('vllm:spec_decode_num_accepted_tokens_total{engine="0",model_name="m"} %d' % accepted)
+elif path == "/v1/chat/completions":
+    content = "!!!!!!!!!!!!!!!!" if mode == "degenerate" else "OK"
+    print(json.dumps({"choices": [{"message": {"role": "assistant", "content": content}}]}))
+elif path == "/tokenize":
     if mode == "mismatch" and words == 7168:
         words += 1
     print(json.dumps({"count": words}))
@@ -107,15 +130,17 @@ def ladder_prompt(n: int) -> str:
     return " ".join(["hello"] * n)
 
 
-def run(mode: str, tmp: Path) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
+def run(mode: str, tmp: Path, label: str | None = None,
+        **overrides: str) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
     """Execute the shipped script with the stub curl; return (process, records).
 
-    Allow-listed environment: only the seam and the stub's own variables.
+    Allow-listed environment: only the seam, the stub's own variables and any
+    GLM53_WARMUP_* ``overrides``. ``label`` keeps each run's log separate.
     """
     stub = tmp / "curl"
     stub.write_text(FAKE_CURL)
     stub.chmod(0o755)
-    log = tmp / f"{mode}.jsonl"
+    log = tmp / f"{label or mode}.jsonl"
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(tmp),
@@ -125,6 +150,7 @@ def run(mode: str, tmp: Path) -> tuple[subprocess.CompletedProcess[str], list[di
         "GLM53_WARMUP_MAX_CONCURRENCY": "4",
         "WARMUP_FAKE_MODE": mode,
         "WARMUP_FAKE_LOG": str(log),
+        **overrides,
     }
     done = subprocess.run(["bash", str(SCRIPT), BASE, MODEL], env=env, text=True,
                           capture_output=True, timeout=60)
@@ -148,6 +174,8 @@ def part_pass(tmp: Path) -> None:
           f"P1 exit 0 (got {done.returncode}; stderr={done.stderr.strip()[:200]!r})")
     check(summary(done.stdout) == (TOTAL, TOTAL),
           f"P2 summary {TOTAL}/{TOTAL} requests ok (got {summary(done.stdout)})")
+    check("canary: DFlash accepted 40/100 drafted tokens" in done.stdout,
+          f"PC canary reports the sweep's draft acceptance (stdout tail={done.stdout.strip()[-160:]!r})")
     wrong = []
     for n in RUNGS:
         want = hashlib.sha256(ladder_prompt(n).encode()).hexdigest()
@@ -183,6 +211,43 @@ def part_small_context(tmp: Path) -> None:
     check(not missing, f"S4 the shapes the deployment does hold are still warmed (missing={missing})")
 
 
+def part_degenerate(tmp: Path) -> None:
+    print("degenerate: garbage replies and zero DFlash acceptance (#249)")
+    done, _ = run("degenerate", tmp)
+    check(done.returncode == 3, f"D1 exit 3 (got {done.returncode})")
+    check("DEGENERATE ENGINE" in done.stderr and "content:" in done.stderr and "acceptance: 0/100" in done.stderr,
+          f"D2 stderr names both failed checks (stderr={done.stderr.strip()[:240]!r})")
+    check("may JIT mid-serve" not in done.stderr,
+          f"D3 not misreported as missing JIT coverage (stderr={done.stderr.strip()[:160]!r})")
+
+
+def part_zero_accept(tmp: Path) -> None:
+    print("zero-accept: sane replies, but DFlash accepted nothing")
+    done, _ = run("zero-accept", tmp)
+    check(done.returncode == 3, f"Z1 exit 3 (got {done.returncode})")
+    check("acceptance: 0/100" in done.stderr and "content:" not in done.stderr,
+          f"Z2 only the acceptance check fires (stderr={done.stderr.strip()[:200]!r})")
+
+
+def part_canary_off(tmp: Path) -> None:
+    print("canary-off: GLM53_WARMUP_CANARY=0 keeps the pre-canary behaviour")
+    done, _ = run("degenerate", tmp, "canary-off", GLM53_WARMUP_CANARY="0")
+    check(done.returncode == 0, f"O1 exit 0 (got {done.returncode}; stderr={done.stderr.strip()[:160]!r})")
+    check("canary:" not in done.stdout and "DEGENERATE" not in done.stderr, "O2 no canary verdict")
+
+
+def part_launchers(_tmp: Path) -> None:
+    """Static: every launcher turns warmup rc 3 into log collection, a stop, and a failed start."""
+    print("launchers: rc 3 from the warmup stops the kit and fails the start")
+    for name, stop in (("start.sh", "stop_containers"), ("start-tp3.sh", "stop"), ("start-tp4.sh", "stop")):
+        text = (ROOT / name).read_text()
+        body = text.split("post_ready_warmup() {", 1)[1].split("\n}\n", 1)[0]
+        branch = body.split('if [ "$rc" = "3" ]; then', 1)[1].split("fi", 1)[0] if 'if [ "$rc" = "3" ]; then' in body else ""
+        order = [branch.find(k) for k in ("collect_failure_logs", f"\n        {stop} ", "die ")]
+        check("|| rc=$?" in body and all(i >= 0 for i in order) and order == sorted(order),
+              f"L1 {name}: rc captured under set -e, then collect -> {stop} -> die (positions={order})")
+
+
 def main() -> int:
     if not SCRIPT.is_file():
         raise SystemExit(f"missing {SCRIPT}")
@@ -190,6 +255,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
         part_pass(tmp)
+        part_degenerate(tmp)
+        part_zero_accept(tmp)
+        part_canary_off(tmp)
+        part_launchers(tmp)
         part_mismatch(tmp)
         part_small_context(tmp)
     print()

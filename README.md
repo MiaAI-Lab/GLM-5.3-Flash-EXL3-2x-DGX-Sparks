@@ -1130,7 +1130,7 @@ SPEC_METHOD=mtp ./start.sh restart      # MTP k=2
    HF cache read-only over NFSv4 on ConnectX; otherwise `rsync` a full copy to
    `${WORKER_HOME}/.cache/huggingface`
 5. Start rank 1 `--headless` on the worker, rank 0 + API on the head
-6. Poll `/health` (weight load + warmup is slow; `READY_TIMEOUT` default 3600s), then a **nonfatal** DFlash2/sampler shape sweep so the first client is not the first JIT on TP=2. `GLM53_BOOT_SHAPE_WARMUP=0` skips it.
+6. Poll `/health` (weight load + warmup is slow; `READY_TIMEOUT` default 3600s), then a **nonfatal** DFlash2/sampler shape sweep so the first client is not the first JIT on TP=2. `GLM53_BOOT_SHAPE_WARMUP=0` skips it. The sweep doubles as a correctness canary: if the engine answers `/health` but its temperature-0 "Reply with OK." comes back as something else, or DFlash accepts zero drafted tokens over the whole sweep (the #249 signature), the start collects logs, stops the containers and **fails** instead of announcing READY — start again. `GLM53_WARMUP_CANARY=0` turns only the canary off.
 
 The worker does not need GHCR access — start.sh pulls there when it can, otherwise it ships a single-platform tar over SSH.
 
@@ -1511,6 +1511,7 @@ that are now documented/enforced:
 | `GLM53_SPINWAIT_MS` | `stock` | SpinCondition reader busy-loop window. `stock` preserves vLLM's 1 s default; `1..1000` selects milliseconds. A frozen TP=2 sweep selected `16` (+0.95% median decode vs stock, 85.3% less active EngineCore CPU) |
 | `GLM53_BOOT_SHAPE_WARMUP` | `1` | after `/health`, burn DFlash2 BLOCK / sampler / kpool shapes (nonfatal) |
 | `TRITON_HOST_CACHE` / `TILELANG_HOST_CACHE` | `$CACHE_ROOT/triton` / `tilelang` | persist JIT caches across container recreate |
+| `GLM53_WARMUP_CANARY` | `1` | during the post-`/health` shape sweep (`GLM53_BOOT_SHAPE_WARMUP`), fail the start if the engine is degenerate: c1 "Reply with OK." at temperature 0 must say OK, and DFlash must accept >0 of ≥64 drafted tokens. `0` = off |
 | `NFS_SHARE` | `0` in `.env.example`; this kit's `.env` is `1` | `1` = workers mount the head's HF cache over NFSv4 instead of an rsync copy — see [Sharing weights from the head](#sharing-weights-from-the-head-nfs_share1). TP=3 inherits `.env` unless `.env.tp3` overrides |
 | `NFS_SERVER_IP_<rank>` | *(autodetect)* | head ConnectX address that rank mounts; a `10.0.0.x` result is refused |
 | `LANGUAGE_MODEL_ONLY` | `0` | load vision tower (image + video) |
