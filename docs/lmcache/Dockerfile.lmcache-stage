@@ -1,0 +1,5 @@
+FROM glm53-sm121:base
+COPY lmc-patch4889.py /tmp/lmc-patch4889.py
+COPY lmc-fix-perlayer.py /tmp/lmc-fix-perlayer.py
+COPY lmc-exclude-scratch.py /tmp/lmc-exclude-scratch.py
+RUN python3 /tmp/lmc-patch4889.py && python3 /tmp/lmc-fix-perlayer.py  && python3 /tmp/lmc-exclude-scratch.py  && python3 -c "import ast;ast.parse(open(\"/usr/local/lib/python3.12/dist-packages/lmcache/integration/vllm/kv_cache_groups.py\").read());print(\"lmcache patches syntax OK\")"

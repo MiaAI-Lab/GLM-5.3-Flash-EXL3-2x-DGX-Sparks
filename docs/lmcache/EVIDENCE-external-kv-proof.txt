@@ -1,0 +1,45 @@
+
+=== wait for health=200 ===
+UP 12:43:40
+
+=== dev/cache route mounted? ===
+  /reset_prefix_cache -> 200
+
+=== STEP 1: prime (APC fills + external store) ===
+PRIME prompt=34411 wall=5.9s
+  srv l1_write=lmcache_mp_l1_write_chunks_total 34.0 lookup_req=121856.0
+  ext_hits=100349.0
+
+=== STEP 2: reset vLLM APC (reset_external=false -> LMCache data RETAINED) ===
+{"success":false}
+  srv L2 files still present: 38
+  ext_hits before resend=100349.0
+
+=== STEP 3: resend identical prompt (APC cold -> hit must be EXTERNAL) ===
+RESEND prompt=34411 wall=3.7s
+
+=== RESULT ===
+  EXT_HITS=132605.0
+  srv lookup_req=154112.0 hit=143360.0 l1_read=lmcache_mp_l1_read_chunks_total 43.0
+
+=== server traces ===
+LMCTRACE2 KEY0 hash=b6d08efb5f97b1ee model=/root/.cache/huggingface/hub/models--Mia-AiLa kvrank=33554944 group=0
+LMCTRACE2 L2DEC skip_l2=False has_l2=True l1_hit_chunks=0 boundary=0 remaining=18
+LMCTRACE RESULT found_count=15 num_chunks=18 stride=1
+LMCTRACE RESULT found_count=0 num_chunks=0 stride=1
+LMCTRACE RESULT found_count=0 num_chunks=0 stride=1
+LMCTRACE RESULT found_count=0 num_chunks=0 stride=1
+LMCTRACE2 PFOLD nkeys=9 nchunks=9 stride=1 l1_present=0 absent=0
+LMCTRACE2 KEY0 hash=f692d44f704732fe model=/root/.cache/huggingface/hub/models--Mia-AiLa kvrank=33554944 group=0
+LMCTRACE2 L2DEC skip_l2=False has_l2=True l1_hit_chunks=0 boundary=0 remaining=9
+LMCTRACE RESULT found_count=9 num_chunks=9 stride=1
+LMCTRACE2 PFOLD nkeys=9 nchunks=9 stride=1 l1_present=0 absent=0
+LMCTRACE2 KEY0 hash=f692d44f704732fe model=/root/.cache/huggingface/hub/models--Mia-AiLa kvrank=33554944 group=0
+LMCTRACE2 L2DEC skip_l2=False has_l2=True l1_hit_chunks=0 boundary=0 remaining=9
+LMCTRACE RESULT found_count=9 num_chunks=9 stride=1
+
+=== VERDICT ===
+  external_prefix_cache_hits_total = 132605.0
+  server lookup_req / hit_tokens   = 154112.0 / 143360.0
+  ==> EXTERNAL KV REUSE PROVEN
+  ==> connector consulted LMCache: YES
