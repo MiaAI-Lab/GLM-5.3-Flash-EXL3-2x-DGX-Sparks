@@ -11,6 +11,62 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Added
 
+- Auto/lazy safetensors staging (`GLM53_LOAD_CLONE=1`) and optional bounded
+  local-shard read-ahead (`GLM53_LOAD_PREFETCH=0`, decimal `0..16`) on TP2/TP3/TP4.
+  Preserve InstantTensor selection, rank parity, PR230 safety and compact-draft
+  settings. The shard window is not a host-memory limit; GPU loader performance
+  and KV-capacity gains are not established for this combined candidate.
+  Motivated by [Alexbob0's mmap-load measurements](https://github.com/Alexbob0/glm53-flash-vllm-upstream-sm121/blob/bc3891aed74a1f4ccd679e5205ab9bd2605cf283/README.md).
+- `examples/tp2-long-coding.env`: the maintainer's TP=2 long-coding profile
+  (262k context, two sequences, 1,024-token prefill batches) with each
+  default-off option it enables, its measured benefit, and its cost. Not
+  sourced automatically; defaults are unchanged.
+- Compact DFlash2 KV pages (`GLM53_DRAFT_KV_COMPACT`): derive a
+  page-fitting divisor of the MLA block to reduce draft block-ID demand
+  without changing precision or backing allocations. Now ON by default under
+  `SPEC_METHOD=dflash` (the default method) and OFF otherwise, so
+  `SPEC_METHOD=mtp`/`none` is unaffected; the default applies only when the
+  variable is unset — an explicit `0` opts out and an explicitly empty value
+  is rejected at launch (was: default `0` everywhere).
+  Reject padded-page kernel splitting during backend setup. DFlash-only:
+  an allocator preflight on every grouping path verifies the method and
+  matching draft-layer count before exact-fit or padded selection.
+  TP2/TP3/TP4 launchers independently reject `1` unless `SPEC_METHOD=dflash`.
+  Under `1`,
+  `overlay/patch_hybrid_prefix_hit.py` looks
+  the DFlash drafter group up ending exactly at the reconciled prefix
+  boundary instead of requiring one complete draft block past it
+  (`# [glm53-dflash-boundary-lookup-v1]`), so a same-prompt reuse whose tail
+  is shorter than the draft block no longer loses one MLA page to the replay
+  clamp; DFlash context KV is a per-position projection of the target hidden
+  state, so no lookahead block is needed. At `9a3aca4`, 61 focused CPU
+  tests pass without skips. Fresh custom TP2 OFF/ON/OFF qualification
+  completed 153 requests, 90 correct reference answers and three rollover
+  checks without preemptions or safety stops. Repeat TTFT was 30.46% lower
+  versus mean OFF; prose and C2 throughput were lower, not universally faster.
+  The prefix overlay migrates the stock image's legacy hybrid-apc
+  coordinator form (with or without the published replay stage) to the
+  current verification form before installing the boundary lookup; the
+  result is byte-identical to a pristine install for either flag value.
+  Before writing, the overlay verifies that every owned stage (helpers,
+  EAGLE narrowing, v3 hybrid-min verification, replay init/clamp, boundary
+  init/lookup/verification) is present exactly once in its supported form;
+  a stale stage marker, a partial stage, edited verification logic, a
+  duplicated stage, a competing module binding for an owned helper, or
+  unrecognized legacy drift exits non-zero with the file untouched.
+  At `9a3aca4`, stock installation succeeded, but full stock qualification
+  was incomplete: automatic-budget OFF could not fit the configured 850k
+  context; automatic-budget ON answered the 814,571-token cold prompt but
+  recorded two preemptions in that group; the repeat was not completed.
+  A separate fixed-14-GiB comparison hit preemption, memory-floor
+  and OFF sequence-reference stops; failed runs are retained. Default remains
+  off. TP=4 GPU execution and tensor-level numerical parity remain
+  unqualified. A 2026-09-23 TP=3 boot on this kit, with the flag set on all
+  three ranks, selected the derived 640-token padded page (MLA block 2560,
+  not the TP=2 896) and logged boundary lookup on drafter group 6. That is
+  geometry confirmation, not the TP=2 reservation or repeat-TTFT result.
+  `.env.tp3.example` documents the opt-in and leaves it commented.
+  See README for both profiles, receipt hash, baseline drift and limitations.
 - Experimental TP2/SM121 KDA large-M BF16 prefill path
   (`GLM53_KDA_BF16_LARGE_M`, default `0`): uses retained FP8-derived BF16
   weights for scheduled M > 512, with approximately 3.26 GiB extra retained
@@ -61,6 +117,27 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Changed
 
+- Correct hybrid APC checkpoint alignment to use the resolved scheduler LCM
+  (3584 in the tested layout), rather than the minimum group's 64-token size,
+  while retaining bounded small-step progress and the hash-grain prompt tail.
+  Apply the scheduler EAGLE backoff only when a participating non-SWA group
+  needs it: SWA-only drafting preserves the last full target checkpoint under
+  production 7168-token grants; no-SWA MTP retains upstream behavior. The
+  extra prefill step versus improved short-suffix hits has unmeasured GPU cost.
+- Limit the partial-hit capability veto to prefix-participating groups:
+  nonparticipating KpoolTail scratch no longer blocks compatible target states.
+  No unsafe SWA exemption is introduced; incompatible participating SWA still vetoes.
+  Preserve a reusable preceding coarse checkpoint before larger draft replay
+  backoff, require four fresh prompt tokens for Kpool scratch, and retain SWA
+  retention policy. `PREFIX_MATCH_UNIT` stays empty by default; explicit `64` is
+  supported for the tested geometry. CPU real-function metadata/composition
+  checks are not GPU state/logit parity or TTFT measurements; GPU qualification
+  remains outstanding. Reproduction uses the Dockerfile-pinned source probe
+  described in [README](README.md#reproduce-the-pinned-source-cpu-probe).
+  The four-token Kpool replay floor remains conservative and kernel-unverified;
+  coarse-only lookup can lose a whole page within three tokens of a boundary.
+- TP3/TP4 now preserve an explicitly exported `LOAD_FORMAT=` through shared and
+  topology env files, so callers can select auto without changing loader defaults.
 - Repinned the cooperative-MoE profile generators' `overlay/exl3.py` digest
   (`extensions/cooperative_moe/prepare_profile.py` and
   `extensions/cooperative_moe/tp3/prepare_profile.py`) after reviewing the
@@ -72,6 +149,57 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 - Repinned those generators again after the KDA large-M path gained the
   TP3-local `[8726x4096]` shape. With `GLM53_KDA_BF16_LARGE_M` unset the
   module still takes the existing Marlin/base paths.
+
+### Fixed
+
+- `start.sh`, `start-tp3.sh`, and `start-tp4.sh`: a GHCR pull could replace a
+  local image whose recipe stamp already matched the repo, then launch the
+  published image (no locally compiled artifacts; `GLM53_EXL3_MOE_FAST=1`
+  then fails closed at load). The pull is now held aside and adopted only
+  when its stamp matches too. A mismatch restores the local tag and does not
+  rebuild, so a later restart does not build on every boot. Workers are
+  shipped that local image instead of pulling the mismatched GHCR tag.
+  `SKIP_BUILD=1` still keeps GHCR. Supersedes the rebuild-after-pull approach
+  in #248.
+- `overlay/patch_mamba_align_state_free.py`: release every superseded
+  Mamba "align" state block. The manager tracked one superseded block per
+  request and released it only once the processed prefix (computed minus
+  in-flight) had passed it; with async scheduling and chunks larger than the
+  Mamba block the tracker was overwritten first and the block stayed
+  referenced for the request's lifetime, accumulating throughout long
+  prefills despite bounded live-state needs. Superseded indices are now
+  a bounded per-request list released under the unchanged predicate.
+  `MambaSpec.max_memory_usage_bytes`
+  reserves `1 + max_concurrent_batches + num_speculative_blocks` pages in
+  align mode (10 here, was 9), matching the resident peak.
+- `overlay/patch_mamba_align_chunking.py` is the sole owner of Mamba checkpoint
+  alignment and EAGLE back-off. Use the resolved scheduler LCM rather than the
+  drafter's smaller page, preserve smaller private Mamba state boundaries, and
+  let positive sub-page grants progress without changing decode-floor policy.
+  Back off only for participating non-SWA EAGLE groups. Migrate the retained
+  alignment overlay without stacking a second scheduler implementation.
+- Exclude nonparticipating scratch groups from fine-hit capability checks.
+  Preserve compact DFlash boundary lookup while reserving four fresh Kpool
+  tokens and retrying the preceding shared checkpoint when a partial target
+  hit lacks a reusable drafter window. Existing PR238 GPU receipts below do
+  not qualify these additional fine-grained APC changes.
+- Under `GLM53_DRAFT_KV_COMPACT=1`, the DFlash drafter manager drops the
+  extra EAGLE lookahead block from each retained window; the KV-capacity
+  log costs the boundary lookup accordingly (`lookup=boundary`). The
+  logger migrates only the exact published prior helper revision and
+  refuses unknown edits without overwriting them.
+- Follow-up qualification of these fixes: 53 focused CPU tests passed
+  without skips, plus source composition and native CLI checks on both
+  supported images. The custom OFF/ON/OFF matrix, stock ON full workload
+  and fixed regression holdout completed 500 requests, 140 reference
+  answers and four rollover checks without preemptions or safety stops.
+  Stock ON completed both 814,571-token cold and repeated prompts; stock
+  OFF still cannot fit the unchanged defaults (13.56 GiB required versus
+  10.77 GiB available). The initial approximately 3.3% prose/long-C2
+  regressions are retained; the fixed holdout measured 0.93% lower prose
+  throughput and 1.18% higher cold long-C2 wall time. No universal decode
+  speedup or VRAM reduction is claimed. Default remains off; see README
+  for the full matrix, cache-residency limits and source-pinned receipt.
 
 ## [1.6.0] — 2026-09-17
 

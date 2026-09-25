@@ -249,9 +249,12 @@ TOOLCHOICE_PATCH_HOST="${TOOLCHOICE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_tool_c
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 CACHE_RESET_PATCH_HOST="${CACHE_RESET_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_cache_reset.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
+MAMBA_STATE_PATCH_HOST="${MAMBA_STATE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mamba_align_state_free.py}"
+MAMBA_CHUNK_PATCH_HOST="${MAMBA_CHUNK_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mamba_align_chunking.py}"
 SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
 ADAPTIVE_K_PATCH_HOST="${ADAPTIVE_K_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_adaptive_k.py}"
 DENSE_FP8_PATCH_HOST="${DENSE_FP8_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_dense_fp8.py}"
+LOADCLONE_PATCH_HOST="${LOADCLONE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_loadclone.py}"
 DEFAULT_TOKENS_PATCH_HOST="${DEFAULT_TOKENS_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_default_max_new_tokens.py}"
 EXL3_OVERLAY_HOST="${EXL3_OVERLAY_HOST:-$SCRIPT_DIR/overlay/exl3.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
@@ -265,6 +268,9 @@ if [ -z "${LOAD_FORMAT+x}" ]; then
     esac
 fi
 PREFIX_MATCH_UNIT="${PREFIX_MATCH_UNIT:-}"
+# Unset-only defaults: an explicit empty is rejected before restart stops ranks.
+GLM53_LOAD_CLONE="${GLM53_LOAD_CLONE-1}"
+GLM53_LOAD_PREFETCH="${GLM53_LOAD_PREFETCH-0}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
 SKIP_MM_PROFILING="${SKIP_MM_PROFILING:-1}"
@@ -437,6 +443,16 @@ GLM53_APC_NO_STORE="${GLM53_APC_NO_STORE-1}"
 # explicitly empty value is an operator error and validate_numeric_config
 # rejects it rather than guessing a serving mode.
 GLM53_INDEXER_WORKSPACE="${GLM53_INDEXER_WORKSPACE-rightsize}"
+# Larger draft KV pages; no weight or cache precision changes. Default ON for
+# the DFlash drafter (the default spec method), OFF for mtp/none. Like
+# GLM53_INDEXER_WORKSPACE, the default applies only when UNSET: an explicit 0
+# opts out, and an explicitly empty value is an operator error that
+# validate_numeric_config rejects rather than guessing a serving mode.
+if [ "$SPEC_METHOD" = "dflash" ]; then
+    GLM53_DRAFT_KV_COMPACT="${GLM53_DRAFT_KV_COMPACT-1}"
+else
+    GLM53_DRAFT_KV_COMPACT="${GLM53_DRAFT_KV_COMPACT-0}"
+fi
 # SpinCondition reader busy-loop window. "stock" preserves vLLM's 1 s default;
 # 1..1000 selects milliseconds. The frozen TP=2 sweep selected 16 ms.
 GLM53_SPINWAIT_MS="${GLM53_SPINWAIT_MS-stock}"
@@ -661,6 +677,14 @@ validate_numeric_config() {
     _glm53_canonical_positive_int MAX_MODEL_LEN "$MAX_MODEL_LEN" 1000000 || return
     _glm53_canonical_positive_int MAX_NUM_SEQS "$MAX_NUM_SEQS" 4096 || return
     _glm53_canonical_positive_int MAX_NUM_BATCHED_TOKENS "$MAX_NUM_BATCHED_TOKENS" 8388608 || return
+    _glm53_validate_enum GLM53_LOAD_CLONE "${GLM53_LOAD_CLONE-1}" 0 1 || return
+    local load_prefetch="${GLM53_LOAD_PREFETCH-0}"
+    if ! [[ "$load_prefetch" =~ ^0*([0-9]|1[0-6])$ ]]; then
+        echo "GLM53_LOAD_PREFETCH must be a base-10 integer between 0 and 16" >&2
+        return 2
+    fi
+    while [ "${load_prefetch#0}" != "$load_prefetch" ]; do load_prefetch="${load_prefetch#0}"; done
+    GLM53_LOAD_PREFETCH="${load_prefetch:-0}"
     if [ -n "${LONG_PREFILL_TOKEN_THRESHOLD:-}" ]; then
         _glm53_canonical_positive_int LONG_PREFILL_TOKEN_THRESHOLD \
             "$LONG_PREFILL_TOKEN_THRESHOLD" "$MAX_NUM_BATCHED_TOKENS" || return
@@ -673,6 +697,13 @@ validate_numeric_config() {
     fi
     _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-rightsize}" \
         stock rightsize || return
+    _glm53_validate_bool_flag GLM53_DRAFT_KV_COMPACT "${GLM53_DRAFT_KV_COMPACT-0}" || return
+    if [ "${GLM53_DRAFT_KV_COMPACT-0}" = "1" ] && [ "$SPEC_METHOD" != "dflash" ]; then
+        # Compact draft pages switch the prefix-cache coordinator to a
+        # DFlash-only boundary lookup; the allocator also refuses them in-container.
+        echo "GLM53_DRAFT_KV_COMPACT=1 requires SPEC_METHOD=dflash (got: $SPEC_METHOD)" >&2
+        return 2
+    fi
     _glm53_validate_bool_flag GLM53_EXL3_MOE_FAST "${GLM53_EXL3_MOE_FAST-0}" || return
     _glm53_validate_bool_flag GLM53_KDA_BF16_LARGE_M "${GLM53_KDA_BF16_LARGE_M-0}" || return
     _glm53_validate_spinwait_ms || return
@@ -748,9 +779,12 @@ validate_overlay_artifacts() {
         "$TOOLCHOICE_PATCH_HOST|[glm53-tool-choice-none]|$main_guard"
         "$XGRAMMAR_PATCH_HOST|vllm/v1/structured_output/|$main_guard"
         "$KPOOL_TAIL_PATCH_HOST|[glm53-kpool-tail-slotmap]|$main_guard"
+        "$MAMBA_STATE_PATCH_HOST|[glm53-mamba-align-state-free-v1]|$main_guard"
+        "$MAMBA_CHUNK_PATCH_HOST|[glm53-mamba-align-chunking-v1]|$main_guard"
         "$SPINWAIT_PATCH_HOST|device_communicators/shm_broadcast.py|$main_guard"
         "$ADAPTIVE_K_PATCH_HOST|[glm53-adaptive-k]|$main_guard"
         "$DENSE_FP8_PATCH_HOST|[glm53-dense-fp8]|$main_guard"
+        "$LOADCLONE_PATCH_HOST|[glm53-loadclone:v2]|    main()"
         "$DEFAULT_TOKENS_PATCH_HOST|[glm53-default-max-new-tokens]|    raise SystemExit(main(sys.argv))"
         "$CACHE_RESET_PATCH_HOST|# [glm53-cache-reset]|$main_guard"
         "$SCRIPT_DIR/overlay/patch_ablit.py|$ablit_marker|    main()"
@@ -1024,6 +1058,27 @@ preflight_memory() {
     fi
     echo "PREFLIGHT OK [$label]: MemAvailable=${available_gib}/${total_gib} GiB; request=${requested_gib} GiB plus ${headroom_gib} GiB headroom"
 }
+# GLM53 InstantTensor KV-fit note (begin)
+# The direct-I/O loader leaves ~4.4-5.6 GiB less for the KV pool than vLLM auto on a 2x GB10
+# kit (measured 12.4-12.5 GiB available vs 13.56 GiB needed for one 850k request; #204). At the
+# stock share with no explicit pool size the engine refuses to boot, ~5-9 minutes in. Say so up
+# front. Diagnostic only: nothing here changes a value, and vLLM still makes the real decision.
+preflight_instanttensor_kv_note() {
+    local load_format="$1" max_model_len="$2" util="$3" extra_args="$4"
+    [ "$load_format" = "instanttensor" ] || return 0
+    [[ "$max_model_len" =~ ^[0-9]+$ ]] && [ "$max_model_len" -ge 850000 ] || return 0
+    [[ "$util" =~ ^(0([.][0-9]+)?|[.][0-9]+|1([.]0+)?)$ ]] || return 0
+    # Portability hardening (#242): pin C for this comparison so an ambient comma-decimal
+    # LC_NUMERIC cannot move the cut, whatever the installed awk does with `-v` numbers.
+    LC_ALL=C awk -v u="$util" 'BEGIN { exit !(u <= 0.85) }' || return 0
+    local _tok
+    # shellcheck disable=SC2086
+    for _tok in $extra_args; do
+        case "$_tok" in --kv-cache-memory-bytes|--kv-cache-memory-bytes=*) return 0 ;; esac
+    done
+    warn "NOTE: LOAD_FORMAT=instanttensor at MAX_MODEL_LEN=${max_model_len} with GPU_MEM_UTIL=${util} has been measured NOT to boot on 2x GB10 (KV needs 13.56 GiB, ~12.4 available); add --kv-cache-memory-bytes 15032385536 to EXTRA_ARGS, keeping any flags already there (see .env.example), or set LOAD_FORMAT= (slower load). #204"
+}
+# GLM53 InstantTensor KV-fit note (end)
 # GLM53 preflight memory guard (end)
 
 trap 'warn "interrupted — containers keep running ('"'"'./start.sh logs'"'"' to watch, '"'"'./start.sh stop'"'"' to stop)"; exit 130' INT
@@ -1106,6 +1161,7 @@ preflight() {
     read -r worker_total worker_available <<< "$worker_mem"
     preflight_memory head "$head_total" "$head_available" "$GPU_MEM_UTIL" || return
     preflight_memory worker "$worker_total" "$worker_available" "$GPU_MEM_UTIL" || return
+    preflight_instanttensor_kv_note "${LOAD_FORMAT:-}" "${MAX_MODEL_LEN:-}" "${GPU_MEM_UTIL:-}" "${EXTRA_ARGS:-}"
 
     [ -f "$STOP_PATCH_HOST" ] || die "$STOP_PATCH_HOST missing"
     [ -f "$SCHED_PATCH_HOST" ] || die "$SCHED_PATCH_HOST missing"
@@ -1118,9 +1174,12 @@ preflight() {
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "$XGRAMMAR_PATCH_HOST missing"
     [ -f "$CACHE_RESET_PATCH_HOST" ] || die "$CACHE_RESET_PATCH_HOST missing"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "$KPOOL_TAIL_PATCH_HOST missing"
+    [ -f "$MAMBA_STATE_PATCH_HOST" ] || die "$MAMBA_STATE_PATCH_HOST missing"
+    [ -f "$MAMBA_CHUNK_PATCH_HOST" ] || die "$MAMBA_CHUNK_PATCH_HOST missing"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "$SPINWAIT_PATCH_HOST missing"
     [ -f "$ADAPTIVE_K_PATCH_HOST" ] || die "$ADAPTIVE_K_PATCH_HOST missing"
     [ -f "$DENSE_FP8_PATCH_HOST" ] || die "$DENSE_FP8_PATCH_HOST missing"
+    [ -f "$LOADCLONE_PATCH_HOST" ] || die "$LOADCLONE_PATCH_HOST missing"
     [ -f "$DEFAULT_TOKENS_PATCH_HOST" ] || die "$DEFAULT_TOKENS_PATCH_HOST missing"
     [ -f "$EXL3_OVERLAY_HOST" ] || die "$EXL3_OVERLAY_HOST missing"
     [ -f "$SCRIPT_DIR/overlay/patch_ablit.py" ] || die "$SCRIPT_DIR/overlay/patch_ablit.py missing"
@@ -1280,6 +1339,49 @@ ship_image_to_worker() {
     docker save "$IMAGE" | worker_ssh docker load
 }
 
+# Pull $IMAGE without letting a different published recipe replace a local
+# image whose stamp already matches this repo. The local tag is held, the
+# pull is adopted only when its stamp matches too (same recipe, newer
+# layers), and a mismatch restores the hold. No rebuild. SKIP_BUILD=1 and a
+# missing or already-different local stamp keep the plain pull.
+# Sets PULL_KEPT_LOCAL=1 when the local tag was restored.
+pull_image_keeping_repo_stamp() {
+    local wanted="$1"
+    local have="${2-}"
+    PULL_KEPT_LOCAL=0
+    if [ "${SKIP_BUILD:-0}" = "1" ] || [ -z "$have" ] || [ "$have" != "$wanted" ]; then
+        pull_image
+        return 0
+    fi
+    local hold="glm53-recipe-hold-$$-${RANDOM}"
+    local keep_id="" pulled_id="" pulled_stamp=""
+    docker tag "$IMAGE" "$hold" || die "could not hold ${IMAGE} before pull"
+    keep_id="$(docker image inspect -f '{{.Id}}' "$hold" 2>/dev/null || true)"
+    login_ghcr_if_token
+    log "pulling ${IMAGE} (local recipe ${have:0:12} held until the pulled stamp is checked) ..."
+    if ! docker pull "$IMAGE"; then
+        docker tag "$hold" "$IMAGE" >/dev/null 2>&1 || true
+        docker rmi "$hold" >/dev/null 2>&1 || true
+        die "docker pull ${IMAGE} failed.
+  :exl3-instanttensor is a public GHCR package — check network / disk.
+  If you still get 401/403: echo YOUR_PAT | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
+  Overlay rebuild: BUILD=1 ./start.sh. Recipe-stamp drift also rebuilds; SKIP_BUILD=1 keeps GHCR."
+    fi
+    pulled_stamp="$(image_recipe_stamp)"
+    pulled_id="$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
+    if [ "$pulled_stamp" = "$wanted" ]; then
+        docker rmi "$hold" >/dev/null 2>&1 || true
+        return 0
+    fi
+    docker tag "$hold" "$IMAGE" || die "could not restore ${IMAGE} after rejecting a mismatched pull"
+    docker rmi "$hold" >/dev/null 2>&1 || true
+    if [ -n "$pulled_id" ] && [ "$pulled_id" != "$keep_id" ]; then
+        docker rmi "$pulled_id" >/dev/null 2>&1 || true
+    fi
+    PULL_KEPT_LOCAL=1
+    warn "pulled ${IMAGE} recipe ${pulled_stamp:0:12} != repo ${wanted:0:12} — kept the local image"
+}
+
 ensure_image() {
     mkdir -p "$LOGDIR"
     local head_ok=0 worker_ok=0 head_key="" worker_key=""
@@ -1318,7 +1420,7 @@ ensure_image() {
         worker_ok=0
     elif image_from_registry && [ "$skip_pull" != "1" ]; then
         local before_key="$head_key"
-        pull_image
+        pull_image_keeping_repo_stamp "$wanted_stamp" "$have_stamp"
         head_key="$(local_image_key || true)"
         head_ok=1
         if [ "$head_key" != "$before_key" ]; then
@@ -1343,7 +1445,7 @@ ensure_image() {
     if [ "${SKIP_SHIP:-0}" = "1" ]; then
         [ "$worker_ok" = "1" ] || warn "SKIP_SHIP=1 — not copying ${IMAGE} to the worker"
     elif [ "$worker_ok" = "0" ]; then
-        if image_from_registry && [ "$skip_pull" != "1" ] && [ "${BUILD:-0}" != "1" ]; then
+        if image_from_registry && [ "$skip_pull" != "1" ] && [ "${BUILD:-0}" != "1" ] && [ "${PULL_KEPT_LOCAL:-0}" != "1" ]; then
             if pull_image_on_worker; then
                 worker_key="$(worker_image_key || true)"
                 if images_match "$head_key" "$worker_key"; then
@@ -1611,10 +1713,12 @@ GLM53_OVERLAY_ORDER=(
     patch_glm_video_placeholders.py
     patch_suppress_stops_in_reasoning.py
     patch_scheduler_decode_floor.py
+    patch_mamba_align_chunking.py
     patch_glm5_drafter_group.py
     patch_hybrid_prefix_hit.py
     patch_apc_per_group_retention.py
     patch_apc_no_store.py
+    patch_mamba_align_state_free.py
     patch_kv_capacity_log.py
     patch_tool_choice_none.py
     patch_xgrammar_termination.py
@@ -1622,6 +1726,7 @@ GLM53_OVERLAY_ORDER=(
     patch_spinwait.py
     patch_adaptive_k.py
     patch_dense_fp8.py
+    patch_loadclone.py
     patch_default_max_new_tokens.py
     patch_indexer_workspace.py
     patch_cache_reset.py
@@ -1870,8 +1975,14 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$CACHE_RESET_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_cache_reset.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
+    [ -f "$MAMBA_STATE_PATCH_HOST" ] || die "missing $MAMBA_STATE_PATCH_HOST"
+    scp -q -o BatchMode=yes "$MAMBA_STATE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mamba_align_state_free.py"
+    [ -f "$MAMBA_CHUNK_PATCH_HOST" ] || die "missing $MAMBA_CHUNK_PATCH_HOST"
+    scp -q -o BatchMode=yes "$MAMBA_CHUNK_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mamba_align_chunking.py"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "missing $SPINWAIT_PATCH_HOST"
     scp -q -o BatchMode=yes "$SPINWAIT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_spinwait.py"
+    [ -f "$LOADCLONE_PATCH_HOST" ] || die "missing $LOADCLONE_PATCH_HOST"
+    scp -q -o BatchMode=yes "$LOADCLONE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_loadclone.py"
     [ -f "$ADAPTIVE_K_PATCH_HOST" ] || die "missing $ADAPTIVE_K_PATCH_HOST"
     scp -q -o BatchMode=yes "$ADAPTIVE_K_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_adaptive_k.py"
     [ -f "$DENSE_FP8_PATCH_HOST" ] || die "missing $DENSE_FP8_PATCH_HOST"
@@ -1914,6 +2025,7 @@ launch_cluster() {
         -e "GLM53_EXPOSE_CACHE_RESET=$GLM53_EXPOSE_CACHE_RESET"
         -e "GLM53_DEFAULT_REASONING_EFFORT=${GLM53_DEFAULT_REASONING_EFFORT-}"
         -e "GLM53_INDEXER_WORKSPACE=$GLM53_INDEXER_WORKSPACE"
+        -e "GLM53_DRAFT_KV_COMPACT=$GLM53_DRAFT_KV_COMPACT"
         -e "GLM53_SPINWAIT_MS=$GLM53_SPINWAIT_MS"
         -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
         -e "TILELANG_CACHE_DIR=$TILELANG_CACHE_DIR"
@@ -1978,6 +2090,7 @@ launch_cluster() {
              MAX_MODEL_LEN GPU_MEM_UTIL MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS \
              LONG_PREFILL_TOKEN_THRESHOLD \
              KV_CACHE_DTYPE LOAD_FORMAT PREFIX_MATCH_UNIT MTP_TOKENS SPEC_METHOD DFLASH_TOKENS DFLASH_MODEL_DIR \
+             GLM53_LOAD_CLONE GLM53_LOAD_PREFETCH \
              DFLASH_DRAFT_TP \
              LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING \
              MM_IMAGE_TOKENS VIDEO_NUM_FRAMES MM_PROCESSOR_CACHE_GB \
@@ -2069,7 +2182,10 @@ launch_cluster() {
         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
         -v '/tmp/patch_cache_reset.py:/opt/glm53/patch_cache_reset.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
+        -v '/tmp/patch_mamba_align_state_free.py:/opt/glm53/patch_mamba_align_state_free.py:ro' \
+        -v '/tmp/patch_mamba_align_chunking.py:/opt/glm53/patch_mamba_align_chunking.py:ro' \
         -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
+        -v '/tmp/patch_loadclone.py:/opt/glm53/patch_loadclone.py:ro' \
         -v '/tmp/patch_adaptive_k.py:/opt/glm53/patch_adaptive_k.py:ro' \
         -v '/tmp/patch_dense_fp8.py:/opt/glm53/patch_dense_fp8.py:ro' \
         -v '/tmp/patch_default_max_new_tokens.py:/opt/glm53/patch_default_max_new_tokens.py:ro' \
@@ -2110,7 +2226,10 @@ launch_cluster() {
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$CACHE_RESET_PATCH_HOST:/opt/glm53/patch_cache_reset.py:ro" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
+        -v "$MAMBA_STATE_PATCH_HOST:/opt/glm53/patch_mamba_align_state_free.py:ro" \
+        -v "$MAMBA_CHUNK_PATCH_HOST:/opt/glm53/patch_mamba_align_chunking.py:ro" \
         -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
+        -v "$LOADCLONE_PATCH_HOST:/opt/glm53/patch_loadclone.py:ro" \
         -v "$ADAPTIVE_K_PATCH_HOST:/opt/glm53/patch_adaptive_k.py:ro" \
         -v "$DENSE_FP8_PATCH_HOST:/opt/glm53/patch_dense_fp8.py:ro" \
         -v "$DEFAULT_TOKENS_PATCH_HOST:/opt/glm53/patch_default_max_new_tokens.py:ro" \
@@ -2136,6 +2255,8 @@ launch_cluster() {
         -e LONG_PREFILL_TOKEN_THRESHOLD="${LONG_PREFILL_TOKEN_THRESHOLD:-}" \
         -e KV_CACHE_DTYPE="$KV_CACHE_DTYPE" \
         -e LOAD_FORMAT="${LOAD_FORMAT:-}" \
+        -e GLM53_LOAD_CLONE="$GLM53_LOAD_CLONE" \
+        -e GLM53_LOAD_PREFETCH="$GLM53_LOAD_PREFETCH" \
         -e PREFIX_MATCH_UNIT="${PREFIX_MATCH_UNIT:-}" \
         -e MTP_TOKENS="$MTP_TOKENS" \
         -e SPEC_METHOD="$SPEC_METHOD" \

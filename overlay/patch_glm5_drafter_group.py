@@ -1,95 +1,39 @@
 #!/usr/bin/env python3
-"""
-patch_glm5_drafter_group.py -- teach the GLM-5-Next KV layout about the
-DFlash2 drafter's SlidingWindowSpec layers.
+"""Add a DFlash2 SlidingWindowSpec group to the GLM-5-Next KV layout.
 
-Edits vllm/v1/core/kv_cache_utils.py IN PLACE (build-time, inside the
-radixark/vllm-glm53-flash sm121 image).
+Draft layers share MLA tensors at disjoint block ids, like Mamba groups.
+An exact-fit draft page can use the ordinary contiguous view. Otherwise,
+pad the draft page to the MLA page size; the default manager block is 64.
 
-PROBLEM
--------
-`_get_kv_cache_groups_glm5_next` returns None the moment any non-mamba /
-non-tail spec is not exactly MLAAttentionSpec. The DFlash2 drafter registers 5
-plain SlidingWindowSpec layers, so the whole model drops to the generic
-uniform-page path -- which provably cannot serve GLM-5.3-Flash: page
-unification rescales the kpool tail's block away from its pool size and boot
-dies at warmup's `assert tail_kv_cache.shape[2] == pool_size` (see
-~/lane1_fail6.log / ~/lane1_fail7.log on Reddie).
+GLM53_DRAFT_KV_COMPACT=1 selects the largest 64-token-multiple divisor of
+the MLA block that fits its physical page. This reduces draft block-id
+demand without increasing prefix-cache alignment or changing cache dtype,
+window length, tensor allocation, or the target's groups. Default: 0.
+Compact pages are DFlash-only: a preflight at get_kv_cache_groups (every
+grouping path, before exact-fit or padded selection) requires that all
+sliding-window layers are the DFlash drafter's (speculative method plus
+draft layer count), else boot fails. Under the flag,
+patch_hybrid_prefix_hit.py looks the drafter group up ending exactly at the
+reconciled prefix boundary, which relies on DFlash's per-position context KV.
 
-DESIGN
-------
-Keep the GLM-5-Next fast path bit-for-bit identical for the base model and
-extend it with ONE extra group for the drafter, appended LAST (existing group
-ids stay stable). Two modes, decided from the geometry:
-
-  EXACT FIT (preferred; both deployed geometries land here): rescale the
-  drafter's block size so its REAL page equals the MLA page exactly
-  (block = mla_page // drafter_bytes_per_token), and let drafter layer i
-  co-own MLA tensor i (`shared_by`) at disjoint block ids from the one shared
-  BlockPool -- like mamba. The per-block byte cost of the pool is UNCHANGED,
-  so KV capacity stays at the base model's; the sliding window bounds the
-  drafter to a handful of block ids per request.
-
-  CRITICAL, learned from boot 8 (~/lane1_fail8.log): `page_size_padded` is
-  INVALID when the backend splits a large manager block into smaller kernel
-  blocks (FlashInfer picked kernel 64 for a 2304-token manager; the strided
-  path applied the full per-page stride to each KERNEL block -> OOB). Safe
-  when manager block == kernel block (64): one kernel block per page, stride
-  is the MLA page, view stays inside the page.
-
-  Exact fit (no padding) is gated on:
-    - mla_page divisible by the drafter's bytes/token;
-    - fit block divisible by 64;
-    - fit block and MLA block divide one another;
-    - at most as many drafter layers as MLA tensors to ride in.
-  656 B MLA vs 4096 B/token DFlash2 only exact-fits at MLA block 16384+.
-
-  PADDED SLOT-SHARE (this geometry): compact manager block 64 +
-  page_size_padded=mla_page. Drafter layer i co-owns MLA tensor i at
-  disjoint window-bounded block ids (~49/req), like mamba. Per-block pool
-  bytes unchanged. LCM(3584, 64)=3584.
-
-  STANDALONE tensors (last resort): only if there are more drafter layers
-  than MLA tensors to ride.
-
-`_glm5_next_tensor_layout` detects the drafter group (uniform SWA) and
-returns it as a 9th tuple element; the three consumers stay in lock-step:
-  - `get_kv_cache_config_from_groups`: draft_page == mla_page (exact-fit or
-    padded slot-share) -> drafter layer i joins MLA tensor i's shared_by;
-    else standalone tensors + per-block cost;
-  - `_pool_bytes_per_block`: standalone drafter pages only;
-  - `_max_memory_usage_bytes_from_groups`: charges the drafter's window-
-    bounded block-id demand at the per-block byte sum.
-
-Runner-side audit (no edits needed there):
-  - init_attn_backend builds per-group AttentionGroups generically; the
-    drafter group's UniformTypeKVCacheSpecs unwraps to the per-layer SWA
-    spec; prepare_kernel_block_sizes may pick a smaller kernel block --
-    fine, both modes reshape through the contiguous path.
-  - _reshape_kv_cache: num_blocks = raw.numel() // page_size_bytes is the
-    pool's num_blocks in both modes (exact fit: the MLA tensor divided by
-    mla_page; standalone: the compact tensor divided by draft_page).
-  - _kv_first_layers_sharing_pool_with_mamba: blocks-first SWA backends
-    report block_dim 0, so no page-aligned restride is triggered; the
-    exact-fit contiguous view is already page-aligned per manager block.
-  - Scheduler: generate_scheduler_kv_cache_config unwraps the group to a
-    SlidingWindowSpec -> SlidingWindowManager; HybridKVCacheCoordinator's
-    verify_and_split handles an extra participating spec group generically.
-  - Speculator (dflash2): set_attn calls init_attn_backend with
-    active_layer_names=draft layers; the drafter group id indexes
-    BlockTables.input_block_tables generically.
+Padded pages cannot be virtually split into smaller kernel blocks: their
+physical stride applies once per manager block. Patch worker/utils.py to
+reject unsupported backends during kernel selection, before allocation.
+An exact-fit, unpadded page remains splittable.
 
 Usage:
     python3 patch_glm5_drafter_group.py [--kv-file PATH] [--dry-run]
 
-Idempotent: re-running on an already-patched file is a no-op (exit 0).
-Fails loudly (AssertionError, nonzero exit) if any anchor is missing.
+The worker file is resolved beside core/kv_cache_utils.py, in worker/utils.py.
+Both files are preflighted before either is written; the guard is written
+first. Reapplying is a no-op. Source drift fails before writing.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+from pathlib import Path
 import sys
 
 DEFAULT_KV_FILE = (
@@ -157,12 +101,8 @@ EDIT_GROUPS_RETURN_NEW = """\
 
     # Drafter group (DFLASH2-DRAFTER-GROUP): one extra group for the spec-
     # decode drafter's SlidingWindowSpec layers, appended LAST so existing
-    # group ids stay stable. NEVER page_size_padded: a padded spec routes the
-    # runner into the strided-view reshape, which is invalid when the backend
-    # virtually splits the manager block into smaller kernel blocks (boot 8:
-    # FlashInfer picked kernel block 64 for a 2304-token manager block and
-    # the per-KERNEL-block page stride blew past the tensor). Both modes
-    # below use the ordinary contiguous reshape, valid under any split.
+    # group ids stay stable. Exact-fit pages permit virtual splitting;
+    # padded pages require matching manager and kernel block sizes.
     draft_group = None
     if draft_specs:
         any_draft = next(iter(draft_specs.values()))
@@ -311,8 +251,8 @@ EDIT_LAYOUT_VALIDATE_NEW = """\
         return None
     if draft_group is not None:
         # DFLASH2-DRAFTER-GROUP: one uniform page across drafter layers.
-        # Padded slot-share (page_size_padded=mla_page, block=64) is valid
-        # because manager==kernel so the strided view does not split a page.
+        # Padded slot-sharing requires an unsplit manager block;
+        # worker-side kernel selection checks the actual backend.
         # page == mla_page means slot-sharing of the MLA tensors
         # (needs one tensor per drafter layer); any other page means
         # standalone drafter tensors.
@@ -634,10 +574,7 @@ EDITS: list[tuple[str, str, str]] = [
 ]
 
 
-def patch_file(path: str, dry_run: bool = False) -> int:
-    with open(path, "r", encoding="utf-8") as f:
-        text = f.read()
-
+def _prepare_group(text: str, path: str) -> str:
     if MARKER in text:
         v4_old = (
             "        if any(s.page_size_padded is not None for s in draft_inner.values()):\n"
@@ -645,8 +582,8 @@ def patch_file(path: str, dry_run: bool = False) -> int:
         )
         v4_new = (
             "        if any(s.page_size_padded is not None for s in draft_inner.values()):\n"
-            "            # Padded slot-share: manager block 64 so the kernel does not\n"
-            "            # split the page (boot 8 OOB was kernel 64 in a 2304 manager).\n"
+            "            # Padded pages require an unsplit manager block;\n"
+            "            # worker-side kernel selection checks the backend.\n"
             "            if any(\n"
             "                s.block_size != 64 or s.page_size_padded != mla_page\n"
             "                for s in draft_inner.values()\n"
@@ -656,30 +593,11 @@ def patch_file(path: str, dry_run: bool = False) -> int:
         v3_marker = "padded slot-share block=%d"
         if v4_old in text:
             text = text.replace(v4_old, v4_new, 1)
-            try:
-                ast.parse(text, filename=path)
-            except SyntaxError as e:
-                raise AssertionError(
-                    f"POST-EDIT ast.parse FAILED for {path}: {e}"
-                ) from e
             if v3_marker in text:
-                if dry_run:
-                    print(f"[patch_glm5_drafter_group] DRY RUN -- {path} not written.")
-                else:
-                    with open(path, "w", encoding="utf-8") as f:
-                        f.write(text)
-                print(
-                    f"[patch_glm5_drafter_group] {path}: padded slot-share v4 "
-                    "(allow padded draft in glm5 layout) applied."
-                )
-                return 0
+                return text
             # v3 grouping not yet present; keep going with mutated text.
         elif v3_marker in text:
-            print(
-                f"[patch_glm5_drafter_group] {path}: already patched "
-                f"({MARKER} + padded slot-share); no-op."
-            )
-            return 0
+            return text
 
         new_padded = (
             "            # PADDED SLOT-SHARE: 656 vs 4096 cannot exact-fill on this MLA\n"
@@ -720,21 +638,7 @@ def patch_file(path: str, dry_run: bool = False) -> int:
                     "locate standalone block for padded slot-share v3"
                 )
             text = text[:start] + new_padded + text[end:]
-            try:
-                ast.parse(text, filename=path)
-            except SyntaxError as e:
-                raise AssertionError(
-                    f"POST-EDIT ast.parse FAILED for {path}: {e}"
-                ) from e
-            if dry_run:
-                print(f"[patch_glm5_drafter_group] DRY RUN -- {path} not written.")
-            else:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(text)
-            print(
-                f"[patch_glm5_drafter_group] {path}: padded slot-share v3 applied."
-            )
-            return 0
+            return text
 
         # v2: shrink standalone DFlash pages off the 1152 MLA manager block.
         old_standalone = (
@@ -750,22 +654,7 @@ def patch_file(path: str, dry_run: bool = False) -> int:
                 "compact-64, nor keep-as-is standalone block found"
             )
         text = text.replace(old_standalone, new_padded, 1)
-        try:
-            ast.parse(text, filename=path)
-        except SyntaxError as e:
-            raise AssertionError(
-                f"POST-EDIT ast.parse FAILED for {path}: {e}"
-            ) from e
-        if dry_run:
-            print(f"[patch_glm5_drafter_group] DRY RUN -- {path} not written.")
-        else:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(text)
-        print(
-            f"[patch_glm5_drafter_group] {path}: padded slot-share v3 applied "
-            "(from keep-as-is)."
-        )
-        return 0
+        return text
 
     # Sanity: the file we expect (guards against pointing at the wrong tree).
     for required in (
@@ -776,11 +665,9 @@ def patch_file(path: str, dry_run: bool = False) -> int:
         "UniformTypeKVCacheSpecs",
     ):
         assert required in text, (
-            f"ANCHOR PRECHECK FAILED: {required!r} not found in {path} -- "
-            "is this really vllm/v1/core/kv_cache_utils.py?"
+            f"ANCHOR PRECHECK FAILED: {required!r} not found in kv_cache_utils.py"
         )
 
-    applied = []
     for name, anchor, replacement in EDITS:
         n = text.count(anchor)
         assert n == 1, (
@@ -789,29 +676,188 @@ def patch_file(path: str, dry_run: bool = False) -> int:
             f"before building.\n--- anchor ---\n{anchor}\n--------------"
         )
         text = text.replace(anchor, replacement, 1)
-        applied.append(name)
 
-    # The patched source must still be valid Python.
-    try:
-        ast.parse(text, filename=path)
-    except SyntaxError as e:
-        raise AssertionError(f"POST-EDIT ast.parse FAILED for {path}: {e}") from e
+    return text
 
-    if dry_run:
-        print(f"[patch_glm5_drafter_group] DRY RUN -- {path} not written.")
-    else:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(text)
 
-    print(f"[patch_glm5_drafter_group] {path}: {len(applied)} edits applied:")
-    for name in applied:
-        print(f"  - {name}")
-    print("[patch_glm5_drafter_group] ast.parse OK.")
+COMPACT_BLOCK_HELPER = '''\
+def _glm53_draft_kv_compact(vllm_config, kv_cache_spec) -> bool:
+    """GLM53_DRAFT_KV_COMPACT preflight; runs on every grouping path.
+
+    Compact pages are DFlash-only: under the flag the prefix-cache
+    coordinator verifies the drafter's window ending exactly at the
+    reconciled boundary, which is valid only because DFlash context KV at a
+    position depends on nothing after that position. So with the flag on,
+    every exact SlidingWindowSpec layer must be positively a DFlash draft
+    layer (speculative method plus one layer per draft decoder layer), or
+    boot fails before any group, exact-fit or padded, is chosen.
+    """
+    mode = os.environ.get("GLM53_DRAFT_KV_COMPACT", "0")
+    if mode not in ("0", "1"):
+        raise ValueError("GLM53_DRAFT_KV_COMPACT must be 0 or 1")
+    if mode == "0":
+        return False
+    swa_layers = sum(type(s) is SlidingWindowSpec for s in kv_cache_spec.values())
+    spec_config = vllm_config.speculative_config
+    if swa_layers and (
+        spec_config is None
+        or not spec_config.use_dflash()
+        or swa_layers != spec_config.draft_model_config.hf_config.num_hidden_layers
+    ):
+        raise ValueError(
+            "GLM53_DRAFT_KV_COMPACT=1 requires the DFlash drafter to own "
+            "every sliding-window layer"
+        )
+    return True
+
+
+def _glm53_draft_block_size(
+    mla_block: int, mla_page: int, bytes_per_token: int, compact: bool
+) -> int:
+    """Largest 64-token-multiple divisor of the MLA block whose page fits.
+
+    Dividing the MLA block keeps the prefix-cache alignment (the LCM) at the
+    MLA block; fitting the page keeps the padded strided view inside its own
+    slot; a 64-multiple satisfies every kernel block size the SWA backends
+    accept here (prepare_kernel_block_sizes rejects a split padded page). A
+    larger block cuts block-id demand: a request holds
+    cdiv(window - 1 + in_flight, block) + 1 live ids and a cached boundary
+    keeps cdiv(window - 1, block) ids. Off keeps the 64-token page.
+    """
+    if not compact:
+        return 64
+    if (
+        mla_block <= 0 or mla_block % 64
+        or bytes_per_token <= 0 or mla_page < 64 * bytes_per_token
+    ):
+        raise ValueError("DFlash2 compact KV requires a 64-token page that fits MLA")
+    limit = min(mla_block, mla_page // bytes_per_token)
+    for block in range(limit // 64 * 64, 0, -64):
+        if mla_block % block == 0:
+            return block
+    raise AssertionError("64 must divide the validated MLA block")
+
+
+'''
+
+COMPACT_SELECTION_OLD = """\
+            # PADDED SLOT-SHARE: 656 vs 4096 cannot exact-fill on this MLA
+            # block. Manager 64 matches the SWA kernel, so padding the page
+            # to mla_page is a safe strided view (boot 8 OOB was kernel 64
+            # inside a 2304-token manager). Layer i co-owns MLA tensor i.
+            compact_block = 64
+"""
+COMPACT_SELECTION_NEW = """\
+            # Layer i shares MLA tensor i at disjoint block ids. Padded
+            # pages must not be split; prepare_kernel_block_sizes checks
+            # the actual attention backends before any cache is allocated.
+            # The DFlash-only preflight already ran at get_kv_cache_groups.
+            compact_block = _glm53_draft_block_size(
+                mla_block,
+                mla_page,
+                draft_bytes_per_token,
+                _glm53_draft_kv_compact(vllm_config, kv_cache_spec),
+            )
+"""
+COMPACT_PREFLIGHT_OLD = """\
+        The generated KVCacheGroups
+    \"\"\"
+    if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+        unify_hybrid_kv_cache_specs(kv_cache_spec)
+"""
+COMPACT_PREFLIGHT_NEW = """\
+        The generated KVCacheGroups
+    \"\"\"
+    # Fail closed before any grouping path (uniform, DeepseekV4, GLM-5-Next,
+    # generic) can build a sliding-window group the coordinator would treat
+    # as a DFlash drafter under GLM53_DRAFT_KV_COMPACT=1.
+    _glm53_draft_kv_compact(vllm_config, kv_cache_spec)
+    if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+        unify_hybrid_kv_cache_specs(kv_cache_spec)
+"""
+COMPACT_VALIDATION_OLD = """\
+                s.block_size != 64 or s.page_size_padded != mla_page
+"""
+COMPACT_VALIDATION_NEW = """\
+                s.block_size <= 0 or s.block_size % 64
+                or attn_uniform.block_size % s.block_size
+                or s.page_size_padded != mla_page
+                or s.real_page_size_bytes > mla_page
+"""
+KERNEL_GUARD_OLD = """\
+            selected_kernel_size = select_common_block_size(
+                kv_manager_block_size, group_backends
+            )
+            kernel_block_sizes.append(selected_kernel_size)
+"""
+KERNEL_GUARD_NEW = """\
+            selected_kernel_size = select_common_block_size(
+                kv_manager_block_size, group_backends
+            )
+            # A padded page has one physical stride per manager block.
+            # Splitting it applies that stride to each kernel block (OOB).
+            if (
+                type(kv_cache_spec) is SlidingWindowSpec
+                and kv_cache_spec.page_size_padded is not None
+                and selected_kernel_size != kv_manager_block_size
+            ):
+                raise ValueError(
+                    "DFlash2 padded KV pages cannot be split: "
+                    f"manager block {kv_manager_block_size}, "
+                    f"kernel block {selected_kernel_size}. "
+                    "Use a backend supporting the full manager block "
+                    "or disable GLM53_DRAFT_KV_COMPACT."
+                )
+            kernel_block_sizes.append(selected_kernel_size)
+"""
+
+
+def _replace_once(text: str, old: str, new: str) -> str:
+    new_count = text.count(new)
+    if new_count == 1 and text.count(old) == new.count(old):
+        return text
+    if new_count or text.count(old) != 1:
+        raise AssertionError(f"Expected one patch anchor:\n{old}")
+    return text.replace(old, new, 1)
+
+
+def patch_file(path: str, dry_run: bool = False) -> int:
+    kv_path = Path(path)
+    worker_path = kv_path.parent.parent / "worker" / "utils.py"
+    kv_source = kv_path.read_text()
+    worker_source = worker_path.read_text()
+    text = _prepare_group(kv_source, path)
+    helper_anchor = "def _get_kv_cache_groups_glm5_next("
+    if (
+        "def _glm53_draft_block_size(" in text or "def _glm53_draft_kv_compact(" in text
+    ) and COMPACT_BLOCK_HELPER not in text:
+        raise AssertionError("DFlash2 compact block helper has drifted")
+    text = _replace_once(text, helper_anchor, COMPACT_BLOCK_HELPER + helper_anchor)
+    text = _replace_once(text, COMPACT_SELECTION_OLD, COMPACT_SELECTION_NEW)
+    text = _replace_once(text, COMPACT_PREFLIGHT_OLD, COMPACT_PREFLIGHT_NEW)
+    text = _replace_once(text, COMPACT_VALIDATION_OLD, COMPACT_VALIDATION_NEW)
+    worker = _replace_once(
+        worker_source,
+        "    MambaSpec,\n    UniformTypeKVCacheSpecs,",
+        "    MambaSpec,\n    SlidingWindowSpec,\n    UniformTypeKVCacheSpecs,",
+    )
+    worker = _replace_once(worker, KERNEL_GUARD_OLD, KERNEL_GUARD_NEW)
+    # Preflight both files before writing either. A missing worker guard must
+    # never leave a newly enabled larger page on disk.
+    updates = ((worker_path, worker_source, worker), (kv_path, kv_source, text))
+    for target, _, replacement in updates:
+        ast.parse(replacement, filename=str(target))
+    for target, original, replacement in updates:
+        if original == replacement:
+            continue
+        if not dry_run:
+            target.write_text(replacement)
+        print(f"[patch_glm5_drafter_group] {'DRY RUN ' if dry_run else ''}{target}")
     return 0
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--kv-file", default=DEFAULT_KV_FILE)
     ap.add_argument(
         "--dry-run",

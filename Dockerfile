@@ -456,7 +456,6 @@ COPY tests/test_scheduler_decode_floor_restart.py /opt/glm53/test_scheduler_deco
 COPY overlay/patch_hybrid_prefix_hit.py /opt/glm53/patch_hybrid_prefix_hit.py
 COPY overlay/patch_apc_per_group_retention.py /opt/glm53/patch_apc_per_group_retention.py
 COPY tests/test_apc_per_group_retention.py /opt/glm53/test_apc_per_group_retention.py
-COPY tests/test_hybrid_prefix_hit.py /opt/glm53/test_hybrid_prefix_hit.py
 COPY overlay/patch_apc_no_store.py /opt/glm53/patch_apc_no_store.py
 COPY tests/test_apc_no_store.py /opt/glm53/test_apc_no_store.py
 COPY overlay/patch_kv_capacity_log.py /opt/glm53/patch_kv_capacity_log.py
@@ -466,12 +465,19 @@ COPY tests/test_xgrammar_termination.py /opt/glm53/test_xgrammar_termination.py
 COPY overlay/patch_cache_reset.py /opt/glm53/patch_cache_reset.py
 COPY tests/test_cache_reset_endpoint.py /opt/glm53/test_cache_reset_endpoint.py
 COPY overlay/patch_kpool_tail_slotmap.py /opt/glm53/patch_kpool_tail_slotmap.py
+COPY overlay/patch_mamba_align_state_free.py /opt/glm53/patch_mamba_align_state_free.py
+COPY overlay/patch_mamba_align_chunking.py /opt/glm53/patch_mamba_align_chunking.py
+COPY tests/test_mamba_align_state_free.py /opt/glm53/test_mamba_align_state_free.py
+COPY tests/test_mamba_align_chunking.py /opt/glm53/test_mamba_align_chunking.py
 COPY tests/test_kpool_tail_slotmap.py /opt/glm53/test_kpool_tail_slotmap.py
 COPY overlay/patch_spinwait.py /opt/glm53/patch_spinwait.py
 COPY tests/test_spinwait_patch.py /opt/glm53/test_spinwait_patch.py
 COPY overlay/patch_indexer_workspace.py /opt/glm53/patch_indexer_workspace.py
 COPY tests/test_indexer_workspace.py /opt/glm53/test_indexer_workspace.py
 COPY overlay/patch_tool_choice_none.py /opt/glm53/patch_tool_choice_none.py
+COPY overlay/patch_loadclone.py /opt/glm53/patch_loadclone.py
+COPY tests/test_loadclone.py /opt/glm53/test_loadclone.py
+COPY tests/fixtures/loadclone_weight_utils.py.txt /opt/glm53/fixtures/loadclone_weight_utils.py.txt
 COPY tests/test_tool_choice_none.py /opt/glm53/test_tool_choice_none.py
 COPY overlay/ablit_runtime.py /opt/glm53/ablit_runtime.py
 COPY overlay/patch_ablit.py /opt/glm53/patch_ablit.py
@@ -483,6 +489,9 @@ RUN python3 /opt/glm53/patch_glm_eagle3.py
 RUN python3 /opt/glm53/patch_glm5_drafter_group.py
 RUN python3 /opt/glm53/patch_suppress_stops_in_reasoning.py
 RUN python3 /opt/glm53/patch_scheduler_decode_floor.py
+# Same slot as GLM53_OVERLAY_ORDER: after decode-floor v5 (whose per-request
+# cap the Mamba alignment relies on), no shared anchors.
+RUN python3 /opt/glm53/patch_mamba_align_chunking.py
 RUN GLM53_KV_COORDINATOR_PY_SRC=/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_coordinator.py \
     python3 /opt/glm53/test_apc_per_group_retention.py
 RUN python3 /opt/glm53/patch_hybrid_prefix_hit.py
@@ -498,6 +507,13 @@ RUN python3 /opt/glm53/patch_apc_per_group_retention.py
 # layout and the env-driven SWA-retention legs.
 RUN GLM53_VLLM_SRC_ROOT=/usr/local/lib/python3.12/dist-packages/vllm GLM53_REQUIRE_VLLM=1 GLM53_REQUIRE_COMPOSITION=1 python3 /opt/glm53/test_apc_no_store.py
 RUN python3 /opt/glm53/patch_apc_no_store.py
+# Same slot as GLM53_OVERLAY_ORDER: after the coordinator/manager overlays
+# (no shared anchors); the host test replays the align-mode lifetime on
+# the real file before the patch.
+RUN GLM53_SINGLE_TYPE_KV_CACHE_MANAGER_PY=/usr/local/lib/python3.12/dist-packages/vllm/v1/core/single_type_kv_cache_manager.py \
+    GLM53_KV_CACHE_INTERFACE_PY=/usr/local/lib/python3.12/dist-packages/vllm/v1/kv_cache_interface.py \
+    python3 /opt/glm53/test_mamba_align_state_free.py
+RUN python3 /opt/glm53/patch_mamba_align_state_free.py
 # Same slot as the runtime GLM53_OVERLAY_ORDER (after per-group retention, after
 # the drafter-group patch it shares kv_cache_utils.py with): the host test
 # preflights the real file (both pinned anchors present, stock "GPU KV cache
@@ -513,13 +529,17 @@ RUN python3 /opt/glm53/patch_indexer_workspace.py
 RUN python3 /opt/glm53/patch_spinwait.py --preflight
 RUN python3 /opt/glm53/patch_cache_reset.py
 RUN python3 /opt/glm53/patch_tool_choice_none.py
+# Auto/lazy safetensors only; InstantTensor and LOAD_FORMAT defaults stay unchanged.
+RUN GLM53_LOADCLONE_SOURCE=/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/weight_utils.py \
+    python3 /opt/glm53/test_loadclone.py
+RUN python3 /opt/glm53/patch_loadclone.py
 RUN python3 /opt/glm53/patch_ablit.py
 
 RUN EXL3_SELFCHECK_GPU=0 python3 /opt/glm53/test_exl3_overlay.py \
     && python3 /opt/glm53/test_suppress_stops.py \
     && python3 /opt/glm53/test_scheduler_decode_floor.py \
     && python3 /opt/glm53/test_scheduler_decode_floor_restart.py \
-    && python3 /opt/glm53/test_hybrid_prefix_hit.py \
+    && python3 /opt/glm53/test_mamba_align_chunking.py \
     && python3 /opt/glm53/test_xgrammar_termination.py \
     && python3 /opt/glm53/test_kpool_tail_slotmap.py \
     && python3 /opt/glm53/test_spinwait_patch.py \

@@ -106,16 +106,54 @@ _cli_ablit_mtp="${ABLIT_INCLUDE_MTP-}"
 # must reach validate_numeric_config, not be swallowed by a .env value.
 _cli_indexer_workspace_set="${GLM53_INDEXER_WORKSPACE+1}"
 _cli_indexer_workspace="${GLM53_INDEXER_WORKSPACE-}"
+_cli_draft_kv_compact_set="${GLM53_DRAFT_KV_COMPACT+1}"
+_cli_draft_kv_compact="${GLM53_DRAFT_KV_COMPACT-}"
 _cli_spinwait_ms_set="${GLM53_SPINWAIT_MS+1}"
 _cli_spinwait_ms="${GLM53_SPINWAIT_MS-}"
+_cli_load_clone_set="${GLM53_LOAD_CLONE+1}"
+_cli_load_clone="${GLM53_LOAD_CLONE-}"
+_cli_load_prefetch_set="${GLM53_LOAD_PREFETCH+1}"
+_cli_load_prefetch="${GLM53_LOAD_PREFETCH-}"
+_cli_load_format_set="${LOAD_FORMAT+1}"
+_cli_load_format="${LOAD_FORMAT-}"
 _cli_apc_swa_set="${GLM53_APC_RETENTION_INTERVAL_SWA+1}"
 _cli_apc_swa="${GLM53_APC_RETENTION_INTERVAL_SWA-}"
 _cli_overlay="${EXL3_OVERLAY_HOST-}"
+# Caller EXTRA_ARGS is captured here (setness + value, explicit empty included) and restored
+# verbatim after the topology overlay, so the TP2-cap strip below acts on the file-derived
+# value only. #204 / PR #242 review.
+_cli_extra_args_set="${EXTRA_ARGS+1}"
+_cli_extra_args="${EXTRA_ARGS-}"
 _cli_dense_fp8="${GLM53_DENSE_FP8-}"
 _cli_kda_bf16="${GLM53_KDA_BF16_LARGE_M-}"
 set -a
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
+# TP=3 does not inherit the 2-node KV cap from .env (#204): .env.example ships
+# EXTRA_ARGS="--kv-cache-memory-bytes 15032385536", sized for TP=2 at 850k, and 14 GiB does
+# not hold one 1,000,000-token request. Drop that token (either spelling) and keep the rest;
+# set a TP=3 value in .env.tp3 if you want to pin the pool. This acts on the file-derived
+# value only: the caller's EXTRA_ARGS was captured above and is restored below untouched.
+if [ -n "${EXTRA_ARGS:-}" ]; then
+    _kept=""; _skip=0; _dropped=0
+    # shellcheck disable=SC2086
+    for _tok in $EXTRA_ARGS; do
+        if [ "$_skip" = 1 ]; then _skip=0; continue; fi
+        case "$_tok" in
+            --kv-cache-memory-bytes) _skip=1; _dropped=1; continue ;;
+            --kv-cache-memory-bytes=*) _dropped=1; continue ;;
+        esac
+        _kept="${_kept:+$_kept }$_tok"
+    done
+    EXTRA_ARGS="$_kept"
+    # Say so when the shared .env value really loses its cap. Caller-supplied EXTRA_ARGS is
+    # restored verbatim below, so it is never reported here; no argument contents are echoed.
+    # warn() is defined further down, so this prints in warn()'s own format directly.
+    if [ "$_dropped" = 1 ] && [ -z "${_cli_extra_args_set}" ]; then
+        printf '\033[1;33m[glm53-exl3-tp3]\033[0m %s\n' "NOTE: dropped the shared .env --kv-cache-memory-bytes reservation (TP=3 does not inherit it); set a TP=3 value in ${SCRIPT_DIR}/.env.tp3. #204" >&2
+    fi
+    unset _kept _skip _tok _dropped
+fi
 # TP=3 does not inherit ABLIT=1 from the 2-node .env. Opt in from .env.tp3
 # or ABLIT=1 on the command line.
 ABLIT=0
@@ -156,11 +194,16 @@ set +a
 [ -n "${_cli_ablit_alpha}" ] && ABLIT_ALPHA="$_cli_ablit_alpha"
 [ -n "${_cli_ablit_mtp}" ] && ABLIT_INCLUDE_MTP="$_cli_ablit_mtp"
 [ -n "${_cli_indexer_workspace_set}" ] && GLM53_INDEXER_WORKSPACE="$_cli_indexer_workspace"
+[ -n "${_cli_draft_kv_compact_set}" ] && GLM53_DRAFT_KV_COMPACT="$_cli_draft_kv_compact"
 [ -n "${_cli_spinwait_ms_set}" ] && GLM53_SPINWAIT_MS="$_cli_spinwait_ms"
+[ -n "${_cli_load_clone_set}" ] && GLM53_LOAD_CLONE="$_cli_load_clone"
+[ -n "${_cli_load_prefetch_set}" ] && GLM53_LOAD_PREFETCH="$_cli_load_prefetch"
+[ -n "${_cli_load_format_set}" ] && LOAD_FORMAT="$_cli_load_format"
 [ -n "${_cli_apc_swa_set}" ] && GLM53_APC_RETENTION_INTERVAL_SWA="$_cli_apc_swa"
 [ -n "${_cli_overlay}" ] && EXL3_OVERLAY_HOST="$_cli_overlay"
 [ -n "${_cli_dense_fp8}" ] && GLM53_DENSE_FP8="$_cli_dense_fp8"
 [ -n "${_cli_kda_bf16}" ] && GLM53_KDA_BF16_LARGE_M="$_cli_kda_bf16"
+[ -n "${_cli_extra_args_set}" ] && EXTRA_ARGS="$_cli_extra_args"
 
 # ----------------------------- configuration -------------------------------
 MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"
@@ -303,9 +346,11 @@ CHAT_TEMPLATE="${CHAT_TEMPLATE:-/opt/glm53/chat_template.jinja}"
 VIDEO_PATCH_HOST="${VIDEO_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm_video_placeholders.py}"
 STOP_PATCH_HOST="${STOP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_suppress_stops_in_reasoning.py}"
 SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode_floor.py}"
+MAMBA_CHUNK_PATCH_HOST="${MAMBA_CHUNK_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mamba_align_chunking.py}"
 DRAFTER_PATCH_HOST="${DRAFTER_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_glm5_drafter_group.py}"
 APC_PATCH_HOST="${APC_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_hybrid_prefix_hit.py}"
 PERGROUP_PATCH_HOST="${PERGROUP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_per_group_retention.py}"
+MAMBA_STATE_PATCH_HOST="${MAMBA_STATE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mamba_align_state_free.py}"
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
 SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
@@ -318,6 +363,7 @@ SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.p
 EXL3_OVERLAY_HOST="${EXL3_OVERLAY_HOST:-$SCRIPT_DIR/overlay/exl3.py}"
 ADAPTIVE_K_PATCH_HOST="${ADAPTIVE_K_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_adaptive_k.py}"
 DENSE_FP8_PATCH_HOST="${DENSE_FP8_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_dense_fp8.py}"
+LOADCLONE_PATCH_HOST="${LOADCLONE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_loadclone.py}"
 FLASHKDA_PATCH_HOST="$SCRIPT_DIR/overlay/patch_flashkda_tp3.py"
 HAREM_KDA_FLASHKDA="${HAREM_KDA_FLASHKDA:-0}"
 
@@ -353,6 +399,8 @@ if [ -z "${LOAD_FORMAT+x}" ]; then
     esac
 fi
 PREFIX_MATCH_UNIT="${PREFIX_MATCH_UNIT:-}"
+GLM53_LOAD_CLONE="${GLM53_LOAD_CLONE-1}"
+GLM53_LOAD_PREFETCH="${GLM53_LOAD_PREFETCH-0}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
 SKIP_MM_PROFILING="${SKIP_MM_PROFILING:-1}"
@@ -450,6 +498,16 @@ GLM53_FAIR_PREFILL_MAX_CHUNKS="${GLM53_FAIR_PREFILL_MAX_CHUNKS:-1}"
 # when UNSET: an explicitly empty value is an operator error and
 # validate_numeric_config rejects it rather than guessing a serving mode.
 GLM53_INDEXER_WORKSPACE="${GLM53_INDEXER_WORKSPACE-stock}"
+# Larger draft KV pages; no weight or cache precision changes. Default ON for
+# the DFlash drafter (the default spec method), OFF for mtp/none. Like
+# GLM53_INDEXER_WORKSPACE, the default applies only when UNSET: an explicit 0
+# opts out, and an explicitly empty value is an operator error that
+# validate_numeric_config rejects rather than guessing a serving mode.
+if [ "$SPEC_METHOD" = "dflash" ]; then
+    GLM53_DRAFT_KV_COMPACT="${GLM53_DRAFT_KV_COMPACT-1}"
+else
+    GLM53_DRAFT_KV_COMPACT="${GLM53_DRAFT_KV_COMPACT-0}"
+fi
 # SpinCondition reader busy-loop window. "stock" preserves vLLM's 1 s default;
 # 1..1000 selects milliseconds. The frozen TP=2 sweep selected 16 ms.
 GLM53_SPINWAIT_MS="${GLM53_SPINWAIT_MS-stock}"
@@ -646,12 +704,27 @@ validate_numeric_config() {
     _glm53_canonical_positive_int MAX_MODEL_LEN "$MAX_MODEL_LEN" 1000000 || return
     _glm53_canonical_positive_int MAX_NUM_SEQS "$MAX_NUM_SEQS" 4096 || return
     _glm53_canonical_positive_int MAX_NUM_BATCHED_TOKENS "$MAX_NUM_BATCHED_TOKENS" 8388608 || return
+    _glm53_validate_enum GLM53_LOAD_CLONE "${GLM53_LOAD_CLONE-1}" 0 1 || return
+    local load_prefetch="${GLM53_LOAD_PREFETCH-0}"
+    if ! [[ "$load_prefetch" =~ ^0*([0-9]|1[0-6])$ ]]; then
+        echo "GLM53_LOAD_PREFETCH must be a base-10 integer between 0 and 16" >&2
+        return 2
+    fi
+    while [ "${load_prefetch#0}" != "$load_prefetch" ]; do load_prefetch="${load_prefetch#0}"; done
+    GLM53_LOAD_PREFETCH="${load_prefetch:-0}"
     if [ -n "${LONG_PREFILL_TOKEN_THRESHOLD:-}" ]; then
         _glm53_canonical_positive_int LONG_PREFILL_TOKEN_THRESHOLD \
             "$LONG_PREFILL_TOKEN_THRESHOLD" "$MAX_NUM_BATCHED_TOKENS" || return
     fi
     _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-stock}" \
         stock rightsize || return
+    _glm53_validate_enum GLM53_DRAFT_KV_COMPACT "${GLM53_DRAFT_KV_COMPACT-0}" 0 1 || return
+    if [ "${GLM53_DRAFT_KV_COMPACT-0}" = "1" ] && [ "$SPEC_METHOD" != "dflash" ]; then
+        # Compact draft pages switch the prefix-cache coordinator to a
+        # DFlash-only boundary lookup; the allocator also refuses them in-container.
+        echo "GLM53_DRAFT_KV_COMPACT=1 requires SPEC_METHOD=dflash (got: $SPEC_METHOD)" >&2
+        return 2
+    fi
     _glm53_validate_spinwait_ms || return
     _glm53_validate_mixed_prefill || return
     _glm53_validate_retention_interval GLM53_APC_RETENTION_INTERVAL "${GLM53_APC_RETENTION_INTERVAL-}" || return
@@ -683,6 +756,24 @@ validate_numeric_config() {
     fi
 }
 # GLM53 numeric config guard (end)
+
+# The TP3 read-only module masks the image copy. Verify the checked-in/staged
+# source before stopping anything; never try to patch the read-only mount.
+validate_loadclone_artifacts() {
+    [ -s "$LOADCLONE_PATCH_HOST" ] || { echo "loader patch missing: $LOADCLONE_PATCH_HOST" >&2; return 2; }
+    python3 - "$LOADCLONE_PATCH_HOST" <<'PY' || return 2
+import ast
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+source = path.read_text()
+if "[glm53-loadclone:v2]" not in source or source.rstrip().splitlines()[-1] != "    main()":
+    raise SystemExit("loader overlay identity/footer missing")
+ast.parse(source, filename=str(path))
+PY
+    GLM53_WEIGHT_UTILS_PY="$TP3_OVERLAY_HOST/vllm/model_executor/model_loader/weight_utils.py" \
+        python3 "$LOADCLONE_PATCH_HOST" --check || return 2
+}
 
 banner() {
     local label="${1:-start-tp3.sh}"
@@ -1152,6 +1243,49 @@ ship_image_to_worker() {
     docker save "$IMAGE" | worker_ssh_n "$r" docker load
 }
 
+# Pull $IMAGE without letting a different published recipe replace a local
+# image whose stamp already matches this repo. The local tag is held, the
+# pull is adopted only when its stamp matches too (same recipe, newer
+# layers), and a mismatch restores the hold. No rebuild. SKIP_BUILD=1 and a
+# missing or already-different local stamp keep the plain pull.
+# Sets PULL_KEPT_LOCAL=1 when the local tag was restored.
+pull_image_keeping_repo_stamp() {
+    local wanted="$1"
+    local have="${2-}"
+    PULL_KEPT_LOCAL=0
+    if [ "${SKIP_BUILD:-0}" = "1" ] || [ -z "$have" ] || [ "$have" != "$wanted" ]; then
+        pull_image
+        return 0
+    fi
+    local hold="glm53-recipe-hold-$$-${RANDOM}"
+    local keep_id="" pulled_id="" pulled_stamp=""
+    docker tag "$IMAGE" "$hold" || die "could not hold ${IMAGE} before pull"
+    keep_id="$(docker image inspect -f '{{.Id}}' "$hold" 2>/dev/null || true)"
+    login_ghcr_if_token
+    log "pulling ${IMAGE} (local recipe ${have:0:12} held until the pulled stamp is checked) ..."
+    if ! docker pull "$IMAGE"; then
+        docker tag "$hold" "$IMAGE" >/dev/null 2>&1 || true
+        docker rmi "$hold" >/dev/null 2>&1 || true
+        die "docker pull ${IMAGE} failed.
+  :exl3-instanttensor is a public GHCR package — check network / disk.
+  If you still get 401/403: echo YOUR_PAT | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
+  Overlay rebuild: BUILD=1 ./start.sh. Recipe-stamp drift also rebuilds; SKIP_BUILD=1 keeps GHCR."
+    fi
+    pulled_stamp="$(image_recipe_stamp)"
+    pulled_id="$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
+    if [ "$pulled_stamp" = "$wanted" ]; then
+        docker rmi "$hold" >/dev/null 2>&1 || true
+        return 0
+    fi
+    docker tag "$hold" "$IMAGE" || die "could not restore ${IMAGE} after rejecting a mismatched pull"
+    docker rmi "$hold" >/dev/null 2>&1 || true
+    if [ -n "$pulled_id" ] && [ "$pulled_id" != "$keep_id" ]; then
+        docker rmi "$pulled_id" >/dev/null 2>&1 || true
+    fi
+    PULL_KEPT_LOCAL=1
+    warn "pulled ${IMAGE} recipe ${pulled_stamp:0:12} != repo ${wanted:0:12} — kept the local image"
+}
+
 ensure_image() {
     mkdir -p "$LOGDIR"
     local head_ok=0 worker_ok=0 head_key="" worker_key=""
@@ -1195,7 +1329,7 @@ ensure_image() {
         worker_ok=0
     elif image_from_registry && [ "$skip_pull" != "1" ]; then
         local before_key="$head_key"
-        pull_image
+        pull_image_keeping_repo_stamp "$wanted_stamp" "$have_stamp"
         head_key="$(local_image_key || true)"
         head_ok=1
         if [ "$head_key" != "$before_key" ]; then
@@ -1226,7 +1360,7 @@ ensure_image() {
             if images_match "$head_key" "$worker_key"; then
                 continue
             fi
-            if image_from_registry && [ "$skip_pull" != "1" ] && [ "${BUILD:-0}" != "1" ]; then
+            if image_from_registry && [ "$skip_pull" != "1" ] && [ "${BUILD:-0}" != "1" ] && [ "${PULL_KEPT_LOCAL:-0}" != "1" ]; then
                 if pull_image_on_worker "$r"; then
                     worker_key="$(worker_image_key "$r" || true)"
                     if images_match "$head_key" "$worker_key"; then
@@ -1542,6 +1676,9 @@ fi
 if [ -f /opt/glm53/patch_scheduler_decode_floor.py ]; then
     python3 /opt/glm53/patch_scheduler_decode_floor.py
 fi
+if [ -f /opt/glm53/patch_mamba_align_chunking.py ]; then
+    python3 /opt/glm53/patch_mamba_align_chunking.py
+fi
 if [ -f /opt/glm53/patch_glm5_drafter_group.py ]; then
     python3 /opt/glm53/patch_glm5_drafter_group.py
 fi
@@ -1550,6 +1687,9 @@ if [ -f /opt/glm53/patch_hybrid_prefix_hit.py ]; then
 fi
 if [ -f /opt/glm53/patch_apc_per_group_retention.py ]; then
     python3 /opt/glm53/patch_apc_per_group_retention.py
+fi
+if [ -f /opt/glm53/patch_mamba_align_state_free.py ]; then
+    python3 /opt/glm53/patch_mamba_align_state_free.py
 fi
 if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
     python3 /opt/glm53/patch_xgrammar_termination.py
@@ -1681,6 +1821,9 @@ fi
 if [ -f /opt/glm53/patch_scheduler_decode_floor.py ]; then
     python3 /opt/glm53/patch_scheduler_decode_floor.py
 fi
+if [ -f /opt/glm53/patch_mamba_align_chunking.py ]; then
+    python3 /opt/glm53/patch_mamba_align_chunking.py
+fi
 if [ -f /opt/glm53/patch_glm5_drafter_group.py ]; then
     python3 /opt/glm53/patch_glm5_drafter_group.py
 fi
@@ -1689,6 +1832,9 @@ if [ -f /opt/glm53/patch_hybrid_prefix_hit.py ]; then
 fi
 if [ -f /opt/glm53/patch_apc_per_group_retention.py ]; then
     python3 /opt/glm53/patch_apc_per_group_retention.py
+fi
+if [ -f /opt/glm53/patch_mamba_align_state_free.py ]; then
+    python3 /opt/glm53/patch_mamba_align_state_free.py
 fi
 if [ -f /opt/glm53/patch_xgrammar_termination.py ]; then
     python3 /opt/glm53/patch_xgrammar_termination.py
@@ -1750,9 +1896,11 @@ _tp3_scp_runtime() {
     scp -q -o BatchMode=yes "$VIDEO_PATCH_HOST" "${ssh_t}:/tmp/patch_glm_video_placeholders.py"
     scp -q -o BatchMode=yes "$STOP_PATCH_HOST" "${ssh_t}:/tmp/patch_suppress_stops_in_reasoning.py"
     scp -q -o BatchMode=yes "$SCHED_PATCH_HOST" "${ssh_t}:/tmp/patch_scheduler_decode_floor.py"
+    scp -q -o BatchMode=yes "$MAMBA_CHUNK_PATCH_HOST" "${ssh_t}:/tmp/patch_mamba_align_chunking.py"
     scp -q -o BatchMode=yes "$DRAFTER_PATCH_HOST" "${ssh_t}:/tmp/patch_glm5_drafter_group.py"
     scp -q -o BatchMode=yes "$APC_PATCH_HOST" "${ssh_t}:/tmp/patch_hybrid_prefix_hit.py"
     scp -q -o BatchMode=yes "$PERGROUP_PATCH_HOST" "${ssh_t}:/tmp/patch_apc_per_group_retention.py"
+    scp -q -o BatchMode=yes "$MAMBA_STATE_PATCH_HOST" "${ssh_t}:/tmp/patch_mamba_align_state_free.py"
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${ssh_t}:/tmp/patch_xgrammar_termination.py"
     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${ssh_t}:/tmp/patch_kpool_tail_slotmap.py"
     scp -q -o BatchMode=yes "$SPINWAIT_PATCH_HOST" "${ssh_t}:/tmp/patch_spinwait.py"
@@ -1917,6 +2065,7 @@ TP3_SKIP_OLD_SCP
         -e "GLM53_FAIR_PREFILL_MAX_STEP_MS=$GLM53_FAIR_PREFILL_MAX_STEP_MS"
         -e "GLM53_FAIR_PREFILL_MAX_CHUNKS=$GLM53_FAIR_PREFILL_MAX_CHUNKS"
         -e "GLM53_INDEXER_WORKSPACE=$GLM53_INDEXER_WORKSPACE"
+        -e "GLM53_DRAFT_KV_COMPACT=$GLM53_DRAFT_KV_COMPACT"
         -e "GLM53_SPINWAIT_MS=$GLM53_SPINWAIT_MS"
         -e "TRITON_CACHE_DIR=$TRITON_CACHE_DIR"
         -e "TILELANG_CACHE_DIR=$TILELANG_CACHE_DIR"
@@ -1976,6 +2125,7 @@ TP3_SKIP_OLD_SCP
              TP3_HEAD_OVERRIDE ENABLE_EXPERT_PARALLEL \
              LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE EXL3_MOE_ROW_TILE EXL3_TEMP_ROWS_FUSED EXL3_FAT_SORTED EXL3_FAT_BATCHED EXL3_FAT_KERNEL EXL3_FAT_GROUPED MODEL_DIR EXTRA_ARGS \
              LOAD_FORMAT PREFIX_MATCH_UNIT \
+             GLM53_LOAD_CLONE GLM53_LOAD_PREFETCH \
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP \
              GLM53_ADAPTIVE_K GLM53_ADAPTIVE_K_SET GLM53_ADAPTIVE_K_ALPHA GLM53_ADAPTIVE_K_MARGIN \
              GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST GLM53_DENSE_FP8 \
@@ -2025,9 +2175,11 @@ TP3_SKIP_OLD_SCP
             -v '/tmp/patch_glm_video_placeholders.py:/opt/glm53/patch_glm_video_placeholders.py:ro' \
             -v '/tmp/patch_suppress_stops_in_reasoning.py:/opt/glm53/patch_suppress_stops_in_reasoning.py:ro' \
             -v '/tmp/patch_scheduler_decode_floor.py:/opt/glm53/patch_scheduler_decode_floor.py:ro' \
+            -v '/tmp/patch_mamba_align_chunking.py:/opt/glm53/patch_mamba_align_chunking.py:ro' \
             -v '/tmp/patch_glm5_drafter_group.py:/opt/glm53/patch_glm5_drafter_group.py:ro' \
             -v '/tmp/patch_hybrid_prefix_hit.py:/opt/glm53/patch_hybrid_prefix_hit.py:ro' \
             -v '/tmp/patch_apc_per_group_retention.py:/opt/glm53/patch_apc_per_group_retention.py:ro' \
+            -v '/tmp/patch_mamba_align_state_free.py:/opt/glm53/patch_mamba_align_state_free.py:ro' \
             -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
             -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
             -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
@@ -2071,9 +2223,11 @@ TP3_SKIP_OLD_SCP
         -v "$VIDEO_PATCH_HOST:/opt/glm53/patch_glm_video_placeholders.py:ro" \
         -v "$STOP_PATCH_HOST:/opt/glm53/patch_suppress_stops_in_reasoning.py:ro" \
         -v "$SCHED_PATCH_HOST:/opt/glm53/patch_scheduler_decode_floor.py:ro" \
+        -v "$MAMBA_CHUNK_PATCH_HOST:/opt/glm53/patch_mamba_align_chunking.py:ro" \
         -v "$DRAFTER_PATCH_HOST:/opt/glm53/patch_glm5_drafter_group.py:ro" \
         -v "$APC_PATCH_HOST:/opt/glm53/patch_hybrid_prefix_hit.py:ro" \
         -v "$PERGROUP_PATCH_HOST:/opt/glm53/patch_apc_per_group_retention.py:ro" \
+        -v "$MAMBA_STATE_PATCH_HOST:/opt/glm53/patch_mamba_align_state_free.py:ro" \
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
         -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
@@ -2108,6 +2262,8 @@ TP3_SKIP_OLD_SCP
         -e LONG_PREFILL_TOKEN_THRESHOLD="${LONG_PREFILL_TOKEN_THRESHOLD:-}" \
         -e KV_CACHE_DTYPE="$KV_CACHE_DTYPE" \
         -e LOAD_FORMAT="${LOAD_FORMAT:-}" \
+        -e GLM53_LOAD_CLONE="$GLM53_LOAD_CLONE" \
+        -e GLM53_LOAD_PREFETCH="$GLM53_LOAD_PREFETCH" \
         -e PREFIX_MATCH_UNIT="${PREFIX_MATCH_UNIT:-}" \
         -e MTP_TOKENS="$MTP_TOKENS" \
         -e SPEC_METHOD="$SPEC_METHOD" \
@@ -2376,7 +2532,7 @@ logs() {
 main() {
     local cmd="${1:-start}"
     case "$cmd" in
-        start|restart) validate_numeric_config ;;
+        start|restart) validate_numeric_config; validate_loadclone_artifacts ;;
     esac
     case "$cmd" in
         stop)     banner stop.sh ;;

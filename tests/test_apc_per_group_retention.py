@@ -99,6 +99,7 @@ HELPERS = (
 COMPOSED_HELPERS = HELPERS + (
     "_glm53_dflash_swa_replay_tokens",
     "_glm53_dflash_replay_safe_hit",
+    "_glm53_dflash_boundary_lookup_enabled",
 )
 
 ALIGN = 3584  # scheduler_block_size on this kit
@@ -1070,6 +1071,11 @@ def case_composed_runtime_paths(
         "reused DFlash hit must carry the complete 2048-token visible tail",
     )
 
+    # Isolate the failed-EAGLE convergence contract from the independent
+    # request-local Kpool replay floor. The real-source CPU probe separately
+    # exercises that floor with actual manager lookup/allocation.
+    coordinator.kpool_replay_tokens = 0
+
     blocks, hit, uncached = hit_ns[hit_name](
         coordinator, [object()] * 400, 21504
     )
@@ -1149,7 +1155,9 @@ def case_composition(
               f"{label}: shared helper duplicated")
         check(text.count("def _glm53_is_draft_swa_spec(") == 1,
               f"{label}: shared discriminator duplicated")
-        check(text.count("import os  # [glm53-apc-per-group]") == 1,
+        # Either overlay may add the module-level ``import os`` (the hybrid
+        # overlay's boundary lookup reads GLM53_DRAFT_KV_COMPACT); exactly one.
+        check(sum(line.startswith("import os") for line in text.splitlines()) == 1,
               f"{label}: os import missing or duplicated")
         # Re-applying either patch in either order must be a no-op.
         for patch in order + tuple(reversed(order)):

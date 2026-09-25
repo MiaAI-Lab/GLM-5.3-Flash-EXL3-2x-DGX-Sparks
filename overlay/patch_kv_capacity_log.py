@@ -61,7 +61,10 @@ interval is set and hits end on scheduler-block boundaries:
   ``min(need, alignment / block_size)`` with
   ``need = cdiv(window - 1, block_size) + (1 if EAGLE group)`` -- the
   contiguous run a hit needs (``SlidingWindowManager._contiguous_blocks_for_hit``;
-  33 of 56 here);
+  33 of 56 here). Under ``GLM53_DRAFT_KV_COMPACT=1`` the exact
+  ``SlidingWindowSpec`` EAGLE groups are looked up ending on the boundary and
+  their managers retain no lookahead block (``patch_hybrid_prefix_hit.py``),
+  so the +1 does not apply to them;
 * groups that opt out of prefix caching (``KpoolTailSpec``): 0 -- a live block
   per request, never a cached one.
 
@@ -97,6 +100,7 @@ Usage::
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import stat
@@ -221,6 +225,9 @@ def _glm53_kv_capacity_rows(vllm_config, kv_cache_config) -> list:
             ),
             "prefix_cacheable": _glm53_spec_prefix_cacheable(spec),
             "eagle": index in eagle,
+            "boundary_lookup": index in eagle
+            and kinds[0] == "SlidingWindowSpec"
+            and os.environ.get("GLM53_DRAFT_KV_COMPACT", "0") == "1",
             "sliding_window": None,
             "mamba_cache_mode": None,
         }
@@ -273,9 +280,12 @@ def _glm53_ids_per_segment(row: dict, alignment: int):
         if not window:
             return None
         # SlidingWindowManager._contiguous_blocks_for_hit: the run a hit needs,
-        # +1 when the EAGLE last-block drop applies. reachable_block_mask
-        # caches every block once need >= per_segment.
-        need = cdiv(window - 1, block_size) + (1 if row["eagle"] else 0)
+        # +1 when the EAGLE last-block drop applies; not under the DFlash
+        # boundary lookup, whose manager retains no lookahead block.
+        # reachable_block_mask caches every block once need >= per_segment.
+        need = cdiv(window - 1, block_size) + (
+            1 if row["eagle"] and not row["boundary_lookup"] else 0
+        )
         return min(need, per_segment)
     if kind in ("FullAttentionSpec", "MLAAttentionSpec"):
         # FullAttentionManager keeps the base reachable_block_mask (None):
@@ -334,6 +344,8 @@ def _glm53_kv_capacity_lines(rows: list, summary: dict, max_model_len: int) -> l
         extra = ""
         if r["sliding_window"] is not None:
             extra += f" window={r['sliding_window']} eagle={'yes' if r['eagle'] else 'no'}"
+            if r["boundary_lookup"]:
+                extra += " lookup=boundary"
         if r["mamba_cache_mode"] is not None:
             extra += f" mamba_cache_mode={r['mamba_cache_mode']}"
         cacheable = "yes" if r["prefix_cacheable"] else "no (scratch)"
@@ -441,6 +453,7 @@ kv_capacity_lines = _HELPERS["_glm53_kv_capacity_lines"]
 # Site 1 -- helpers, inserted above the function whose denominator they mirror
 # ---------------------------------------------------------------------------
 MARK_HELPERS = "# [glm53-kv-capacity-log] helpers -- log-only; see overlay/patch_kv_capacity_log.py\n"
+LEGACY_HELPERS_SHA256 = "7922a14278ed254f0431ffcc8283f135d52f04593a4a13bbec49ef9eb84dab41"
 
 ANCHOR_HELPERS = """def get_max_concurrency_for_kv_cache_config(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
@@ -497,10 +510,40 @@ def verified_state(text: str) -> bool:
     return ok and text.index(MARK_HELPERS) < text.index(ANCHOR_HELPERS) < text.index(MARK_CALL)
 
 
+def refresh_helpers(source: str) -> str:
+    """Refresh only the published pre-boundary helper revision.
+
+    Pin its bytes rather than overwriting edited helpers or unrelated code
+    inserted between the marker and the following function.
+    """
+    if source.count(MARK_HELPERS) != 1 or source.count(ANCHOR_HELPERS) != 1:
+        return source
+    start = source.index(MARK_HELPERS)
+    end = source.index(ANCHOR_HELPERS)
+    if end < start:
+        return source
+    if hashlib.sha256(source[start:end].encode()).hexdigest() != LEGACY_HELPERS_SHA256:
+        return source
+    return source[:start] + HELPERS_SRC + source[end:]
+
+
 def prepare(source: str) -> tuple[str, str]:
     """Idempotent, fail-closed. Returns ``(text, action)``. Nothing is written here."""
+    for binding in REQUIRED_BINDINGS:
+        head = source[: source.find(ANCHOR_HELPERS)] if ANCHOR_HELPERS in source else source
+        if binding not in head:
+            raise ValueError(
+                f"kv_cache_utils.py does not bind {binding.strip()!r} above the "
+                "insert point; the injected helpers would NameError"
+            )
     marks = sum(source.count(mark) for _n, mark, _a, _p in SITES)
     if marks:
+        if marks == len(SITES) and not verified_state(source):
+            # An earlier helper version (e.g. the image build) is refreshed in
+            # place; a half-patched or foreign layout still fails below.
+            refreshed = refresh_helpers(source)
+            if verified_state(refreshed):
+                return refreshed, "helpers refreshed"
         if marks != len(SITES) or not verified_state(source):
             raise ValueError(
                 "partial/inconsistent kv-capacity-log patch "
@@ -509,13 +552,6 @@ def prepare(source: str) -> tuple[str, str]:
             )
         return source, "already present"
 
-    for binding in REQUIRED_BINDINGS:
-        head = source[: source.find(ANCHOR_HELPERS)] if ANCHOR_HELPERS in source else source
-        if binding not in head:
-            raise ValueError(
-                f"kv_cache_utils.py does not bind {binding.strip()!r} above the "
-                "insert point; the injected helpers would NameError"
-            )
 
     out = source
     for name, _mark, anchor, patched in SITES:
