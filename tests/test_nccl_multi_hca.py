@@ -134,6 +134,7 @@ def run_preflight(tmp_path, head_count=2, worker_count=2, broken=None):
                 "APC_PATCH_HOST", "PERGROUP_PATCH_HOST", "NOSTORE_PATCH_HOST",
                 "KVCAP_PATCH_HOST", "TOOLCHOICE_PATCH_HOST", "XGRAMMAR_PATCH_HOST",
                 "CACHE_RESET_PATCH_HOST", "KPOOL_TAIL_PATCH_HOST",
+                "KPOOL_SEED_PATCH_HOST",
                 "MAMBA_STATE_PATCH_HOST", "MAMBA_CHUNK_PATCH_HOST",
                 "SPINWAIT_PATCH_HOST", "ADAPTIVE_K_PATCH_HOST",
                 "DENSE_FP8_PATCH_HOST", "LOADCLONE_PATCH_HOST", "DEFAULT_TOKENS_PATCH_HOST",

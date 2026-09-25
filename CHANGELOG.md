@@ -152,6 +152,11 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Fixed
 
+- `overlay/patch_kpool_tail_seed_stride.py`: backport vLLM #57477 so the NVIDIA
+  prefill kpool tail seed addresses the padded indexer stride. Pinned vLLM
+  `487ecf187` still uses a dense 2048 B stride in `_kpool_tail_seed_kernel`.
+  This is separate from `patch_kpool_tail_slotmap.py` (block-table row clamp).
+  Issue #264. Not bake-tested or GPU-tested in this change.
 - `start.sh`, `start-tp3.sh`, and `start-tp4.sh`: a GHCR pull could replace a
   local image whose recipe stamp already matched the repo, then launch the
   published image (no locally compiled artifacts; `GLM53_EXL3_MOE_FAST=1`

@@ -350,6 +350,8 @@ PERGROUP_PATCH_HOST="${PERGROUP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_apc_per_gr
 MAMBA_STATE_PATCH_HOST="${MAMBA_STATE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mamba_align_state_free.py}"
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
+# vLLM #57477. Different file from the slot-map clamp above.
+KPOOL_SEED_PATCH_HOST="${KPOOL_SEED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_seed_stride.py}"
 SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
 # Decode stack, same overlays start.sh uses at TP=2. Without these the TP=3
 # path runs stock k=7 and BF16 dense projections: adaptive-k is worth +13-21 %
@@ -1063,6 +1065,7 @@ preflight() {
     [ -f "$APC_PATCH_HOST" ] || die "$APC_PATCH_HOST missing"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "$XGRAMMAR_PATCH_HOST missing"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "$KPOOL_TAIL_PATCH_HOST missing"
+    [ -f "$KPOOL_SEED_PATCH_HOST" ] || die "$KPOOL_SEED_PATCH_HOST missing"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "$SPINWAIT_PATCH_HOST missing"
     [ -f "$DENSE_FP8_PATCH_HOST" ] || die "$DENSE_FP8_PATCH_HOST missing"
     [ -f "$EXL3_OVERLAY_HOST" ] || die "$EXL3_OVERLAY_HOST missing"
@@ -1694,6 +1697,9 @@ fi
 if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
     python3 /opt/glm53/patch_kpool_tail_slotmap.py
 fi
+if [ -f /opt/glm53/patch_kpool_tail_seed_stride.py ]; then
+    python3 /opt/glm53/patch_kpool_tail_seed_stride.py
+fi
 if [ -f /opt/glm53/patch_tp3_glm.py ]; then
     # Rewrites glm5next/nvidia/model.py: head 64->66, vocab padding_size
     # lcm(64,tp), shared-expert I pad / disable_tp, A_log load pad.
@@ -1839,6 +1845,9 @@ fi
 if [ -f /opt/glm53/patch_kpool_tail_slotmap.py ]; then
     python3 /opt/glm53/patch_kpool_tail_slotmap.py
 fi
+if [ -f /opt/glm53/patch_kpool_tail_seed_stride.py ]; then
+    python3 /opt/glm53/patch_kpool_tail_seed_stride.py
+fi
 if [ -f /opt/glm53/patch_tp3_glm.py ]; then
     # Rewrites glm5next/nvidia/model.py: head 64->66, vocab padding_size
     # lcm(64,tp), shared-expert I pad / disable_tp, A_log load pad.
@@ -1900,6 +1909,7 @@ _tp3_scp_runtime() {
     scp -q -o BatchMode=yes "$MAMBA_STATE_PATCH_HOST" "${ssh_t}:/tmp/patch_mamba_align_state_free.py"
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${ssh_t}:/tmp/patch_xgrammar_termination.py"
     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${ssh_t}:/tmp/patch_kpool_tail_slotmap.py"
+    scp -q -o BatchMode=yes "$KPOOL_SEED_PATCH_HOST" "${ssh_t}:/tmp/patch_kpool_tail_seed_stride.py"
     scp -q -o BatchMode=yes "$SPINWAIT_PATCH_HOST" "${ssh_t}:/tmp/patch_spinwait.py"
     scp -q -o BatchMode=yes "$EXL3_OVERLAY_HOST" "${ssh_t}:/tmp/glm53-exl3.py"
     scp -q -o BatchMode=yes "$FLASHKDA_PATCH_HOST" "${ssh_t}:/tmp/patch_flashkda_tp3.py"
@@ -2017,7 +2027,9 @@ launch_cluster() {
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "missing $XGRAMMAR_PATCH_HOST"
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
+    [ -f "$KPOOL_SEED_PATCH_HOST" ] || die "missing $KPOOL_SEED_PATCH_HOST"
     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
+    scp -q -o BatchMode=yes "$KPOOL_SEED_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_seed_stride.py"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "missing $SPINWAIT_PATCH_HOST"
     scp -q -o BatchMode=yes "$SPINWAIT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_spinwait.py"
     if [ -d "$TP3_OVERLAY_HOST" ]; then
@@ -2179,6 +2191,7 @@ TP3_SKIP_OLD_SCP
             -v '/tmp/patch_mamba_align_state_free.py:/opt/glm53/patch_mamba_align_state_free.py:ro' \
             -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
             -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
+            -v '/tmp/patch_kpool_tail_seed_stride.py:/opt/glm53/patch_kpool_tail_seed_stride.py:ro' \
             -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
             -v '/tmp/glm53-exl3.py:/opt/glm53/exl3.py:ro' \
             -v '/tmp/patch_adaptive_k.py:/opt/glm53/patch_adaptive_k.py:ro' \
@@ -2227,6 +2240,7 @@ TP3_SKIP_OLD_SCP
         -v "$MAMBA_STATE_PATCH_HOST:/opt/glm53/patch_mamba_align_state_free.py:ro" \
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
+        -v "$KPOOL_SEED_PATCH_HOST:/opt/glm53/patch_kpool_tail_seed_stride.py:ro" \
         -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
         -v "$EXL3_OVERLAY_HOST:/opt/glm53/exl3.py:ro" \
         -v "$ADAPTIVE_K_PATCH_HOST:/opt/glm53/patch_adaptive_k.py:ro" \

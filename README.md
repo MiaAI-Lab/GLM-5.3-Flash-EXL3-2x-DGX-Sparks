@@ -404,7 +404,48 @@ block-table entry. Without that clamp, every token at `pos >= block_size`
 fills the mapping with adjacent memory and the kpool seed/update kernels
 write through it — long generations (~2k tokens) crash or silently corrupt
 another layer's indexer. The clamp is identity for every other KV group.
-Fail-closed, idempotent, mounted and run on both ranks.
+Fail-closed, idempotent, mounted and run on both ranks. It edits
+`vllm/v1/worker/block_table.py` only.
+
+`overlay/patch_kpool_tail_seed_stride.py` is a different backport
+([vLLM #57477](https://github.com/vllm-project/vllm/pull/57477), issue
+[#264](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/issues/264)).
+Pinned vLLM `487ecf187d3dfe74d2cf6119a92881dba403c219` (base image
+`vllm/vllm-openai:glm53-flash-arm64-cu130@sha256:905c02933be6021301db2dc284e24e3727467aa3a0f63b41d609885778a07bce`,
+the tree behind `:exl3-instanttensor`) still addresses the NVIDIA prefill
+tail seed with a dense 2048 B stride. The tail tensor is an `as_strided`
+view of the indexer page (38016 B, `stride(0) == 19008` bf16 elements), so
+that seed writes another request's indexer block and leaves its own tail
+block untouched. The decode kernel in the same file already takes
+`TAIL_BLOCK_ELEMS`; only `_kpool_tail_seed_kernel` does not. Confirmed
+missing on 2026-09-25 by reading that commit: the seed function has no
+`TAIL_BLOCK_ELEMS` parameter, and no other overlay edits
+`kpool_compress.py`. The slot-map clamp does not fix this.
+
+CPU check (no image bake, no GPU):
+
+```bash
+python3 tests/test_kpool_tail_seed_stride.py
+```
+
+After the overlay runs, the boot log contains `[glm53-kpool-tail-seed-stride]`.
+Inside the container, confirm the seed function itself (a file-wide grep for
+`TAIL_BLOCK_ELEMS` is not enough; the decode kernel on the pin already has it):
+
+```bash
+python3 - << 'PY'
+import inspect
+from vllm.models.glm5next.nvidia.ops.kpool_compress import _kpool_tail_seed_kernel
+src = inspect.getsource(_kpool_tail_seed_kernel)
+assert "TAIL_BLOCK_ELEMS" in src and "base = blk * TAIL_BLOCK_ELEMS" in src
+assert "(blk * 2 * KPOOL" not in src
+print("kpool tail seed stride: padded")
+PY
+```
+
+Upstream's GPU test is
+`pytest tests/kernels/test_kpool_decode_update_batched.py::test_prefill_seed_honors_padded_tail_block_stride`.
+It was not run in this checkout.
 
 `overlay/patch_glm_video_placeholders.py` routes Glm5Next video timestamps through
 the glm46v path and aligns placeholder blocks to encoder `grid_t`. The overlay
@@ -1681,6 +1722,8 @@ After CUDA compile, Python overlay edits (`overlay/exl3.py`, tests) are a cheap 
 | `tests/test_cache_reset_endpoint.py` | exact `build_app` anchor, flag semantics (off / on / dev precedence), fail-closed drift, idempotence, installed copy |
 | `overlay/patch_kpool_tail_slotmap.py` | clamp KpoolTail one-block circular slot mapping; identity for other KV groups |
 | `tests/test_kpool_tail_slotmap.py` | circular addressing math, exact kernel patch, idempotence, fail-closed drift, launcher wiring |
+| `overlay/patch_kpool_tail_seed_stride.py` | vLLM #57477 backport: NVIDIA prefill tail seed uses the padded indexer stride (`kpool_compress.py`). Not the slot-map clamp |
+| `tests/test_kpool_tail_seed_stride.py` | pin-anchor match, CPU port of the padded-stride contract, #57477 byte windows, idempotence, fail-closed drift, launcher wiring |
 | `overlay/patch_kv_capacity_log.py` | log-only: after the stock `GPU KV cache size` line (kept byte-identical) log per-group `blocks/request` (the stock line's own denominator) and the usable-block-ids / ids-per-aligned-segment / cached-conversation-capacity summary; unmodelled spec kinds withhold the figure; knob `GLM53_KV_CAPACITY_LOG` (0/1); two pinned anchors, preflighted before either is written, atomic, idempotent |
 | `tests/test_kv_capacity_log.py` | CPU-only execution of the shipped derivation helpers against hybrid, single-group, uniform-type, unsupported-spec, and null-block cases; patch application and idempotence on a pinned fixture, fail-closed anchor drift, and installed-source preflight when available (required in the image). Launcher flag validation belongs to `tests/test_numeric_config.py`. |
 | `overlay/patch_indexer_workspace.py` | opt-in `GLM53_INDEXER_WORKSPACE=rightsize`: size the sparse-indexer prefill workspace to the legal per-step maximum instead of `max_model_len * 40`; boot-time compress-ratio cross-check |
