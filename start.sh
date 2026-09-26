@@ -255,6 +255,7 @@ MAMBA_STATE_PATCH_HOST="${MAMBA_STATE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mamb
 MAMBA_CHUNK_PATCH_HOST="${MAMBA_CHUNK_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mamba_align_chunking.py}"
 SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
 ADAPTIVE_K_PATCH_HOST="${ADAPTIVE_K_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_adaptive_k.py}"
+CODEX_PATCH_HOST="${CODEX_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_codex_compat.py}"
 DENSE_FP8_PATCH_HOST="${DENSE_FP8_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_dense_fp8.py}"
 LOADCLONE_PATCH_HOST="${LOADCLONE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_loadclone.py}"
 DEFAULT_TOKENS_PATCH_HOST="${DEFAULT_TOKENS_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_default_max_new_tokens.py}"
@@ -1756,6 +1757,7 @@ GLM53_OVERLAY_ORDER=(
     patch_indexer_workspace.py
     patch_cache_reset.py
     patch_ablit.py
+    patch_codex_compat.py
 )
 
 # Emits the in-container apply block for GLM53_OVERLAY_ORDER (same bytes for
@@ -2073,6 +2075,7 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$LOADCLONE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_loadclone.py"
     [ -f "$ADAPTIVE_K_PATCH_HOST" ] || die "missing $ADAPTIVE_K_PATCH_HOST"
     scp -q -o BatchMode=yes "$ADAPTIVE_K_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_adaptive_k.py"
+    scp -q -o BatchMode=yes "$CODEX_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_codex_compat.py"
     [ -f "$DENSE_FP8_PATCH_HOST" ] || die "missing $DENSE_FP8_PATCH_HOST"
     scp -q -o BatchMode=yes "$DENSE_FP8_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_dense_fp8.py"
     [ -f "$DEFAULT_TOKENS_PATCH_HOST" ] || die "missing $DEFAULT_TOKENS_PATCH_HOST"
@@ -2293,6 +2296,7 @@ launch_cluster() {
         -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
         -v '/tmp/patch_loadclone.py:/opt/glm53/patch_loadclone.py:ro' \
         -v '/tmp/patch_adaptive_k.py:/opt/glm53/patch_adaptive_k.py:ro' \
+        -v '/tmp/patch_codex_compat.py:/opt/glm53/patch_codex_compat.py:ro' \
         -v '/tmp/patch_dense_fp8.py:/opt/glm53/patch_dense_fp8.py:ro' \
         -v '/tmp/patch_default_max_new_tokens.py:/opt/glm53/patch_default_max_new_tokens.py:ro' \
         -v '/tmp/glm53-exl3.py:/opt/glm53/exl3.py:ro' \
@@ -2340,6 +2344,7 @@ launch_cluster() {
         -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
         -v "$LOADCLONE_PATCH_HOST:/opt/glm53/patch_loadclone.py:ro" \
         -v "$ADAPTIVE_K_PATCH_HOST:/opt/glm53/patch_adaptive_k.py:ro" \
+        -v "$CODEX_PATCH_HOST:/opt/glm53/patch_codex_compat.py:ro" \
         -v "$DENSE_FP8_PATCH_HOST:/opt/glm53/patch_dense_fp8.py:ro" \
         -v "$DEFAULT_TOKENS_PATCH_HOST:/opt/glm53/patch_default_max_new_tokens.py:ro" \
         -v "$EXL3_OVERLAY_HOST:/opt/glm53/exl3.py:ro" \
