@@ -10,6 +10,19 @@
 # Non-fatal: the launcher WARNs on nonzero exit. Pair with a persistent
 # TRITON_CACHE_DIR + TILELANG_CACHE_DIR so each shape compiles once per image.
 #
+# Exception — degenerate-engine canary (exit 3, the launcher fails the start):
+# the sweep also checks that the engine is numerically sane. A boot can come up
+# healthy on /health yet generate garbage (all "!!!!", DFlash acceptance ~0;
+# cf. #249). Warmup requests then either return nonsense or never reach EOS on
+# the unbounded serve-default arms, which used to be reported as "uncovered
+# shapes may JIT mid-serve" while the broken engine went into service. Two
+# checks, both cheap and both derived from requests the sweep already sends:
+#   content     the bounded temperature-0 c1 arm ("Reply with OK.", thinking
+#               off) must answer with OK
+#   acceptance  over the sweep, DFlash must accept at least one draft token
+#               when it drafted at least GLM53_WARMUP_CANARY_MIN_DRAFTS (skipped
+#               when /metrics is unreachable or no drafts were made)
+#
 # Usage: boot-shape-warmup.sh [base_url] [model]
 # Env:
 #   GLM53_WARMUP_REQ_TIMEOUT       per-request curl --max-time (default 240)
@@ -17,6 +30,8 @@
 #   GLM53_WARMUP_DFLASH_K          speculative tokens (default 7)
 #   GLM53_WARMUP_TRITON_CACHE_DIR  host Triton cache (sampler postcondition)
 #   GLM53_WARMUP_BEARER / VLLM_API_KEY
+#   GLM53_WARMUP_CANARY            1 (default) = degenerate-engine canary, 0 = off
+#   GLM53_WARMUP_CANARY_MIN_DRAFTS drafted tokens needed to judge acceptance (default 64)
 #   WARMUP_CURL                    test seam
 set -u
 
@@ -34,6 +49,11 @@ case "$MAX_CONCURRENCY" in
 esac
 case "$DFLASH_K" in
   ''|*[!0-9]*) DFLASH_K=7 ;;
+esac
+CANARY="${GLM53_WARMUP_CANARY:-1}"
+CANARY_MIN_DRAFTS="${GLM53_WARMUP_CANARY_MIN_DRAFTS:-64}"
+case "$CANARY_MIN_DRAFTS" in
+  ''|*[!0-9]*) CANARY_MIN_DRAFTS=64 ;;
 esac
 NONCE="$$-$(date +%s)"
 
@@ -87,9 +107,10 @@ fire() {
   else
     payload='{"model":"'"$MODEL"'","messages":[{"role":"user","content":"'"$prompt"'"}],"max_tokens":24,"temperature":0,"chat_template_kwargs":{"enable_thinking":'"$thinking_json"'}}'
   fi
+  # The body is kept (as *.json, which the tally skips) for the canary.
   if "$CURL_BIN" -fsS --max-time "$REQ_TIMEOUT" "${AUTH_ARGS[@]}" \
       "$BASE/v1/chat/completions" -H "Content-Type: application/json" \
-      -d "$payload" >/dev/null 2>>"$tmpdir/errors"; then
+      -d "$payload" >"$out.resp.json" 2>>"$tmpdir/errors"; then
     echo ok > "$out"
   else
     echo fail > "$out"
@@ -106,6 +127,21 @@ burst() {
   wait
   t1=$(date +%s)
   echo "  arm ${arm}: C=${c} x ~${words} tok, profile=${profile}, think=${thinking}, $((t1 - t0))s"
+}
+
+# "<drafted> <accepted>" DFlash token counters summed over engines, or nothing
+# when /metrics is unreachable or carries no spec-decode counters.
+spec_counters() {
+  "$CURL_BIN" -fsS --max-time 10 "${AUTH_ARGS[@]}" "$BASE/metrics" 2>/dev/null \
+    | awk '/^vllm:spec_decode_num_draft_tokens_total[{ ]/ { d += $NF; seen = 1 }
+           /^vllm:spec_decode_num_accepted_tokens_total[{ ]/ { a += $NF }
+           END { if (seen) printf "%d %d\n", d, a }'
+}
+
+# First "content" string of a chat completion body (JSON escapes left as-is).
+reply_content() {
+  grep -o '"content"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" 2>/dev/null | head -n 1 \
+    | sed 's/^"content"[[:space:]]*:[[:space:]]*"//; s/"$//'
 }
 
 SAMPLER_KERNEL=_topk_topp_kernel
@@ -218,6 +254,8 @@ fi
 
 echo "boot-shape-warmup: sweeping DFlash2 k=${DFLASH_K} / sampler / kpool shapes"
 total_t0=$(date +%s)
+SPEC_BEFORE=""
+[ "$CANARY" = "1" ] && SPEC_BEFORE=$(spec_counters)
 
 ladder
 prefill
@@ -248,6 +286,28 @@ fi
 SAMPLER_POSTCOND=ok
 verify_sampler_cache || SAMPLER_POSTCOND=fail
 
+# Degenerate-engine canary (see header). Runs before the tally so a broken
+# engine is reported as broken, not as missing JIT coverage.
+DEGENERATE=""
+if [ "$CANARY" = "1" ]; then
+  if [ "$(cat "$tmpdir/c1-1" 2>/dev/null)" = "ok" ]; then
+    c1_reply=$(reply_content "$tmpdir/c1-1.resp.json")
+    if ! printf '%s' "$c1_reply" | grep -qi 'ok'; then
+      DEGENERATE="${DEGENERATE}; content: c1 (temperature 0, \"Reply with OK.\") answered ${c1_reply:0:40}"
+    fi
+  fi
+  SPEC_AFTER=$(spec_counters)
+  if [ -n "$SPEC_BEFORE" ] && [ -n "$SPEC_AFTER" ]; then
+    read -r d0 a0 <<<"$SPEC_BEFORE"
+    read -r d1 a1 <<<"$SPEC_AFTER"
+    drafted=$((d1 - d0)) accepted=$((a1 - a0))
+    echo "  canary: DFlash accepted ${accepted}/${drafted} drafted tokens during the sweep"
+    if [ "$drafted" -ge "$CANARY_MIN_DRAFTS" ] && [ "$accepted" -eq 0 ]; then
+      DEGENERATE="${DEGENERATE}; acceptance: 0/${drafted} drafted tokens accepted"
+    fi
+  fi
+fi
+
 total=0 ok_count=0
 for f in "$tmpdir"/*-*; do
   [ -f "$f" ] || continue
@@ -262,6 +322,14 @@ if [ "$total" -ne "$EXPECTED_REQUESTS" ]; then
 fi
 total_t1=$(date +%s)
 echo "boot-shape-warmup: ${ok_count}/${total} requests ok in $((total_t1 - total_t0))s"
+
+if [ -n "$DEGENERATE" ]; then
+  echo "boot-shape-warmup: DEGENERATE ENGINE — ${DEGENERATE#; }. The engine answers /health but its output is not trustworthy; restart the kit (a later boot of the same image is usually fine). GLM53_WARMUP_CANARY=0 skips this check." >&2
+  if [ "$ok_count" -lt "$total" ]; then
+    echo "boot-shape-warmup: $((total - ok_count)) warmup request(s) also failed (unbounded arms that never stop are expected on a degenerate engine)" >&2
+  fi
+  exit 3
+fi
 
 if [ "$ok_count" -lt "$total" ]; then
   echo "boot-shape-warmup: $((total - ok_count)) request(s) failed — uncovered shapes may JIT mid-serve" >&2

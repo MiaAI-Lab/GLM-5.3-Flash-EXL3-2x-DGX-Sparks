@@ -2378,14 +2378,25 @@ post_ready_warmup() {
     [ -f "$SCRIPT_DIR/scripts/boot-shape-warmup.sh" ] \
         || { warn "boot-shape-warmup.sh missing — skipping"; return 0; }
     log "post-ready DFlash2/sampler warmup (nonfatal; timeout ${GLM53_WARMUP_REQ_TIMEOUT}s/req) ..."
+    local rc=0
     GLM53_WARMUP_MAX_CONCURRENCY="$MAX_NUM_SEQS" \
     GLM53_WARMUP_REQ_TIMEOUT="$GLM53_WARMUP_REQ_TIMEOUT" \
     GLM53_WARMUP_DFLASH_K="${DFLASH_TOKENS:-7}" \
     GLM53_WARMUP_TRITON_CACHE_DIR="$TRITON_HOST_CACHE" \
     GLM53_WARMUP_BEARER="${VLLM_API_KEY:-}" \
+    GLM53_WARMUP_CANARY="${GLM53_WARMUP_CANARY:-1}" \
         bash "$SCRIPT_DIR/scripts/boot-shape-warmup.sh" \
             "http://127.0.0.1:${PORT}" "$SERVED_MODEL_NAME" \
-        || warn "boot shape warmup incomplete — uncovered shapes may JIT mid-serve on TP=3"
+        || rc=$?
+    if [ "$rc" = "3" ]; then
+        # Degenerate-engine canary: the engine is up but generating garbage
+        # (see scripts/boot-shape-warmup.sh). Keep the evidence, then take it
+        # off the port: a client must not reach an engine we just judged broken.
+        collect_failure_logs 2>/dev/null || true
+        stop || true
+        die "engine failed the post-ready correctness canary (degenerate output / zero DFlash acceptance); logs in $LOGDIR/, containers stopped — start again (a later boot is usually fine); GLM53_WARMUP_CANARY=0 skips the check"
+    fi
+    [ "$rc" = "0" ] || warn "boot shape warmup incomplete — uncovered shapes may JIT mid-serve on TP=3"
 }
 
 collect_failure_logs() {

@@ -11,6 +11,20 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Added
 
+- Boot correctness canary in `scripts/boot-shape-warmup.sh`
+  (`GLM53_WARMUP_CANARY`, default `1`): the post-ready sweep now keeps the
+  reply bodies and scrapes the DFlash counters. If the bounded temperature-0
+  `c1` arm ("Reply with OK.", thinking off) does not answer OK, or DFlash
+  accepts 0 of at least `GLM53_WARMUP_CANARY_MIN_DRAFTS` (64) drafted tokens,
+  the script exits 3 with `DEGENERATE ENGINE` and `start.sh` / `start-tp3.sh`
+  / `start-tp4.sh` collect logs, stop the containers and fail instead of
+  announcing READY (a broken engine must not stay reachable on the port). Before
+  this, such a boot (#249 signature: garbage output, ~0 acceptance) showed up
+  only as unbounded warmup arms timing out after 240 s, reported as
+  "uncovered shapes may JIT mid-serve", and went into service. Ordinary
+  warmup failures stay nonfatal. `tests/test_boot_shape_warmup.py` gains
+  degenerate, zero-acceptance and canary-off cases plus a static check of the
+  three launchers' rc-3 path.
 - Auto/lazy safetensors staging (`GLM53_LOAD_CLONE=1`) and optional bounded
   local-shard read-ahead (`GLM53_LOAD_PREFETCH=0`, decimal `0..16`) on TP2/TP3/TP4.
   Preserve InstantTensor selection, rank parity, PR230 safety and compact-draft
