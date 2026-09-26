@@ -1,0 +1,18 @@
+{
+  "upstream_base": "775a58b704924b13cf5c38de97559b3630f67bbf",
+  "old_policy_regressions": {
+    "tests": [
+      "test_blocked_waiters_cannot_starve_resident_with_max_chunks_1",
+      "test_blocked_waiters_beyond_window_cannot_starve_resident_with_max_chunks_8",
+      "test_failed_waiter_rotates_so_later_allocatable_waiter_is_served"
+    ],
+    "failures": 3,
+    "errors": 0
+  },
+  "candidate_v5_source_input": "33/33 passed including authenticated v5 migration",
+  "candidate_v6_source_input": "33/33 passed; fresh/restart image input supported",
+  "restart_adaptive_overlay_ordering": "passed",
+  "python_compile": "passed",
+  "tested_overlay_sha256": "0870fab903a4e6a7323037834e5c4843d1abe1503b1b7b2dcc5f85de54a524df",
+  "docker_image_rebuilt_for_publication": false
+}
