@@ -1305,6 +1305,9 @@ The rewrite is pinned by SHA-256 to the backend shipped in this image and refuse
 the default `0` is byte-identical stock. It was qualified on another 4x GB10 kit with
 `DFLASH_TOKENS=3`, mixed prefill `off` and `--enforce-eager`; treat other combinations as
 unqualified until soaked. It does not identify or fix the underlying race.
+`GLM53_ADAPTIVE_K` (and `GLM53_ADAPTIVE_K_SET`, `_ALPHA`, `_MARGIN`, `_MIN_STEPS`, `_SATURATE`,
+`_HIST`) work on this launcher with the same defaults and capture-size handling as `start.sh`
+(see *Faster prose decode*). `GLM53_DENSE_FP8` is not wired here.
 
 Do not pull `glm53-flash-sm121:v8` — that is the older NVFP4/Ray kernel.
 

@@ -114,6 +114,10 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   dry-capture when `CG_ESTIMATE=0` discards it anyway (KV profile 18 → 7 s);
   kill-first parallel stop and a 1 s `/health` poll. Receipts in
   `docs/cold-load-uma.md`.
+- `start-tp4.sh` forwards adaptive verification length (`GLM53_ADAPTIVE_K` and
+  its six companion knobs) to every rank and extends the DFlash capture-size list
+  the way `start.sh` has since 2026-09-08; the four-node launcher previously
+  ignored the knobs silently. Defaults unchanged (`off`).
 - Opt-in SM121 **thin-decode** kernels for the EXL3 routed experts
   (`GLM53_EXL3_MOE_FAST`, default `0`): `overlay/patch_exl3_decode_pipeline.py`
   adds two K4/N256 fast kernels (shared / independent gate-up input transform)
