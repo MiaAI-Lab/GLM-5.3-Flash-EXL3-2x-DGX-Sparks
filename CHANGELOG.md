@@ -229,6 +229,18 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   speedup or VRAM reduction is claimed. Default remains off; see README
   for the full matrix, cache-residency limits and source-pinned receipt.
 
+### Fixed
+
+- `overlay/patch_scheduler_decode_floor.py` fair-prefill candidate ranking now
+  honors request `priority` when the server runs `--scheduling-policy
+  priority`: a lower numeric priority wins among eligible prefills, and the
+  existing service-age/round-robin ordering is preserved within a priority
+  tier. Under the default FCFS policy the ranking is byte-for-byte the
+  previous one. Service-time credit, chunk limits and running-decoder
+  protection are unchanged. Installed v5 helpers are migrated in place
+  (fail-closed: unknown or drifted anchors are rejected without a write) and
+  repeated application stays byte-identical.
+
 ## [1.6.0] — 2026-09-17
 
 TP3 ABI2 cooperative MoE and opt-in FlashKDA, ABLIT off, and new sparkDash
