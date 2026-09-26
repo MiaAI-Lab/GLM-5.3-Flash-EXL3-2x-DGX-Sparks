@@ -1211,6 +1211,14 @@ Containers are `glm53-exl3-tp3-*` so a TP=2 serve is not reused. Port is still
 Layout (mp executor, not Ray): rank 0 `HEAD_IP` (API), rank 1 `WORKER_IP`,
 rank 2 `WORKER2_IP` — `--tensor-parallel-size 3 --nnodes 3`.
 
+**Image-history turns stalling over management Wi-Fi:** NCCL using RoCE does
+not mean the Python worker broadcasts use CX7. Those TCP broadcasts include
+processed multimodal tensors, even on processor/prefix cache hits. Use the
+existing per-rank `*_HOST_IP` settings with mutually reachable CX7 addresses;
+keep Gloo/bootstrap on management if needed. The [routed-triangle guide](docs/tp3-cx7-rpc.md)
+covers the three host routes, persistent setup, an image/tool-turn probe and
+rollback. No new launcher flag or model patch is required.
+
 **TP=3 is not TP=2 plus one node, and not TP=4 with one node removed.** Almost
 nothing in this model divides by three. `overlay/tp3/` (FlyCockpit, MIT; used
 only by `start-tp3.sh`) plus these flags are what make it load:
