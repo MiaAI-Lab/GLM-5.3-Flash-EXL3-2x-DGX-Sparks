@@ -2400,3 +2400,291 @@ class Exl3MoEMethod(FusedMoEMethodBase):
         return apply_exl3_experts(
             x, topk_ids, topk_weights, layer, limit=float(limit)
         )
+# ===== SENS8 opt-in decode routing (TP2/SM121) =====
+# Request-local C=28 coresets on speculative verify steps. One fixed
+# kernel launch per router call; request partitions ride as dynamic device
+# metadata (never baked into graph control flow). See docs/sens8-router.md
+# and kernel_lab/sens8/. Single boolean flag GLM53_SENS8_ROUTER=0|1
+# (default 0). Flag OFF leaves the stock router path completely untouched
+# (this integration is not installed); flag ON installs the qualified
+# graph-safe general router below.
+# Provenance: routing math informed by rodman80/glm-5.3-flash-w4a16-2x-DGX-Sparks
+# perf/sens8-integration (read-only donor); graph-safe dynamic-boundary
+# integration, SM121 validation and quality qualification done in this repo.
+_SENS8_FLAG = "GLM53_SENS8_ROUTER"
+_SENS8_C = 28  # frozen donor-equivalent coreset size; not a knob.
+_SENS8_SENSITIVE_LAYERS = frozenset()  # qualified with no mask; any future mask needs a new prospective study.
+_SENS8_N_EXPERTS = 288
+_SENS8_TOPK = 8
+_SENS8_MODE_STOCK, _SENS8_MODE_SENS8 = 0, 1
+_SENS8_LOG_EVERY = 200
+# Metadata layout: int32[6] = {mode, nb, len0..len3}. Full overwrite per
+# prepare; unused lens are 0. Sane SENS8 partitions: nb<=4, M<=128, rows
+# 1..16 per block. Anything else (or flag off / no verify) -> STOCK mode.
+_sens8_last_mode = _SENS8_MODE_STOCK
+_sens8_prep_n = 0
+_sens8_seq: dict = {}
+_sens8_out_pool: dict = {}
+_sens8_meta_cpu = None
+_sens8_meta_dev = None
+_sens8_dbg_dev = None
+_sens8_ext = {"m": None, "tried": False}
+_sens8_stats = {
+    "router_calls": 0, "stock_mode": 0, "sens8_mode": 0,
+    "verify_prepares": 0, "dbg_cum_stock": 0, "dbg_cum_sens8": 0,
+    "fallbacks": {}, "block_hist": {}, "m_hist": {}, "routers": 0,
+}
+_sens8_installed = False
+_sens8_dormant_reason = "not installed"
+
+
+def _sens8_enabled() -> bool:
+    try:
+        return os.environ.get(_SENS8_FLAG, "0") == "1"
+    except Exception:
+        return False
+
+
+def _sens8_bump(meta_mode: str) -> None:
+    st = _sens8_stats
+    st["router_calls"] += 1
+    if meta_mode == "sens8":
+        st["sens8_mode"] += 1
+    else:
+        st["stock_mode"] += 1
+    if st["router_calls"] % _SENS8_LOG_EVERY == 0:
+        logger.info(
+            "sens8g-engage calls=%d stock-mode=%d sens8-mode=%d routers=%d "
+            "fallbacks=%s blocks=%s m=%s",
+            st["router_calls"], st["stock_mode"], st["sens8_mode"],
+            st["routers"], dict(st["fallbacks"]), dict(st["block_hist"]),
+            dict(st["m_hist"]))
+
+
+def _sens8_loader():
+    d = _sens8_ext
+    if d["m"] is not None:
+        return d["m"]
+    if d["tried"]:
+        return None
+    d["tried"] = True
+    os.environ.setdefault("TORCH_EXTENSIONS_DIR", "/root/.cache/vllm/sens8g-ext")
+    for cand in ("/opt/glm53/sens8", str(Path(__file__).resolve().parent.parent
+                                          / "kernel_lab" / "sens8")):
+        spec = importlib.util.spec_from_file_location(
+            "glm53_sens8g_loader", os.path.join(cand, "sens8g_loader.py"))
+        if spec is None or spec.loader is None:
+            continue
+        try:
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["glm53_sens8g_loader"] = mod
+            spec.loader.exec_module(mod)
+            d["m"] = mod
+            logger.info("sens8g: loader ready from %s", cand)
+            return mod
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sens8g: loader from %s failed: %r", cand, exc)
+    logger.warning("sens8g: no loader usable")
+    return None
+
+
+def _sens8_dbg_buffer(device):
+    global _sens8_dbg_dev
+    import torch as _t
+    if _sens8_dbg_dev is not None and _sens8_dbg_dev.device == device:
+        return _sens8_dbg_dev
+    _sens8_dbg_dev = _t.zeros(2, dtype=_t.int32, device=device)
+    return _sens8_dbg_dev
+
+
+def _sens8_meta_buffers(device):
+    global _sens8_meta_cpu, _sens8_meta_dev
+    if _sens8_meta_dev is not None and _sens8_meta_dev.device == device:
+        return _sens8_meta_cpu, _sens8_meta_dev
+    import torch as _t
+    _sens8_meta_cpu = _t.zeros(6, dtype=_t.int32, pin_memory=True)
+    _sens8_meta_dev = _t.zeros(6, dtype=_t.int32, device=device)
+    return _sens8_meta_cpu, _sens8_meta_dev
+
+
+def _sens8_out_for(m, device):
+    ent = _sens8_out_pool.get((m, str(device)))
+    if ent is not None:
+        return ent
+    import torch as _t
+    ent = (_t.empty((m, _SENS8_TOPK), dtype=_t.int32, device=device),
+           _t.empty((m, _SENS8_TOPK), dtype=_t.float32, device=device))
+    if len(_sens8_out_pool) >= 24:
+        _sens8_out_pool.clear()
+    _sens8_out_pool[(m, str(device))] = ent
+    return ent
+
+
+def _sens8_write_meta(mode, blocks, device) -> None:
+    # Full overwrite, every prepare, whenever installed (identical cost in
+    # all arms). BLOCKING copy: graph replay runs on a different stream
+    # than prepare, so a non-blocking copy arrives one step late (observed
+    # in smoke: kernels read the previous step's metadata). Correctness
+    # first; ~10us per forward, identical in all arms.
+    cpu, dev = _sens8_meta_buffers(device)
+    vals = [mode, len(blocks)] + list(blocks) + [0] * (4 - len(blocks))
+    cpu[:6] = torch.tensor(vals, dtype=torch.int32)
+    dev.copy_(cpu, non_blocking=False)
+
+
+def _sens8_install() -> None:
+    global _sens8_installed, _sens8_dormant_reason
+    if _sens8_installed:
+        return
+    try:
+        from vllm.v1.worker.gpu import model_runner as _mr
+        from vllm.model_executor.layers.fused_moe.router import (
+            grouped_topk_router as _gtr)
+    except Exception as exc:  # noqa: BLE001
+        _sens8_dormant_reason = f"import: {exc!r}"
+        return
+    if not hasattr(_mr.GPUModelRunner, "prepare_inputs"):
+        _sens8_dormant_reason = "no prepare_inputs"
+        return
+    if not hasattr(_gtr.GroupedTopKRouter, "_compute_routing"):
+        _sens8_dormant_reason = "no _compute_routing"
+        return
+    _orig_prepare = _mr.GPUModelRunner.prepare_inputs
+    _orig_routing = _gtr.GroupedTopKRouter._compute_routing
+    _ = _orig_routing  # replaced unconditionally below; kept for reference.
+
+    def _prepare(self, scheduler_output, batch_req_state, batch_desc):
+        global _sens8_last_mode, _sens8_prep_n
+        _sens8_last_mode = _SENS8_MODE_STOCK
+        _sens8_prep_n += 1
+        out = _orig_prepare(self, scheduler_output, batch_req_state,
+                            batch_desc)
+        # Always (re)write metadata: freshness under replay depends on it.
+        try:
+            dev = self.device
+        except Exception:  # noqa: BLE001
+            return out
+        try:
+            drafts = out.num_draft_tokens_per_req
+            blocks = None
+            if (drafts is not None and len(drafts) > 0
+                    and bool((drafts > 0).all())
+                    and not bool(out.has_prefill)):
+                import numpy as _np
+                cu = [int(v) for v in _np.diff(out.cu_num_logits_np)]
+                if cu and all(v > 0 for v in cu):
+                    blocks = tuple(cu)
+            mode = _SENS8_MODE_STOCK
+            if (_sens8_enabled() and blocks is not None
+                    and len(blocks) <= 4 and sum(blocks) <= 128
+                    and all(1 <= n <= 16 for n in blocks)):
+                mode = _SENS8_MODE_SENS8
+            # ORDER MATTERS (async scheduler overlaps prepare N+1 with
+            # forward N's not-yet-executed kernels): FIRST let forward N
+            # finish consuming meta_N (the .to("cpu") read is a full barrier
+            # BEFORE any overwrite), then reset and write meta_N+1. Writing
+            # before the barrier defers forward N's kernels until after the
+            # overwrite (deterministic one-step lag; observed twice).
+            # Device-counter read: every 20th prepare only (the read
+            # syncs; amortized to irrelevance, identical in all arms).
+            # Totals stay exact (reset on every read).
+            try:
+                if _sens8_prep_n % 20 == 0:
+                    _dbg = _sens8_dbg_buffer(dev).to("cpu")
+                    _sens8_stats["dbg_cum_stock"] += int(_dbg[0])
+                    _sens8_stats["dbg_cum_sens8"] += int(_dbg[1])
+                    logger.info(
+                        "sens8g-step mode=%d blocks=%s dbg_stock=%d dbg_sens8=%d "
+                        "cum_prep=%d cum_dbg_sens8=%d",
+                        mode, blocks,
+                        int(_dbg[0]), int(_dbg[1]),
+                        _sens8_stats["verify_prepares"],
+                        _sens8_stats["dbg_cum_sens8"])
+                    _sens8_dbg_buffer(dev).zero_()
+            except Exception:  # noqa: BLE001
+                pass
+            _sens8_write_meta(mode, blocks or (1,), dev)
+            _sens8_last_mode = mode
+            if mode == _SENS8_MODE_SENS8:
+                bh = _sens8_stats["block_hist"]
+                bh[blocks] = bh.get(blocks, 0) + 1
+                _sens8_stats["verify_prepares"] += 1
+        except Exception as exc:  # noqa: BLE001
+            # Metadata writer must never break the forward: force STOCK.
+            try:
+                _sens8_write_meta(_SENS8_MODE_STOCK, (1,), dev)
+            except Exception:
+                pass
+            fb = _sens8_stats["fallbacks"]
+            fb[f"meta-error:{type(exc).__name__}"] = fb.get(
+                f"meta-error:{type(exc).__name__}", 0) + 1
+        return out
+
+    def _routing(self, hidden_states, router_logits, indices_type, *,
+                 input_ids=None):
+        # NO branch on the launch: the fixed general kernel reads mode and
+        # blocks from device metadata (fresh per replay). Capture-safe.
+        key = id(self)
+        if key not in _sens8_seq:
+            _sens8_seq[key] = len(_sens8_seq)
+            _sens8_stats["routers"] = len(_sens8_seq)
+        layer = _sens8_seq[key] + 3  # MoE layers 3..44 by creation order.
+        m = int(router_logits.shape[0])
+        mh = _sens8_stats["m_hist"]
+        mh[m] = mh.get(m, 0) + 1
+        if (router_logits.shape[-1] != _SENS8_N_EXPERTS
+                or layer in _SENS8_SENSITIVE_LAYERS):
+            fb = _sens8_stats["fallbacks"]
+            fb["bad-shape-or-sensitive"] = fb.get("bad-shape-or-sensitive", 0) + 1
+            return _orig_routing(self, hidden_states, router_logits,
+                                 indices_type, input_ids=input_ids)
+        sl = _sens8_loader()
+        if sl is None:
+            fb = _sens8_stats["fallbacks"]
+            fb["no-ext"] = fb.get("no-ext", 0) + 1
+            return _orig_routing(self, hidden_states, router_logits,
+                                 indices_type, input_ids=input_ids)
+        try:
+            bias = self.e_score_correction_bias
+            if bias is None or int(bias.numel()) != _SENS8_N_EXPERTS:
+                raise RuntimeError("bad bias")
+            dev = router_logits.device
+            _, meta_dev = _sens8_meta_buffers(dev)
+            dbg_dev = _sens8_dbg_buffer(dev)
+            ids, w = _sens8_out_for(m, dev)
+            lg = (router_logits if router_logits.is_contiguous()
+                  else router_logits.contiguous())
+            sl.fused_forward(lg, bias, meta_dev, ids, w, dbg_dev)
+        except Exception as exc:  # noqa: BLE001
+            fb = _sens8_stats["fallbacks"]
+            fb[f"kernel-error:{type(exc).__name__}"] = fb.get(
+                f"kernel-error:{type(exc).__name__}", 0) + 1
+            return _orig_routing(self, hidden_states, router_logits,
+                                 indices_type, input_ids=input_ids)
+        # Counter label is eager-side only (replay skips Python);
+        # engagement is proven via output uniques, not these counters.
+        _sens8_bump("sens8" if _sens8_last_mode == _SENS8_MODE_SENS8 else "stock")
+        return w, ids  # vLLM convention: (weights, ids).
+
+    _mr.GPUModelRunner.prepare_inputs = _prepare
+    _gtr.GroupedTopKRouter._compute_routing = _routing
+    _sens8_installed = True
+    _sens8_dormant_reason = ""
+    logger.info("sens8g: integration installed (flag %s, default 0)",
+                _SENS8_FLAG)
+
+
+if _sens8_enabled():
+    # Install ONLY on explicit opt-in: at flag=0 the stock prepare/routing
+    # paths are never wrapped (zero overhead, literally untouched).
+    _sens8_install()
+if not _sens8_installed and _sens8_enabled():
+    # Fail closed: never boot stock with the flag ON when the hooks did
+    # not install (that would invalidate the A/B). Dormant + flag OFF is
+    # plain stock and stays silent.
+    # NOTE: the closing paren keeps 8-space indent on purpose: the launcher
+    # preflight requires overlay/exl3.py to end with "        )".
+    raise RuntimeError(
+        "GLM53_SENS8_ROUTER=1 but the SENS8 hooks are dormant: "
+        f"{_sens8_dormant_reason}"
+        )

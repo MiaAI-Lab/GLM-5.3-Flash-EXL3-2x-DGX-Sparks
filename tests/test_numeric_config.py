@@ -253,6 +253,29 @@ def test_kda_bf16_large_m_flag_rejects_bad_values_before_host_actions() -> None:
             assert not harness.host_touching_calls(), (value, harness.calls())
 
 
+def test_sens8_router_flag_rejects_bad_values_before_host_actions() -> None:
+    """GLM53_SENS8_ROUTER is exactly 0/1 and validated before any stop.
+
+    The overlay integration installs only on literal ``1`` and raises on
+    anything else at model load, so a typo must not cost a running pair.
+    """
+    from test_launcher_rank_parity import Harness
+
+    with tempfile.TemporaryDirectory() as directory:
+        harness = Harness(Path(directory))
+        for value in ("0", "1"):
+            result = harness.run(
+                "validate_numeric_config", entry="start.fn.sh",
+                GLM53_SENS8_ROUTER=value)
+            assert result.returncode == 0, (value, result.stderr)
+            assert not harness.host_touching_calls()
+        for value in ("", "yes", " 1", "1 ", "2", "true"):
+            result = harness.run("restart", GLM53_SENS8_ROUTER=value)
+            assert result.returncode == 2, (value, result.stderr)
+            assert "GLM53_SENS8_ROUTER" in result.stderr, value
+            assert not harness.host_touching_calls(), (value, harness.calls())
+
+
 def test_tp3_kda_bf16_large_m_flag_is_0_or_1() -> None:
     """start-tp3.sh validates GLM53_KDA_BF16_LARGE_M before any stop."""
     guard = guard_source(ROOT / "start-tp3.sh")
