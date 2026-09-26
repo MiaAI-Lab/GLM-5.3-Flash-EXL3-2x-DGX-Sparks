@@ -168,7 +168,9 @@ NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 # Empty = let NCCL pick the channel count. A positive integer pins both
 # NCCL_MIN_NCHANNELS and NCCL_MAX_NCHANNELS on both ranks (Entrpi 2× Spark: 8).
 NCCL_NCHANNELS="${NCCL_NCHANNELS:-}"
-NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-3}"
+# Explicitly empty = NCCL per-HCA RoCEv2 GID auto-selection (needed for dual-rail
+# pairs whose rail-2 GID tables shift after a reboot). Unset still defaults to 3.
+NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX-3}"
 # The RoCEv2 GID index is per-NIC: the usable entry is the one whose GID matches
 # that node's own fabric IP. Most pairs share a good index; some do not (this kit
 # needs head=4, worker=3). Unset, both inherit NCCL_IB_GID_INDEX -> unchanged.
@@ -191,6 +193,11 @@ USE_HOST_NCCL="${USE_HOST_NCCL:-0}"
 TP="${TP:-2}"
 NNODES="${NNODES:-2}"
 PORT="${PORT:-8888}"
+# Address the API binds to (0.0.0.0 = all interfaces) and the address local
+# health checks / warmup / banners use. API_HOST defaults to BIND_HOST when that
+# is a concrete address, else 127.0.0.1.
+BIND_HOST="${BIND_HOST:-0.0.0.0}"
+if [ "$BIND_HOST" = "0.0.0.0" ]; then API_HOST="${API_HOST:-127.0.0.1}"; else API_HOST="${API_HOST:-$BIND_HOST}"; fi
 MASTER_PORT="${MASTER_PORT:-29521}"
 
 MTP_TOKENS="${MTP_TOKENS:-2}"
@@ -928,7 +935,18 @@ banner() {
     printf '\n'
 }
 
-worker_ssh() { ssh -T -o BatchMode=yes -o ConnectTimeout=15 "$WORKER_SSH" "$@"; }
+# WORKER_DOCKER_SUDO=1 routes the worker's docker calls through passwordless
+# sudo instead of requiring docker-group membership on the worker account.
+WORKER_DOCKER_SUDO="${WORKER_DOCKER_SUDO:-0}"
+worker_ssh() {
+    if [ "$WORKER_DOCKER_SUDO" = "1" ]; then
+        local command='docker() { sudo -n /usr/bin/docker "$@"; }; '
+        command+="$*"
+        ssh -T -o BatchMode=yes -o ConnectTimeout=15 "$WORKER_SSH" "$command"
+    else
+        ssh -T -o BatchMode=yes -o ConnectTimeout=15 "$WORKER_SSH" "$@"
+    fi
+}
 
 # Print the whole header block: everything between the shebang and
 # `set -euo pipefail`, minus the ==== rulers. Beats a magic line number, which
@@ -1122,41 +1140,45 @@ preflight() {
     worker_ssh "nvidia-smi -L 2>/dev/null | grep -q GB10" \
         || warn "no GB10 GPU visible on worker"
 
-    # Each rank's GID index must be populated on EVERY selected CX7 device.
-    # HEAD_CX7_IB / WORKER_CX7_IB are literal names or comma-separated lists;
-    # pass the original values unchanged to NCCL below.
-    local gid_head=ok gid_worker=ok gid_path hca i
-    local -a head_hcas worker_hcas
-    IFS=, read -r -a head_hcas <<< "$HEAD_CX7_IB"
-    IFS=, read -r -a worker_hcas <<< "$WORKER_CX7_IB"
-    for hca in "${head_hcas[@]}"; do
-        gid_path="/sys/class/infiniband/${hca}/ports/1/gids/${HEAD_GID}"
-        if [ -z "$(cat "$gid_path" 2>/dev/null | tr -d ':0' || true)" ]; then
-            gid_head=""
-            warn "head GID index ${HEAD_GID} is EMPTY on ${hca}"
-        fi
-    done
-    for hca in "${worker_hcas[@]}"; do
-        gid_path="/sys/class/infiniband/${hca}/ports/1/gids/${WORKER_GID}"
-        if [ -z "$(worker_ssh "cat '$gid_path' 2>/dev/null" | tr -d ':0' || true)" ]; then
-            gid_worker=""
-            warn "worker GID index ${WORKER_GID} is EMPTY on ${hca}"
-        fi
-    done
-    if [ -z "$gid_head" ] || [ -z "$gid_worker" ]; then
-        warn "GID tables — pick each node's ::ffff:<ip> entry whose type is RoCE v2;"
-        warn "the two indices need not match, and a v1 entry at the same index will not work:"
+    if [ -z "${HEAD_GID}" ] && [ -z "${WORKER_GID}" ]; then
+        log "GID indexes empty on both ranks - NCCL per-HCA RoCEv2 auto-selection (dual-rail mode)"
+    else
+        # Each rank's GID index must be populated on EVERY selected CX7 device.
+        # HEAD_CX7_IB / WORKER_CX7_IB are literal names or comma-separated lists;
+        # pass the original values unchanged to NCCL below.
+        local gid_head=ok gid_worker=ok gid_path hca i
+        local -a head_hcas worker_hcas
+        IFS=, read -r -a head_hcas <<< "$HEAD_CX7_IB"
+        IFS=, read -r -a worker_hcas <<< "$WORKER_CX7_IB"
         for hca in "${head_hcas[@]}"; do
-            for i in 0 1 2 3 4 5 6 7; do
-                printf '    head   %s gid%s: %-40s %s\n' "$hca" "$i" \
-                    "$(cat "/sys/class/infiniband/${hca}/ports/1/gids/$i" 2>/dev/null)" \
-                    "$(cat "/sys/class/infiniband/${hca}/ports/1/gid_attrs/types/$i" 2>/dev/null)" >&2
-            done
+            gid_path="/sys/class/infiniband/${hca}/ports/1/gids/${HEAD_GID}"
+            if [ -z "$(cat "$gid_path" 2>/dev/null | tr -d ':0' || true)" ]; then
+                gid_head=""
+                warn "head GID index ${HEAD_GID} is EMPTY on ${hca}"
+            fi
         done
         for hca in "${worker_hcas[@]}"; do
-            worker_ssh "for i in 0 1 2 3 4 5 6 7; do printf '    worker %s gid%s: %-40s %s\n' '${hca}' \"\$i\" \"\$(cat /sys/class/infiniband/${hca}/ports/1/gids/\$i 2>/dev/null)\" \"\$(cat /sys/class/infiniband/${hca}/ports/1/gid_attrs/types/\$i 2>/dev/null)\"; done" >&2 || true
+            gid_path="/sys/class/infiniband/${hca}/ports/1/gids/${WORKER_GID}"
+            if [ -z "$(worker_ssh "cat '$gid_path' 2>/dev/null" | tr -d ':0' || true)" ]; then
+                gid_worker=""
+                warn "worker GID index ${WORKER_GID} is EMPTY on ${hca}"
+            fi
         done
-        die "set NCCL_IB_GID_INDEX (same index both ranks) or HEAD_GID/WORKER_GID (per rank) in .env to populated indices"
+        if [ -z "$gid_head" ] || [ -z "$gid_worker" ]; then
+            warn "GID tables — pick each node's ::ffff:<ip> entry whose type is RoCE v2;"
+            warn "the two indices need not match, and a v1 entry at the same index will not work:"
+            for hca in "${head_hcas[@]}"; do
+                for i in 0 1 2 3 4 5 6 7; do
+                    printf '    head   %s gid%s: %-40s %s\n' "$hca" "$i" \
+                        "$(cat "/sys/class/infiniband/${hca}/ports/1/gids/$i" 2>/dev/null)" \
+                        "$(cat "/sys/class/infiniband/${hca}/ports/1/gid_attrs/types/$i" 2>/dev/null)" >&2
+                done
+            done
+            for hca in "${worker_hcas[@]}"; do
+                worker_ssh "for i in 0 1 2 3 4 5 6 7; do printf '    worker %s gid%s: %-40s %s\n' '${hca}' \"\$i\" \"\$(cat /sys/class/infiniband/${hca}/ports/1/gids/\$i 2>/dev/null)\" \"\$(cat /sys/class/infiniband/${hca}/ports/1/gid_attrs/types/\$i 2>/dev/null)\"; done" >&2 || true
+            done
+            die "set NCCL_IB_GID_INDEX (same index both ranks) or HEAD_GID/WORKER_GID (per rank) in .env to populated indices"
+        fi
     fi
 
     [ "$TP" = "2" ] || warn "TP=${TP} on a 2×1-GPU cluster — expected TP=2"
@@ -1775,7 +1797,7 @@ say() { echo "[glm53-exl3-head] $*"; }
 
 ARGS=(
     --served-model-name "${SERVED_MODEL_NAME}"
-    --host 0.0.0.0
+    --host "${BIND_HOST:-0.0.0.0}"
     --port "${PORT}"
     --tensor-parallel-size "${TP}"
     --nnodes "${NNODES}"
@@ -1854,7 +1876,7 @@ say() { echo "[glm53-exl3-worker] $*"; }
 
 ARGS=(
     --served-model-name "${SERVED_MODEL_NAME}"
-    --host 0.0.0.0
+    --host "${BIND_HOST:-0.0.0.0}"
     --port "${PORT}"
     --tensor-parallel-size "${TP}"
     --nnodes "${NNODES}"
@@ -2355,6 +2377,7 @@ launch_cluster() {
         -e VLLM_HOST_IP="$HEAD_IP" \
         -e SERVED_MODEL_NAME="$SERVED_MODEL_NAME" \
         -e PORT="$PORT" -e TP="$TP" -e NNODES="$NNODES" \
+        -e BIND_HOST="$BIND_HOST" \
         -e HEAD_IP="$HEAD_IP" -e MASTER_PORT="$MASTER_PORT" \
         -e QUANTIZATION="$QUANTIZATION" \
         -e MAX_MODEL_LEN="$MAX_MODEL_LEN" -e GPU_MEM_UTIL="$GPU_MEM_UTIL" \
@@ -2414,7 +2437,7 @@ launch_cluster() {
 
 # ---------------------------- health wait ----------------------------------
 wait_for_health() {
-    local url="http://127.0.0.1:${PORT}/health"
+    local url="http://${API_HOST}:${PORT}/health"
     log "waiting for ${url} (weight load + warmup on a 320B MoE is slow; timeout ${READY_TIMEOUT}s) ..."
     log "streaming head logs live — Ctrl-C detaches, the server keeps running"
 
@@ -2500,7 +2523,7 @@ post_ready_warmup() {
     GLM53_WARMUP_TRITON_CACHE_DIR="$TRITON_HOST_CACHE" \
     GLM53_WARMUP_BEARER="${VLLM_API_KEY:-}" \
         bash "$SCRIPT_DIR/scripts/boot-shape-warmup.sh" \
-            "http://127.0.0.1:${PORT}" "$SERVED_MODEL_NAME" \
+            "http://${API_HOST}:${PORT}" "$SERVED_MODEL_NAME" \
         || warn "boot shape warmup incomplete — uncovered shapes may JIT mid-serve on TP=2"
 }
 
@@ -2513,7 +2536,7 @@ collect_failure_logs() {
 on_ready() {
     log "======================================================================"
     log "GLM-5.3-Flash EXL3 is UP (TP=${TP}, nnodes=${NNODES})"
-    log "  endpoints  : http://127.0.0.1:${PORT}/v1   (LAN: ${HEAD_IP}:${PORT})"
+    log "  endpoints  : http://${API_HOST}:${PORT}/v1   (LAN: ${HEAD_IP}:${PORT})"
     log "  model name : ${SERVED_MODEL_NAME}"
     log "  weights    : ${MODEL}  quant=${QUANTIZATION}  kv=${KV_CACHE_DTYPE}"
     local vision=on
@@ -2532,7 +2555,7 @@ on_ready() {
     fi
     log "  auth       : ${auth_line}"
     log "  quick test :"
-    log "    curl -s http://127.0.0.1:${PORT}/v1/chat/completions \\"
+    log "    curl -s http://${API_HOST}:${PORT}/v1/chat/completions \\"
     if [ -n "${VLLM_API_KEY:-}" ]; then
         log "      -H 'Authorization: Bearer <KEY>' \\"
     fi
@@ -2615,8 +2638,8 @@ stop() {
 status() {
     log "head (${CONTAINER_HEAD} on $(hostname)):"
     docker ps -a --filter "name=${CONTAINER_HEAD}" --format '  {{.Names}}  {{.Status}}' || true
-    if curl -fsS -m 5 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
-        log "  API: healthy — http://127.0.0.1:${PORT}/v1"
+    if curl -fsS -m 5 "http://${API_HOST}:${PORT}/health" >/dev/null 2>&1; then
+        log "  API: healthy — http://${API_HOST}:${PORT}/v1"
     else
         log "  API: not responding"
     fi
