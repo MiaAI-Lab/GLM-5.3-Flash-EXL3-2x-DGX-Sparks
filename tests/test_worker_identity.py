@@ -40,6 +40,12 @@ def _run_identity_prefix(rel, anchor, caller, env_file="", home=None):
         (tmp / ".env").write_text(env_file)
         for overlay in (".env.tp3", ".env.tp4"):   # tp3/tp4 require these to exist; empty is fine
             (tmp / overlay).write_text("")
+        # The TP4 launcher sources the ring helper before deriving worker identities.
+        # Include it in the sliced fixture so this test reaches its intended assertions.
+        if rel == "start-tp4.sh":
+            helper = tmp / "files" / "switchless-ring.sh"
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_text((ROOT / "files" / "switchless-ring.sh").read_text())
         env = {"PATH": "/usr/bin:/bin", "HOME": home or str(tmp)}
         env.update(caller)
         return subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env, timeout=30)
