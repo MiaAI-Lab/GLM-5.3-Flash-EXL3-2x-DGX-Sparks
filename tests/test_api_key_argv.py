@@ -71,6 +71,7 @@ def test_api_key_is_head_only_and_not_in_docker_argv() -> None:
                 "die() { printf '%s\\n' \"$*\" >&2; exit 1; }\n"
                 "scp() { :; }\n"
                 "worker_ssh() { printf '%s\\0' \"$@\" >> \"$WORKER_CAPTURE\"; }\n"
+                "host_memory_hygiene() { :; }\n"
                 + coop_staging_helpers()
                 + "\n".join(f"{name}={shlex.quote(value)}" for name, value in values.items())
                 + "\n" + launch + "\nlaunch_cluster\n"

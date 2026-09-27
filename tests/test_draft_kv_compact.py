@@ -362,6 +362,17 @@ def test_hybrid_overlay_migrates_every_installation_state(sources, tmp_path, fla
         assert run.returncode == 0 and target.read_bytes() == applied, state
         results[state] = applied
     assert results["stock"] == results["pristine"] == results["stock+replay"]
+    # Retained PR238 already has the compact boundary stage, but not the
+    # participating-group capability check or independent scratch floor.
+    target = tmp_path / "retained.py"
+    current = results["pristine"].decode()
+    retained = current
+    for _, old, new in hybrid.FINE_EDITS:
+        assert retained.count(new) == 1
+        retained = retained.replace(new, old, 1)
+    target.write_text(retained)
+    run = apply_hybrid(target, flag)
+    assert run.returncode == 0 and target.read_text() == current, run.stderr
 
 
 def test_hybrid_overlay_rejects_unrecognized_legacy_drift(sources, tmp_path):
@@ -430,11 +441,11 @@ def test_hybrid_overlay_rejects_edited_or_duplicated_owned_stages(sources, tmp_p
         "dflash-boundary-init": current.replace(
             hybrid.BOUNDARY_INIT_NEW, hybrid.BOUNDARY_INIT_NEW * 2, 1
         ),
-        "dflash-replay-clamp": current.replace(
-            "    return max(0, hit_length - pages * alignment_tokens)",
-            "    return hit_length",
+        "partial replay fallback": current.replace(
+            hybrid.CONVERGE_FINAL.replace(hybrid.COARSE_RETRY_OLD, hybrid.COARSE_RETRY_NEW),
+            hybrid.CONVERGE_OLD,
             1,
-        ).replace(hybrid.CONVERGE_FINAL, hybrid.CONVERGE_OLD, 1),
+        ),
     }
     for label, text in cases.items():
         assert text != current, label
@@ -715,12 +726,16 @@ def test_boundary_lookup_hits_at_every_alignment_offset(prefix_hits, monkeypatch
     # tails longer than the draft window (no replay clamp at all).
     for offset in [*range(1, MLA_BLOCK + 1), 2049, 3000]:
         prompt = tokens(base + offset, seed=offset)
-        aligned = (base + offset - 1) // MLA_BLOCK * MLA_BLOCK
+        aligned = (base + offset - 4) // MLA_BLOCK * MLA_BLOCK
         compact.prefill(prompt)
         blocks, hit = compact.lookup(prompt)
         assert hit == aligned and compact.uncached == 0, offset
-        assert len(blocks[compact.draft_gid]) == aligned // 896, offset
-        assert not blocks[compact.draft_gid][-1].is_null, offset
+        if offset >= 4:
+            assert len(blocks[compact.draft_gid]) == aligned // 896, offset
+            assert not blocks[compact.draft_gid][-1].is_null, offset
+        else:
+            assert len(prompt) - hit >= WINDOW
+        assert len(prompt) - hit >= 4
 
 
 @pytest.mark.parametrize("swa_retention", [None, 0])

@@ -34,6 +34,20 @@ stubbed first, HOME pointed at a temp dir, no BASH_ENV / PYTHONPATH / HF_*
 branch-agnostic: it discovers which prefix-cache overlays this checkout
 ships from the `*_PATCH_HOST="${*_PATCH_HOST:-` assignments and reports it.
 
+Every stub appends one record per invocation under an flock on the log: the
+stop path runs the worker ssh in the background while the head docker calls
+run in the foreground, so unserialized writers merge their fields into one
+line and the lost record reads as "the worker was never torn down". A record
+that is empty or starts with an unstubbed tool now fails the run outright.
+
+A recorded call is read as the argv the launcher executed: a container is
+stopped only by a kill / rm whose operand IS its configured name (a `-backup`
+sibling is a different container) and removed only by rm. The stop phase is
+bracketed by an explicit record -- start.arm.sh runs the recording stub as the
+first statement of the launcher's own start_unlocked() -- so a read-only
+`docker ps` inside stop_containers() is not mistaken for start-arm entry, while
+a worker teardown that has not finished (a dropped `wait`) still lands after it.
+
 Run:  python3 tests/test_launcher_rank_parity.py   (or pytest)
 """
 
@@ -97,10 +111,40 @@ APC_HOST_VARS = {
 
 SEP = "\x1f"
 
+STUB_TOOLS = ("docker", "ssh", "scp", "rsync", "curl", "ip", "nvidia-smi")
+
+# The explicit start-arm boundary record: Harness builds start.arm.sh, which
+# runs the recording stub as the first statement of the launcher's own
+# start_unlocked(), through the same flocked append as every host call. The
+# phase boundary is therefore ordered with those calls instead of being inferred
+# from a call's shape.
+START_ARM = "start-arm"
+RECORDED_TOOLS = STUB_TOOLS + (START_ARM,)
+
+# The container names this harness configures and asserts: it passes them in the
+# environment (a caller export beats .env), so no assertion depends on parsing a
+# default out of start.sh, and the launcher has to act on the configured names.
+HEAD_CONTAINER = "glm53-exl3-head"
+WORKER_CONTAINER = "glm53-exl3-worker"
+
+# One record per invocation, appended under an flock on the log itself.
+# stop_containers() runs the worker ssh in the background while the head docker
+# calls run in the foreground, so two stubs append at the same time; without the
+# lock their fields interleave into a single line and the missing record is read
+# as "the worker was never torn down". The lock is held on fd 8 for the write
+# and released when the stub exits.
 STUB = """#!/usr/bin/env bash
 # Records every invocation; never touches a host.
-{ printf '%s\\x1f' "$(basename "$0")" "$@"; printf '\\n'; } >> "$GLM53_STUB_LOG"
-case "$(basename "$0")" in
+tool="${0##*/}"
+# GLM53_STUB_SSH_DELAY models a worker teardown that takes time to finish: the
+# record lands when the command ends, exactly as the real ssh's does. The
+# harness sets it only to prove that a returned stop_containers() has already
+# covered the backgrounded worker teardown.
+if [ -n "${GLM53_STUB_SSH_DELAY:-}" ] && [ "$tool" = "ssh" ]; then sleep "$GLM53_STUB_SSH_DELAY"; fi
+exec 8>>"$GLM53_STUB_LOG"
+flock 8
+{ printf '%s\\x1f' "$tool" "$@"; printf '\\n'; } >&8
+case "$tool" in
     ip) printf 'inet %s/24\\n' "${GLM53_STUB_HEAD_IP:-10.0.0.1}" ;;
 esac
 exit 0
@@ -283,26 +327,47 @@ def part_f() -> None:
 COMPACT = "GLM53_DRAFT_KV_COMPACT"
 
 
-def run_compact_guard(value: str, spec_method: str) -> tuple[int, str, str]:
+def compact_default_block() -> str:
+    """The conditional GLM53_DRAFT_KV_COMPACT default, lifted from start.sh
+    (same technique as guard_source)."""
+    m = re.search(
+        r'(?ms)^if \[ "\$SPEC_METHOD" = "dflash" \]; then\n'
+        r"\s+GLM53_DRAFT_KV_COMPACT=.*?\nfi$",
+        source(),
+    )
+    assert m, "conditional GLM53_DRAFT_KV_COMPACT default not found in start.sh"
+    return m.group(0)
+
+
+def run_compact_guard(value: str | None, spec_method: str) -> tuple[int, str, str]:
     script = (
         guard_source()
         + "\nGPU_MEM_UTIL=0.87; MAX_MODEL_LEN=1000000; MAX_NUM_SEQS=4\n"
         + "MAX_NUM_BATCHED_TOKENS=1024\n"
         + "GLM53_INDEXER_WORKSPACE=stock; GLM53_SPINWAIT_MS=stock\n"
         + f"{NS}=1\n"
-        + "validate_numeric_config || exit $?\n"
+    )
+    env = base_env(SPEC_METHOD=spec_method)
+    if value is None:
+        # Unset: the launcher's own conditional default decides.
+        script += compact_default_block() + "\n"
+    else:
+        env[COMPACT] = value
+    script += (
+        "validate_numeric_config || exit $?\n"
         + f'printf "%s\\n" "${COMPACT}"\n'
     )
-    env = base_env(SPEC_METHOD=spec_method, **{COMPACT: value})
     r = subprocess.run(["bash", "-c", script], text=True, capture_output=True, env=env)
     return r.returncode, r.stdout.strip(), r.stderr.strip()
 
 
 def part_g() -> None:
-    """`GLM53_DRAFT_KV_COMPACT=1` is DFlash-only: the coordinator's boundary
-    lookup relies on DFlash's per-position context KV, so the launcher
-    rejects it before any host action unless SPEC_METHOD=dflash."""
-    print(f"Part G: {COMPACT} requires SPEC_METHOD=dflash")
+    """`GLM53_DRAFT_KV_COMPACT` defaults to 1 only for the DFlash drafter; an
+    explicit 0 opts out everywhere, an explicitly empty value is an operator
+    error, and 1 stays DFlash-only: the coordinator's boundary lookup relies
+    on DFlash's per-position context KV, so the launcher rejects it before
+    any host action unless SPEC_METHOD=dflash."""
+    print(f"Part G: {COMPACT} conditional default and SPEC_METHOD=dflash gate")
     if f'-e "{COMPACT}=' not in source():
         print("  skip G (knob not forwarded by this checkout)")
         return
@@ -321,6 +386,25 @@ def part_g() -> None:
             f"G3 {COMPACT}=1 rejected with SPEC_METHOD={spec_method} before launch "
             f"(rc={rc} err={err[:80]!r})",
         )
+    rc, out, err = run_compact_guard(None, "dflash")
+    check(
+        rc == 0 and out == "1",
+        f"G4 unset {COMPACT} defaults to 1 with SPEC_METHOD=dflash (rc={rc} out={out!r} {err})",
+    )
+    for spec_method in ("mtp", "none"):
+        rc, out, err = run_compact_guard(None, spec_method)
+        check(
+            rc == 0 and out == "0",
+            f"G5 unset {COMPACT} defaults to 0 with SPEC_METHOD={spec_method} "
+            f"(rc={rc} out={out!r} {err})",
+        )
+    for spec_method in ("dflash", "mtp", "none"):
+        rc, out, err = run_compact_guard("", spec_method)
+        check(
+            rc == 2 and COMPACT in err,
+            f"G6 explicitly empty {COMPACT} rejected with SPEC_METHOD={spec_method} "
+            f"(rc={rc} err={err[:80]!r})",
+        )
 
 
 # --------------------------------------------------------------- harness --
@@ -329,13 +413,18 @@ def part_g() -> None:
 class Harness:
     """A throwaway copy of the launcher checkout plus a stub PATH."""
 
-    def __init__(self, tmp: Path) -> None:
+    def __init__(self, tmp: Path, launcher: str = "start.sh") -> None:
         self.tmp = tmp
         self.repo = tmp / "repo"
         self.repo.mkdir()
-        shutil.copy2(START, self.repo / "start.sh")
+        shutil.copy2(ROOT / launcher, self.repo / "start.sh")
         shutil.copy2(ROOT / ".env.example", self.repo / ".env.example")
         (self.repo / ".env").write_text((ROOT / ".env.example").read_text())
+        if launcher != "start.sh":
+            topology = launcher.removeprefix("start-").removesuffix(".sh")
+            template = ROOT / f".env.{topology}.example"
+            shutil.copy2(template, self.repo / template.name)
+            shutil.copy2(template, self.repo / f".env.{topology}")
         for sub in ("overlay", "files", "ablit"):
             if (ROOT / sub).is_dir():
                 shutil.copytree(ROOT / sub, self.repo / sub)
@@ -343,11 +432,23 @@ class Harness:
         self.home.mkdir()
         self.bin = tmp / "bin"
         self.bin.mkdir()
-        for tool in ("docker", "ssh", "scp", "rsync", "curl", "ip", "nvidia-smi"):
+        # The stubs serialize their record writes with flock so a concurrent
+        # invocation cannot interleave fields into one line.
+        assert shutil.which("flock"), "flock is required by the recording stubs"
+        for tool in RECORDED_TOOLS:
             p = self.bin / tool
             p.write_text(STUB)
             p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         self.log = tmp / "calls.log"
+
+        # The container names this harness configures -- and the ones it asserts
+        # on. Caller exports win over .env, so the launcher has to act on them.
+        # The tp3/tp4 copies keep the container names from their own .env; no
+        # assertion here reads them.
+        self.container_env = (
+            {"CONTAINER_HEAD": HEAD_CONTAINER, "CONTAINER_WORKER": WORKER_CONTAINER}
+            if launcher == "start.sh" else {}
+        )
 
         # A copy whose trailing `main "$@"` is replaced by `"$@"`, so a single
         # launcher function can be driven with the real configuration preamble.
@@ -355,11 +456,28 @@ class Harness:
         assert text.rstrip().endswith('\nmain "$@"'), "start.sh must end with main \"$@\""
         (self.repo / "start.fn.sh").write_text(text.rstrip()[: -len('main "$@"')] + '"$@"\n')
 
+        # A copy whose start_unlocked() records the start-arm boundary as its
+        # first statement. The stop phase is over exactly when that record lands,
+        # which is what control() compares the container stops against.
+        if launcher == "start.sh":
+            needle = "start_unlocked() {\n"
+            assert text.count(needle) == 1, "start_unlocked() is not defined exactly once"
+            (self.repo / "start.arm.sh").write_text(
+                text.replace(needle, needle + '    "$GLM53_STUB_ARM"\n')
+            )
+
     def env(self, **extra: str) -> dict[str, str]:
         return base_env(
             PATH=f"{self.bin}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
             HOME=str(self.home),
             GLM53_STUB_LOG=str(self.log),
+            GLM53_STUB_ARM=str(self.bin / START_ARM),
+            # host_memory_hygiene is not what this harness exercises; without
+            # this its pre-launch wait runs 45 x 2 s per scenario on a host
+            # whose MemAvailable is below GPU_MEM_UTIL x total (sudo is not
+            # stubbed here), timing the suite out.
+            GLM53_HOST_MEM_HYGIENE="0",
+            **self.container_env,
             **extra,
         )
 
@@ -371,6 +489,16 @@ class Harness:
             argv = line.split(SEP)
             if argv and argv[-1] == "":
                 argv.pop()
+            # An empty record, or one that starts with something the harness
+            # never stubbed, means a field was lost or two invocations were
+            # written into one line. Every caller would read that missing
+            # record as "the launcher did not do it", so fail loudly instead.
+            if not argv or argv[0] not in RECORDED_TOOLS:
+                raise RuntimeError(
+                    f"corrupt stub record {argv!r} in {self.log}: records are "
+                    f"one flocked write per invocation, so a merged or empty "
+                    f"record is a harness fault, not a launcher result"
+                )
             out.append(argv)
         return out
 
@@ -411,16 +539,93 @@ def longest_parseable_prefix(text: str) -> str | None:
     return None
 
 
+def docker_argv(call: list[str]) -> list[str]:
+    """Keep the executable and shell command boundaries in recorded teardown."""
+    if call[0] == "docker":
+        return call
+    if call[0] == "ssh" and len(call) > 1:
+        lexer = shlex.shlex(call[-1], posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        return list(lexer)
+    return []
+
+
+def runs_verb_on(argv: list[str], verb: str, name: str) -> bool:
+    """True when this docker argv runs `verb` on exactly `name`: the operand is
+    the first non-flag argument of that verb and has to match in full, so
+    `glm53-exl3-head-backup` is a different container and never this one."""
+    for i, token in enumerate(argv):
+        if token != verb or i == 0 or argv[i - 1] != "docker":
+            continue
+        if i != 1 and argv[i - 2] not in (";", "&&", "||"):
+            continue
+        for operand in argv[i + 1:]:
+            if not operand.startswith("-"):
+                if operand == name:
+                    return True
+                break
+    return False
+
+
+def removes_container(call: list[str], name: str) -> bool:
+    """True when the recorded call removes exactly `name` (`docker rm`). A kill
+    stops a container but leaves it behind, so it never satisfies a removal.
+
+    tests/test_bringup_robustness.py's lifecycle fixture reads its own recorder's
+    argv (same tool-then-argv shape) through this predicate, so the two suites
+    cannot drift into different notions of "removed"."""
+    return runs_verb_on(docker_argv(call), "rm", name)
+
+
+def stops_container(call: list[str], name: str) -> bool:
+    """True when the recorded call stops or removes exactly `name` (kill / rm)."""
+    argv = docker_argv(call)
+    return runs_verb_on(argv, "rm", name) or runs_verb_on(argv, "kill", name)
+
+
+def removal_facts(calls: list[list[str]]) -> tuple[bool, bool]:
+    """(head removed by a local docker call, worker removed over ssh -- the
+    worker only exists on the other host)."""
+    return (
+        any(c[0] == "docker" and removes_container(c, HEAD_CONTAINER) for c in calls),
+        any(c[0] == "ssh" and removes_container(c, WORKER_CONTAINER) for c in calls),
+    )
+
+
+def stop_phase_ends_first(calls: list[list[str]]) -> tuple[bool, list[int], list[int]]:
+    """(every container stop precedes the start arm, stop call indices, boundary
+    indices). The boundary is the recorded start_unlocked() entry, not "the first
+    call that is not a teardown": read-only inspection (a docker ps inside
+    stop_containers()) is allowed before or during the teardown, while the
+    backgrounded worker teardown still has to be covered by the wait before that
+    entry -- with GLM53_STUB_SSH_DELAY its record lands after it otherwise."""
+    stops = [
+        i
+        for i, c in enumerate(calls)
+        if stops_container(c, HEAD_CONTAINER) or stops_container(c, WORKER_CONTAINER)
+    ]
+    boundary = [i for i, c in enumerate(calls) if c[0] == START_ARM]
+    return bool(stops) and bool(boundary) and max(stops) < min(boundary), stops, boundary
+
 
 def control(h: Harness, label: str, **env: str) -> None:
-    r = h.run("restart", **env)
-    calls = h.host_touching_calls()
-    head_rm = any(c[:3] == ["docker", "rm", "-f"] for c in calls)
-    worker_rm = any(c[0] == "ssh" and "docker rm -f" in c[-1] for c in calls)
-    last = (r.stderr.strip().splitlines() or [""])[-1]
+    """A valid configuration passes the pre-stop gate: both ranks are removed,
+    and the stop phase is over before the start arm is entered. The launch then
+    dies in the stubbed preflight (its ssh GID probe prints nothing), which is
+    expected and deliberately not what this control asserts."""
+    r = h.run("restart", entry="start.arm.sh", **env)
+    calls = h.calls()
+    head_removed, worker_removed = removal_facts(calls)
+    ordered, stops, boundary = stop_phase_ends_first(calls)
     check(
-        head_rm and worker_rm,
-        f"{label} (head rm={head_rm} worker rm={worker_rm}; later rc={r.returncode} is the stubbed preflight: {last[:100]!r})",
+        head_removed and worker_removed,
+        f"{label} (head removed={head_removed}, worker removed over ssh={worker_removed}; "
+        f"rc={r.returncode} is the stubbed preflight)",
+    )
+    check(
+        ordered,
+        f"{label}: the stop phase ends before the start arm "
+        f"(container stops at {stops}, start arm at {boundary})",
     )
 
 
@@ -434,6 +639,15 @@ def part_b(h: Harness) -> None:
     # fine). Without this, every negative case below could pass for the
     # wrong reason (a guard that refuses everything).
     control(h, "B3 control: valid restart passes the gate and reaches stop on both ranks")
+    # Teardown completion, not just initiation: the ssh stub records only after a
+    # bounded delay, so a worker record that still precedes the start arm proves
+    # stop_containers() returned only once the backgrounded worker teardown had
+    # finished (a dropped `wait` puts the record after the start arm's calls).
+    control(
+        h,
+        "B3 control: the worker teardown has finished before the start arm runs",
+        GLM53_STUB_SSH_DELAY="0.35",
+    )
     if wires_swa():
         control(
             h,
@@ -450,35 +664,35 @@ def part_b(h: Harness) -> None:
 
     def fails_closed(label: str, **env: str) -> None:
         r = h.run("restart", **env)
-        calls = h.host_touching_calls()
+        calls = h.calls()
         last = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ""
         check(
             r.returncode == 2 and not calls,
-            f"{label}: rc={r.returncode}, host-touching calls={len(calls)} ({last[:90]!r})",
+            f"{label}: rc={r.returncode}, invocations={len(calls)} ({last[:90]!r})",
         )
 
     if wires_swa():
-        fails_closed(f"B3 restart with {SWA}=3000 exits 2 with nothing stopped", **{SWA: "3000"})
-        fails_closed(f"B3 restart with {SWA}=1003520 exits 2 with nothing stopped", **{SWA: "1003520"})
+        fails_closed(f"B3 restart with {SWA}=3000 exits 2 before any host call", **{SWA: "3000"})
+        fails_closed(f"B3 restart with {SWA}=1003520 exits 2 before any host call", **{SWA: "1003520"})
         fails_closed(
-            f"B3 restart with MTP and {SWA}=0 exits 2 with nothing stopped",
+            f"B3 restart with MTP and {SWA}=0 exits 2 before any host call",
             SPEC_METHOD="mtp",
             **{SWA: "0"},
         )
         fails_closed(
-            f"B3 restart without speculation and {SWA}={BLOCK} exits 2 with nothing stopped",
+            f"B3 restart without speculation and {SWA}={BLOCK} exits 2 before any host call",
             SPEC_METHOD="none",
             **{SWA: str(BLOCK)},
         )
     if wires_ns():
-        fails_closed(f"B3 restart with {NS}=yes exits 2 with nothing stopped", **{NS: "yes"})
+        fails_closed(f"B3 restart with {NS}=yes exits 2 before any host call", **{NS: "yes"})
         fails_closed(
-            f"B3 restart with an explicitly empty {NS} exits 2 with nothing stopped",
+            f"B3 restart with an explicitly empty {NS} exits 2 before any host call",
             **{NS: ""},
         )
     if wires_kv():
-        fails_closed(f"B3 restart with {KV}=yes exits 2 with nothing stopped", **{KV: "yes"})
-        fails_closed(f"B3 restart with {KV}= (explicitly empty) exits 2 with nothing stopped", **{KV: ""})
+        fails_closed(f"B3 restart with {KV}=yes exits 2 before any host call", **{KV: "yes"})
+        fails_closed(f"B3 restart with {KV}= (explicitly empty) exits 2 before any host call", **{KV: ""})
 
     broken = h.tmp / "broken_patch.py"
     broken.write_text("def (:\n    pass\n")
@@ -695,6 +909,21 @@ def part_d(h: Harness) -> None:
     scenarios += [("LARGEM=0", {LARGE_M: "0"}),
                   ("LARGEM=1", {LARGE_M: "1"})]
 
+    # UMA cold-load knobs (optional; docs/cold-load-uma.md): both ranks when
+    # set, neither rank when unset — an exported empty would engage the
+    # GLM53_COLD_LOAD_UMA kill switch and crash InstantTensor's env readers.
+    COLDLOAD = {
+        "GLM53_COLD_LOAD_UMA": "0",
+        "GLM53_COLD_LOAD_STAGE_MMAP": "0",
+        "INSTANTTENSOR_MAX_FREE_MEM_USAGE": "1.5",
+        "INSTANTTENSOR_BUFFER_SIZE": "2147483648",
+        "INSTANTTENSOR_CHUNK_SIZE": "8388608",
+        "INSTANTTENSOR_CONCURRENCY": "4",
+        "INSTANTTENSOR_IO_DEPTH": "256",
+        "INSTANTTENSOR_BACKEND": "aio",
+    }
+    scenarios.append(("cold-load knobs", dict(COLDLOAD)))
+
     first = None
     for label, env in scenarios:
         got = rank_runs(h, **env)
@@ -713,6 +942,9 @@ def part_d(h: Harness) -> None:
             required[KV] = env[KV]
         if THIN in env:
             required[THIN] = env[THIN]
+        for name, value in COLDLOAD.items():
+            if name in env:
+                required[name] = value
         if LARGE_M in env:
             required[LARGE_M] = env[LARGE_M]
         issues = parity_issues(head, worker, scp, required)
@@ -725,6 +957,12 @@ def part_d(h: Harness) -> None:
                 "VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA" not in head.env and "VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA" not in worker.env,
                 f"D2 [{label}] empty SWA override is forwarded to neither rank",
             )
+        for name in COLDLOAD:
+            if name not in env:
+                check(
+                    name not in head.env and name not in worker.env,
+                    f"D2 [{label}] unset {name} reaches neither rank",
+                )
         mounted = {Path(p).name for p in head.mounts}
         # Expected source -> destination map for EVERY *_PATCH_HOST: the head
         # mount, the scp source and the worker mount must all be that file.
@@ -827,18 +1065,18 @@ def part_e(h: Harness) -> None:
 
     def reaches_stop(label: str, expected: list[str], **extra: str) -> None:
         r, selected = run(**extra)
-        calls = h.host_touching_calls()
+        head_removed, worker_removed = removal_facts(h.host_touching_calls())
         check(
-            any(c[:3] == ["docker", "rm", "-f"] for c in calls)
-            and any(c[0] == "ssh" and "docker rm -f" in c[-1] for c in calls)
-            and selected == expected,
-            f"E {label}: validators={selected}, rc={r.returncode}, stderr={r.stderr[-200:]!r}",
+            head_removed and worker_removed and selected == expected,
+            f"E {label}: validators={selected}, head removed={head_removed}, "
+            f"worker removed over ssh={worker_removed}, rc={r.returncode}, "
+            f"stderr={r.stderr[-200:]!r}",
         )
 
     def fails_closed(label: str, expected: list[str], **extra: str) -> None:
         r, selected = run(**extra)
         check(
-            r.returncode == 2 and not h.host_touching_calls() and selected == expected,
+            r.returncode == 2 and not h.calls() and selected == expected,
             f"E {label}: validators={selected}, rc={r.returncode}, stderr={r.stderr[-200:]!r}",
         )
 
@@ -895,6 +1133,78 @@ def part_e(h: Harness) -> None:
         CHAT_TEMPLATE_HOST=str(loop_template),
     )
 
+def loader_all_rank_wiring() -> None:
+    """Exercise real launch functions against the existing recording PATH."""
+    weight_dest = "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/weight_utils.py"
+    patch_dest = "/opt/glm53/patch_loadclone.py"
+    for launcher, count in (("start.sh", 2), ("start-tp3.sh", 3), ("start-tp4.sh", 4)):
+        with tempfile.TemporaryDirectory() as raw:
+            h = Harness(Path(raw), launcher=launcher)
+            fn = h.repo / "start.fn.sh"
+            fn.write_text(fn.read_text().rsplit('"$@"', 1)[0] + '''
+launch_loader() {
+    validate_numeric_config || return
+    launch_cluster
+}
+"$@"
+''')
+            result = h.run("launch_loader", entry="start.fn.sh",
+                           MODEL_DIR="/root/.cache/huggingface/x",
+                           LOAD_FORMAT="", GLM53_LOAD_CLONE="0", GLM53_LOAD_PREFETCH="0006")
+            assert result.returncode == 0, (launcher, result.stderr)
+            runs = []
+            copies = {}
+            for call in h.calls():
+                if call[:2] == ["docker", "run"]:
+                    runs.append((None, call[2:]))
+                elif call[0] == "ssh" and call[-1].lstrip().startswith("docker run"):
+                    runs.append((call[-2], shlex.split(call[-1])[2:]))
+                elif call[0] == "scp" and ":" in call[-1]:
+                    host, dest = call[-1].split(":", 1)
+                    copies[(host, dest)] = call[-2]
+            assert len(runs) == count, (launcher, runs)
+            for host, argv in runs:
+                rank = Rank(argv)
+                assert rank.env["GLM53_LOAD_CLONE"] == "0"
+                assert rank.env["GLM53_LOAD_PREFETCH"] == "6"
+                assert rank.env["LOAD_FORMAT"] == ""
+                if launcher == "start-tp3.sh":
+                    mounts = dict(argv[i + 1].split(":")[:2][::-1]
+                                  for i, arg in enumerate(argv[:-1]) if arg == "-v")
+                    expected_root = str(h.repo / "overlay/tp3")
+                    if host is None:
+                        assert mounts[weight_dest] == expected_root + "/vllm/model_executor/model_loader/weight_utils.py"
+                    else:
+                        assert mounts[weight_dest] == "/tmp/glm53-tp3/vllm/model_executor/model_loader/weight_utils.py"
+                        assert copies[(host, "/tmp/glm53-tp3")] == expected_root
+                else:
+                    expected_patch = str(h.repo / "overlay/patch_loadclone.py")
+                    if host is None:
+                        assert rank.mounts[patch_dest] == expected_patch
+                    else:
+                        assert copies[(host, rank.mounts[patch_dest])] == expected_patch
+
+
+def loader_artifacts_fail_before_restart_stop() -> None:
+    for launcher in ("start.sh", "start-tp3.sh", "start-tp4.sh"):
+        with tempfile.TemporaryDirectory() as raw:
+            h = Harness(Path(raw), launcher=launcher)
+            # Positive control: the loader gate itself accepts the shipped tree.
+            gate = "validate_overlay_artifacts" if launcher == "start.sh" else "validate_loadclone_artifacts"
+            result = h.run(gate, entry="start.fn.sh")
+            assert result.returncode == 0, (launcher, result.stderr)
+            assert not h.calls()
+            result = h.run("restart", LOADCLONE_PATCH_HOST=str(h.tmp / "missing.py"))
+            assert result.returncode == 2, (launcher, result.stderr)
+            assert not h.calls(), "the refused restart still invoked something"
+            if launcher == "start-tp3.sh":
+                target = h.repo / "overlay/tp3/vllm/model_executor/model_loader/weight_utils.py"
+                target.write_text(target.read_text().replace("def _glm53_load_options():", "def broken_options():"))
+                result = h.run("restart")
+                assert result.returncode == 2, result.stderr
+                assert not h.calls(), "the refused restart still invoked something"
+
+
 # ------------------------------------------------------------------- main --
 
 
@@ -914,6 +1224,8 @@ def main() -> int:
         allocator_overrides(h)
     with tempfile.TemporaryDirectory() as raw:
         part_e(Harness(Path(raw)))
+    loader_all_rank_wiring()
+    loader_artifacts_fail_before_restart_stop()
     print()
     if FAILURES:
         print(f"FAILED ({len(FAILURES)}): " + "; ".join(FAILURES))

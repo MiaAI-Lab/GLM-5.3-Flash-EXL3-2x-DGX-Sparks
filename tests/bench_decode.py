@@ -31,7 +31,9 @@ CODING_PROMPT = (
     "Write a Python function named clamp_range that takes a list of ints and "
     "returns a new list with each value clamped to [0, 50]. Include a short docstring."
 )
-NAN_RE = re.compile(r"\bnan\b|locklock", re.I)
+# Whole-token NaN only: "nan", "NaN", or glued runs such as "nannannan".
+# A bare substring test also matched words like "banana" and "resonance" (#270).
+NAN_RE = re.compile(r"\b(?:nan)+\b|locklock", re.I)
 SPEC_RE = re.compile(
     r"^(vllm:spec_decode_[a-zA-Z0-9_]+)\{([^}]*)\}\s+(\S+)$"
 )
@@ -193,7 +195,7 @@ def stream_bench(max_tokens: int = 200, prompt: str | None = None) -> dict:
     tps = None
     if decode_s and decode_s > 0 and decode_toks > 0:
         tps = decode_toks / decode_s
-    nan = bool(NAN_RE.search(text)) or ("nan" in text.lower())
+    nan = bool(NAN_RE.search(text))
     return {
         "http": http,
         "ttft_s": ttft,
@@ -244,7 +246,7 @@ def coherence() -> dict:
     return {
         "paris": {"ok": "paris" in (pcontent + ptxt).lower(), "text": pcontent[:400] or ptxt[:400], "http": paris.get("_http")},
         "cmp": {"ok": cmp_ok and bool((ccontent or ctxt).strip()), "text": ccontent[:400] or ctxt[:400], "http": cmp_.get("_http")},
-        "sky": {"ok": bool(scontent.strip()) and "nan" not in scontent.lower(), "text": scontent[:400], "http": sky.get("_http")},
+        "sky": {"ok": bool(scontent.strip()) and not NAN_RE.search(scontent), "text": scontent[:400], "http": sky.get("_http")},
         "nan": any(NAN_RE.search(t) for t in (ptxt, ctxt, stxt, pcontent, ccontent, scontent)),
     }
 

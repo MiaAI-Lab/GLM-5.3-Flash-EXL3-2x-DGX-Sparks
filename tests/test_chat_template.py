@@ -89,6 +89,24 @@ class ChatTemplateTests(unittest.TestCase):
         self.assertIn("<|system|>Reasoning Effort: Low", rendered)
         self.assertTrue(rendered.endswith("<|assistant|><think>"), rendered)
 
+    def test_low_effort_alone_keeps_default_thinking_on(self) -> None:
+        rendered = render_generation_prompt(reasoning_effort="low")
+        self.assertIn("<|system|>Reasoning Effort: Low", rendered)
+        self.assertTrue(rendered.endswith("<|assistant|><think>"), rendered)
+
+    def test_low_effort_does_not_override_explicit_thinking_off(self) -> None:
+        # #257: an effort default is not a replacement for enabling thinking.
+        # Check both supported off switches, including the legacy alias.
+        for flag in ("enable_thinking", "thinking"):
+            with self.subTest(flag=flag):
+                rendered = render_generation_prompt(
+                    reasoning_effort="low", **{flag: False}
+                )
+                self.assertNotIn("Reasoning Effort", rendered)
+                self.assertTrue(
+                    rendered.endswith("<|assistant|><think></think>"), rendered
+                )
+
 
 class PrefixStabilityTests(unittest.TestCase):
     """What a thinking toggle costs in prefix cache, and what it must not cost.

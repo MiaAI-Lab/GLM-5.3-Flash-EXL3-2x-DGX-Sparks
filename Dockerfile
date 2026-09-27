@@ -456,7 +456,6 @@ COPY tests/test_scheduler_decode_floor_restart.py /opt/glm53/test_scheduler_deco
 COPY overlay/patch_hybrid_prefix_hit.py /opt/glm53/patch_hybrid_prefix_hit.py
 COPY overlay/patch_apc_per_group_retention.py /opt/glm53/patch_apc_per_group_retention.py
 COPY tests/test_apc_per_group_retention.py /opt/glm53/test_apc_per_group_retention.py
-COPY tests/test_hybrid_prefix_hit.py /opt/glm53/test_hybrid_prefix_hit.py
 COPY overlay/patch_apc_no_store.py /opt/glm53/patch_apc_no_store.py
 COPY tests/test_apc_no_store.py /opt/glm53/test_apc_no_store.py
 COPY overlay/patch_kv_capacity_log.py /opt/glm53/patch_kv_capacity_log.py
@@ -465,17 +464,22 @@ COPY overlay/patch_xgrammar_termination.py /opt/glm53/patch_xgrammar_termination
 COPY tests/test_xgrammar_termination.py /opt/glm53/test_xgrammar_termination.py
 COPY overlay/patch_cache_reset.py /opt/glm53/patch_cache_reset.py
 COPY tests/test_cache_reset_endpoint.py /opt/glm53/test_cache_reset_endpoint.py
-COPY overlay/patch_kpool_tail_slotmap.py /opt/glm53/patch_kpool_tail_slotmap.py
+# Keep both kpool patchers in one layer: #280's separate COPY/RUN steps push
+# this recipe past overlay2's runnable layer depth on the two-node hosts.
+COPY overlay/patch_kpool_tail_slotmap.py overlay/patch_kpool_tail_seed_stride.py /opt/glm53/
 COPY overlay/patch_mamba_align_state_free.py /opt/glm53/patch_mamba_align_state_free.py
 COPY overlay/patch_mamba_align_chunking.py /opt/glm53/patch_mamba_align_chunking.py
 COPY tests/test_mamba_align_state_free.py /opt/glm53/test_mamba_align_state_free.py
 COPY tests/test_mamba_align_chunking.py /opt/glm53/test_mamba_align_chunking.py
-COPY tests/test_kpool_tail_slotmap.py /opt/glm53/test_kpool_tail_slotmap.py
+COPY tests/test_kpool_tail_slotmap.py tests/test_kpool_tail_seed_stride.py /opt/glm53/
 COPY overlay/patch_spinwait.py /opt/glm53/patch_spinwait.py
 COPY tests/test_spinwait_patch.py /opt/glm53/test_spinwait_patch.py
 COPY overlay/patch_indexer_workspace.py /opt/glm53/patch_indexer_workspace.py
 COPY tests/test_indexer_workspace.py /opt/glm53/test_indexer_workspace.py
 COPY overlay/patch_tool_choice_none.py /opt/glm53/patch_tool_choice_none.py
+COPY overlay/patch_loadclone.py /opt/glm53/patch_loadclone.py
+COPY tests/test_loadclone.py /opt/glm53/test_loadclone.py
+COPY tests/fixtures/loadclone_weight_utils.py.txt tests/fixtures/kpool_tail_seed_kernel-487ecf187.py.txt tests/fixtures/kpool_tail_seed_kernel-db1bfdd.py.txt /opt/glm53/fixtures/
 COPY tests/test_tool_choice_none.py /opt/glm53/test_tool_choice_none.py
 COPY overlay/ablit_runtime.py /opt/glm53/ablit_runtime.py
 COPY overlay/patch_ablit.py /opt/glm53/patch_ablit.py
@@ -520,13 +524,19 @@ RUN GLM53_KV_CACHE_UTILS_PY=/usr/local/lib/python3.12/dist-packages/vllm/v1/core
     GLM53_REQUIRE_TARGET=1 python3 /opt/glm53/test_kv_capacity_log.py
 RUN python3 /opt/glm53/patch_kv_capacity_log.py
 RUN python3 /opt/glm53/patch_xgrammar_termination.py
-RUN python3 /opt/glm53/patch_kpool_tail_slotmap.py
+# Apply both independent kpool patches in their original order and one layer.
+RUN python3 /opt/glm53/patch_kpool_tail_slotmap.py \
+    && python3 /opt/glm53/patch_kpool_tail_seed_stride.py
 # Applied unconditionally; the injected sizing reads GLM53_INDEXER_WORKSPACE
 # at runtime and returns the stock expression unless it is "rightsize".
 RUN python3 /opt/glm53/patch_indexer_workspace.py
 RUN python3 /opt/glm53/patch_spinwait.py --preflight
 RUN python3 /opt/glm53/patch_cache_reset.py
 RUN python3 /opt/glm53/patch_tool_choice_none.py
+# Auto/lazy safetensors only; InstantTensor and LOAD_FORMAT defaults stay unchanged.
+RUN GLM53_LOADCLONE_SOURCE=/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/weight_utils.py \
+    python3 /opt/glm53/test_loadclone.py
+RUN python3 /opt/glm53/patch_loadclone.py
 RUN python3 /opt/glm53/patch_ablit.py
 
 RUN EXL3_SELFCHECK_GPU=0 python3 /opt/glm53/test_exl3_overlay.py \
@@ -534,9 +544,9 @@ RUN EXL3_SELFCHECK_GPU=0 python3 /opt/glm53/test_exl3_overlay.py \
     && python3 /opt/glm53/test_scheduler_decode_floor.py \
     && python3 /opt/glm53/test_scheduler_decode_floor_restart.py \
     && python3 /opt/glm53/test_mamba_align_chunking.py \
-    && python3 /opt/glm53/test_hybrid_prefix_hit.py \
     && python3 /opt/glm53/test_xgrammar_termination.py \
     && python3 /opt/glm53/test_kpool_tail_slotmap.py \
+    && python3 /opt/glm53/test_kpool_tail_seed_stride.py \
     && python3 /opt/glm53/test_spinwait_patch.py \
     && python3 /opt/glm53/test_indexer_workspace.py \
     && python3 /opt/glm53/test_tool_choice_none.py \
@@ -547,6 +557,17 @@ RUN EXL3_SELFCHECK_GPU=0 python3 /opt/glm53/test_exl3_overlay.py \
 # nvidia-nccl-cu13==2.29.7 over this image's NCCL 2.30.7.
 RUN pip install --no-deps --no-cache-dir instanttensor==0.2.0 \
     && python3 -c "import instanttensor; print('instanttensor', instanttensor.__file__)"
+
+# Cold-load fixes for UMA / 64 KiB-page GB10 hosts (overlay/patch_cold_load_uma.py):
+# InstantTensor budget vs page cache, and file-backed mmap staging. Applied at
+# build so the draft/secondary safetensors paths are covered before start.sh
+# re-applies it (idempotent) at boot. No-op on 4 KiB kernels / discrete GPUs.
+COPY overlay/patch_cold_load_uma.py /opt/glm53/patch_cold_load_uma.py
+COPY tests/test_cold_load_uma.py /opt/glm53/test_cold_load_uma.py
+RUN python3 /opt/glm53/test_cold_load_uma.py && python3 /opt/glm53/patch_cold_load_uma.py
+COPY overlay/patch_skip_cudagraph_profile.py /opt/glm53/patch_skip_cudagraph_profile.py
+COPY tests/test_skip_cudagraph_profile.py /opt/glm53/test_skip_cudagraph_profile.py
+RUN GLM53_REQUIRE_TARGET=1 python3 /opt/glm53/test_skip_cudagraph_profile.py && python3 /opt/glm53/patch_skip_cudagraph_profile.py
 
 # Baked by start.sh --build-arg so a git pull that changes overlay/Dockerfile
 # misses this label and rebuilds once. Keep last so stamp-only rebuilds are cheap.

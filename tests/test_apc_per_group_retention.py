@@ -1071,6 +1071,11 @@ def case_composed_runtime_paths(
         "reused DFlash hit must carry the complete 2048-token visible tail",
     )
 
+    # Isolate the failed-EAGLE convergence contract from the independent
+    # request-local Kpool replay floor. The real-source CPU probe separately
+    # exercises that floor with actual manager lookup/allocation.
+    coordinator.kpool_replay_tokens = 0
+
     blocks, hit, uncached = hit_ns[hit_name](
         coordinator, [object()] * 400, 21504
     )

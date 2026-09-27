@@ -13,9 +13,8 @@ Two coordinator bugs then throw the extra block away:
    scheduler page (block=64, align=3584), which can wipe a longer MLA hit.
 
 KpoolTail already opts out of prefix caching (1-block circular scratch).
-Mamba align-mode state *does* materialize at 896-token chunk ends, and
-3584 is a multiple of 896, so mamba must stay in the min — skipping a
-mamba miss is a correctness hole (vLLM #47491 / #43090).
+Mamba align-mode state materializes only at actual chunk ends. Mamba must
+stay in the min: skipping a missing checkpoint is a correctness hole.
 
 This patch: flag only exact SlidingWindowSpec groups as EAGLE, and do not
 let that drafter group shrink ``curr_hit_length``. If the drafter window
@@ -25,10 +24,10 @@ window is allocated (zeros / new pages).
 KpoolTail is deliberately per-request scratch and cannot prefix-cache. A
 resumed request therefore starts with an empty indexer-tail ring. Replaying
 fewer than one complete kpool leaves the ring incomplete and changes sparse
-attention selection. Clamp the shared hit back to an earlier scheduler
-boundary when necessary so at least one complete kpool is rebuilt before
-decode. This preserves the older MLA/Mamba prefix hit while making the
-non-shareable target state deterministic.
+attention selection. Bound the candidate independently of retained drafter
+windows so a complete pool is rebuilt before decode. Only participating
+groups may veto fine-grained hits. A fine target tail without a draft window
+retries the preceding shared checkpoint before backing off a full replay window.
 
 ``GLM53_DRAFT_KV_COMPACT=1`` adds a DFlash-specific boundary lookup. The
 EAGLE hit rule needs one complete, cached block AFTER the reconciled
@@ -48,7 +47,8 @@ EAGLE lookahead lookup and retention.
 
 Installation states: pristine source; the legacy hybrid-apc form shipped in
 the stock image (with or without the replay stage), which is migrated to the
-v3 verification form first; already-current source, a byte-identical no-op.
+v3 verification form first; retained compact-boundary source; already-current
+source, a byte-identical no-op.
 Before writing, every owned stage must be present exactly once in its
 supported form; a stage marker alone never counts as an installation.
 Fail closed if the vLLM coordinator anchors drift.
@@ -467,6 +467,70 @@ BOUNDARY_VERIFY_NEW = """                _glm53_draft_swa = _glm53_is_draft_swa_
 """
 
 
+# These independent stages also migrate retained boundary-lookup installations.
+FINE_GRAIN_MARK = "# [glm53-participating-fine-hits-v1]"
+CAPABILITY_OLD = """                for manager in self.single_type_managers
+                if not manager.supports_fine_grained_hash_lookup
+                and manager.block_size != hash_block_size"""
+CAPABILITY_NEW = """                for manager, group in zip(  # [glm53-participating-fine-hits-v1]
+                    self.single_type_managers, kv_cache_config.kv_cache_groups
+                )
+                if group.kv_cache_spec.participates_in_prefix_caching
+                and not manager.supports_fine_grained_hash_lookup
+                and manager.block_size != hash_block_size"""
+KPOOL_INIT_OLD = """        self.dflash_swa_replay_tokens = _glm53_dflash_swa_replay_tokens(
+            kv_cache_config.kv_cache_groups
+        )
+"""
+KPOOL_INIT_NEW = KPOOL_INIT_OLD + """        # [glm53-kpool-replay-floor-v1] A retained draft window cannot
+        # replace the target's request-local circular scratch.
+        self.kpool_replay_tokens = max(
+            (
+                _glm53_inner_kv_spec(group.kv_cache_spec).block_size
+                for group in kv_cache_config.kv_cache_groups
+                if not group.kv_cache_spec.participates_in_prefix_caching
+                and type(_glm53_inner_kv_spec(group.kv_cache_spec)).__name__
+                == "KpoolTailSpec"
+            ),
+            default=0,
+        )
+"""
+KPOOL_HIT_OLD = """        num_groups = len(self.kv_cache_config.kv_cache_groups)
+        hit_length = max_cache_hit_length
+"""
+KPOOL_HIT_NEW = """        num_groups = len(self.kv_cache_config.kv_cache_groups)
+        # [glm53-kpool-replay-floor-v1] Preserve the true prompt/logits limit
+        # for EAGLE lookahead and replay accounting; bound only the candidate.
+        hit_length = max(0, min(
+            max_cache_hit_length,
+            max_cache_hit_length + 1 - self.kpool_replay_tokens,
+        ))
+"""
+COARSE_RETRY_OLD = """                    self._cache_hit_alignment_tokens,
+                )
+                if replay_safe_hit < curr_hit_length:
+"""
+COARSE_RETRY_NEW = """                    self._cache_hit_alignment_tokens,
+                )
+                # [glm53-partial-replay-fallback-v1] A fine Mamba tail may
+                # outrun the draft window. Retry the preceding shared boundary
+                # before discarding it; the loop still verifies every group.
+                if curr_hit_length % self.scheduler_block_size:
+                    replay_safe_hit = max(
+                        replay_safe_hit,
+                        curr_hit_length // self.scheduler_block_size
+                        * self.scheduler_block_size,
+                    )
+                if replay_safe_hit < curr_hit_length:
+"""
+FINE_EDITS = (
+    ("participating capability", CAPABILITY_OLD, CAPABILITY_NEW),
+    ("Kpool replay init", KPOOL_INIT_OLD, KPOOL_INIT_NEW),
+    ("Kpool replay candidate", KPOOL_HIT_OLD, KPOOL_HIT_NEW),
+    ("partial replay fallback", COARSE_RETRY_OLD, COARSE_RETRY_NEW),
+)
+
+
 
 # Owned stage content that a complete installation carries exactly once, and
 # superseded forms it must not carry. A stage marker only selects the
@@ -510,6 +574,14 @@ OWNED_HELPERS = {
 
 def verify_complete(text: str) -> list[str]:
     """Names of stages whose owned content is missing, duplicated, or stale."""
+    # Normalize only exact current stages, so nested older-stage checks remain
+    # strict without maintaining a second boundary/replay implementation.
+    for label, old, new in FINE_EDITS:
+        if text.count(new) != 1:
+            return [f"{label}: missing, duplicated, or drifted stage"]
+        if old in text.replace(new, "", 1):
+            return [f"{label}: competing superseded stage"]
+        text = text.replace(new, old, 1)
     problems = [
         f"{label}: expected exactly one owned block, found {n}"
         for label, block in REQUIRED_ONCE
@@ -575,6 +647,7 @@ def main() -> int:
     if not P.is_file():
         raise SystemExit(f"missing {P}")
     text = P.read_text()
+    original = text
     needle = "def _validate_prefix_cache_retention_interval(\n"
     if text.count(needle) != 1:
         raise SystemExit(f"{P}: helper insert point not unique")
@@ -632,12 +705,28 @@ def main() -> int:
         text = replace_once(
             text, BOUNDARY_VERIFY_OLD, BOUNDARY_VERIFY_NEW, "dflash-boundary-verify"
         )
+    if FINE_GRAIN_MARK not in text:
+        for label, old, new in FINE_EDITS:
+            text = replace_once(text, old, new, label)
     # A marker only chose the path above; the written result must carry every
     # owned stage exactly as supported (stale markers, partial stages, edited
     # verification logic and duplicated stages all stop here, unwritten).
     if problems := verify_complete(text):
         raise SystemExit(f"{P}: incomplete or drifted overlay state: " + "; ".join(problems))
-    P.write_text(text)
+    compile(text, str(P), "exec")
+    if text != original:
+        import tempfile
+
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=P.parent, delete=False) as out:
+                temporary = Path(out.name)
+                out.write(text)
+            temporary.chmod(P.stat().st_mode)
+            os.replace(temporary, P)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
     print(
         f"patched {P.name} (hybrid APC + versioned DFlash SWA replay clamp "
         "+ DFlash boundary lookup)"

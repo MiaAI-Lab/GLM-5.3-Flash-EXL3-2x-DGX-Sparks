@@ -248,12 +248,18 @@ KVCAP_PATCH_HOST="${KVCAP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kv_capacity_log.
 TOOLCHOICE_PATCH_HOST="${TOOLCHOICE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_tool_choice_none.py}"
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 CACHE_RESET_PATCH_HOST="${CACHE_RESET_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_cache_reset.py}"
+COLD_LOAD_PATCH_HOST="${COLD_LOAD_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_cold_load_uma.py}"
+SKIP_CGPROF_PATCH_HOST="${SKIP_CGPROF_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_skip_cudagraph_profile.py}"
 KPOOL_TAIL_PATCH_HOST="${KPOOL_TAIL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_slotmap.py}"
+# vLLM #57477. Different file from the slot-map clamp above: kpool_compress.py
+# prefill seed stride, not block_table.py.
+KPOOL_SEED_PATCH_HOST="${KPOOL_SEED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_kpool_tail_seed_stride.py}"
 MAMBA_STATE_PATCH_HOST="${MAMBA_STATE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mamba_align_state_free.py}"
 MAMBA_CHUNK_PATCH_HOST="${MAMBA_CHUNK_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_mamba_align_chunking.py}"
 SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
 ADAPTIVE_K_PATCH_HOST="${ADAPTIVE_K_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_adaptive_k.py}"
 DENSE_FP8_PATCH_HOST="${DENSE_FP8_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_dense_fp8.py}"
+LOADCLONE_PATCH_HOST="${LOADCLONE_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_loadclone.py}"
 DEFAULT_TOKENS_PATCH_HOST="${DEFAULT_TOKENS_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_default_max_new_tokens.py}"
 EXL3_OVERLAY_HOST="${EXL3_OVERLAY_HOST:-$SCRIPT_DIR/overlay/exl3.py}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
@@ -267,6 +273,9 @@ if [ -z "${LOAD_FORMAT+x}" ]; then
     esac
 fi
 PREFIX_MATCH_UNIT="${PREFIX_MATCH_UNIT:-}"
+# Unset-only defaults: an explicit empty is rejected before restart stops ranks.
+GLM53_LOAD_CLONE="${GLM53_LOAD_CLONE-1}"
+GLM53_LOAD_PREFETCH="${GLM53_LOAD_PREFETCH-0}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
 SKIP_MM_PROFILING="${SKIP_MM_PROFILING:-1}"
@@ -439,14 +448,32 @@ GLM53_APC_NO_STORE="${GLM53_APC_NO_STORE-1}"
 # explicitly empty value is an operator error and validate_numeric_config
 # rejects it rather than guessing a serving mode.
 GLM53_INDEXER_WORKSPACE="${GLM53_INDEXER_WORKSPACE-rightsize}"
-# Opt-in larger draft KV pages; no weight or cache precision changes.
-GLM53_DRAFT_KV_COMPACT="${GLM53_DRAFT_KV_COMPACT-0}"
+# Larger draft KV pages; no weight or cache precision changes. Default ON for
+# the DFlash drafter (the default spec method), OFF for mtp/none. Like
+# GLM53_INDEXER_WORKSPACE, the default applies only when UNSET: an explicit 0
+# opts out, and an explicitly empty value is an operator error that
+# validate_numeric_config rejects rather than guessing a serving mode.
+if [ "$SPEC_METHOD" = "dflash" ]; then
+    GLM53_DRAFT_KV_COMPACT="${GLM53_DRAFT_KV_COMPACT-1}"
+else
+    GLM53_DRAFT_KV_COMPACT="${GLM53_DRAFT_KV_COMPACT-0}"
+fi
 # SpinCondition reader busy-loop window. "stock" preserves vLLM's 1 s default;
 # 1..1000 selects milliseconds. The frozen TP=2 sweep selected 16 ms.
 GLM53_SPINWAIT_MS="${GLM53_SPINWAIT_MS-stock}"
 # EngineCore stock timeout is 300s; mid-serve Triton/TileLang JIT on TP=2 can
 # exceed that without being a true hang. NCCL watchdog is still 600s.
 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}"
+# --- host memory hygiene before launch (docs/uvm-livelock-gb10.md) ----------
+# On UMA the page cache is "used" device memory to the CUDA driver: after a
+# 164 GiB rsync or a previous serve, MemFree is ~2 GiB and the InstantTensor
+# loader either dies (buffer > budget) or shrinks io_depth to double digits.
+# 1 = drop clean page cache on BOTH nodes (needs passwordless
+# sudo; skipped with a warning otherwise), then wait until MemAvailable
+# clears GPU_MEM_UTIL x total (the number vLLM's startup check reads on
+# integrated GPUs; the driver returns a torn-down context asynchronously).
+# Set 0 to leave the host alone.
+GLM53_HOST_MEM_HYGIENE="${GLM53_HOST_MEM_HYGIENE:-1}"
 # 1 = after /health, burn DFlash2 BLOCK / sampler / kpool shapes. Nonfatal.
 GLM53_BOOT_SHAPE_WARMUP="${GLM53_BOOT_SHAPE_WARMUP:-1}"
 GLM53_WARMUP_REQ_TIMEOUT="${GLM53_WARMUP_REQ_TIMEOUT:-240}"
@@ -478,6 +505,12 @@ WORKER_VLLM_CACHE="${WORKER_VLLM_CACHE:-$WORKER_HOME/.cache/vllm-glm53-flash}"
 # Overlay FS ~/.triton and ~/.tilelang die on container recreate (TP=2 JIT
 # stall → 600s NCCL watchdog). Persist next to the vLLM cache.
 TRITON_HOST_CACHE="${TRITON_HOST_CACHE:-$CACHE_ROOT/triton}"
+# NVIDIA driver JIT/ptxas cache (~/.nv/ComputeCache). Lives in the container
+# overlay by default and dies on every docker rm: the DFlash2 graph capture
+# then re-JITs a 31 MiB cubin on each boot (29 s vs 3 s for the target's
+# graphs). Persist it next to the Triton cache.
+NV_HOST_CACHE="${NV_HOST_CACHE:-$CACHE_ROOT/nv}"
+WORKER_NV_CACHE="${WORKER_NV_CACHE:-$WORKER_VLLM_CACHE/nv}"
 TILELANG_HOST_CACHE="${TILELANG_HOST_CACHE:-$CACHE_ROOT/tilelang}"
 WORKER_TRITON_CACHE="${WORKER_TRITON_CACHE:-$WORKER_VLLM_CACHE/triton}"
 WORKER_TILELANG_CACHE="${WORKER_TILELANG_CACHE:-$WORKER_VLLM_CACHE/tilelang}"
@@ -665,6 +698,14 @@ validate_numeric_config() {
     _glm53_canonical_positive_int MAX_MODEL_LEN "$MAX_MODEL_LEN" 1000000 || return
     _glm53_canonical_positive_int MAX_NUM_SEQS "$MAX_NUM_SEQS" 4096 || return
     _glm53_canonical_positive_int MAX_NUM_BATCHED_TOKENS "$MAX_NUM_BATCHED_TOKENS" 8388608 || return
+    _glm53_validate_enum GLM53_LOAD_CLONE "${GLM53_LOAD_CLONE-1}" 0 1 || return
+    local load_prefetch="${GLM53_LOAD_PREFETCH-0}"
+    if ! [[ "$load_prefetch" =~ ^0*([0-9]|1[0-6])$ ]]; then
+        echo "GLM53_LOAD_PREFETCH must be a base-10 integer between 0 and 16" >&2
+        return 2
+    fi
+    while [ "${load_prefetch#0}" != "$load_prefetch" ]; do load_prefetch="${load_prefetch#0}"; done
+    GLM53_LOAD_PREFETCH="${load_prefetch:-0}"
     if [ -n "${LONG_PREFILL_TOKEN_THRESHOLD:-}" ]; then
         _glm53_canonical_positive_int LONG_PREFILL_TOKEN_THRESHOLD \
             "$LONG_PREFILL_TOKEN_THRESHOLD" "$MAX_NUM_BATCHED_TOKENS" || return
@@ -688,6 +729,7 @@ validate_numeric_config() {
     _glm53_validate_bool_flag GLM53_KDA_BF16_LARGE_M "${GLM53_KDA_BF16_LARGE_M-0}" || return
     _glm53_validate_spinwait_ms || return
     _glm53_validate_bool_flag GLM53_APC_NO_STORE "${GLM53_APC_NO_STORE-1}" || return
+    _glm53_validate_bool_flag GLM53_HOST_MEM_HYGIENE "${GLM53_HOST_MEM_HYGIENE:-1}" || return
     _glm53_validate_bool_flag GLM53_KV_CAPACITY_LOG "${GLM53_KV_CAPACITY_LOG-1}" || return
     # The template treats medium as max, so do not advertise it as a level.
     if [ -n "${GLM53_DEFAULT_REASONING_EFFORT-}" ]; then
@@ -759,13 +801,17 @@ validate_overlay_artifacts() {
         "$TOOLCHOICE_PATCH_HOST|[glm53-tool-choice-none]|$main_guard"
         "$XGRAMMAR_PATCH_HOST|vllm/v1/structured_output/|$main_guard"
         "$KPOOL_TAIL_PATCH_HOST|[glm53-kpool-tail-slotmap]|$main_guard"
+        "$KPOOL_SEED_PATCH_HOST|[glm53-kpool-tail-seed-stride]|$main_guard"
         "$MAMBA_STATE_PATCH_HOST|[glm53-mamba-align-state-free-v1]|$main_guard"
         "$MAMBA_CHUNK_PATCH_HOST|[glm53-mamba-align-chunking-v1]|$main_guard"
         "$SPINWAIT_PATCH_HOST|device_communicators/shm_broadcast.py|$main_guard"
         "$ADAPTIVE_K_PATCH_HOST|[glm53-adaptive-k]|$main_guard"
         "$DENSE_FP8_PATCH_HOST|[glm53-dense-fp8]|$main_guard"
+        "$LOADCLONE_PATCH_HOST|[glm53-loadclone:v2]|    main()"
         "$DEFAULT_TOKENS_PATCH_HOST|[glm53-default-max-new-tokens]|    raise SystemExit(main(sys.argv))"
         "$CACHE_RESET_PATCH_HOST|# [glm53-cache-reset]|$main_guard"
+        "$COLD_LOAD_PATCH_HOST|[glm53-cold-load-uma:v1]|    sys.exit(main())"
+        "$SKIP_CGPROF_PATCH_HOST|[glm53-skip-cudagraph-profile]|    sys.exit(main())"
         "$SCRIPT_DIR/overlay/patch_ablit.py|$ablit_marker|    main()"
         "$SCRIPT_DIR/overlay/ablit_runtime.py|o_proj abliteration (ABLIT)|    return report"
     )
@@ -1152,12 +1198,16 @@ preflight() {
     [ -f "$TOOLCHOICE_PATCH_HOST" ] || die "$TOOLCHOICE_PATCH_HOST missing"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "$XGRAMMAR_PATCH_HOST missing"
     [ -f "$CACHE_RESET_PATCH_HOST" ] || die "$CACHE_RESET_PATCH_HOST missing"
+    [ -f "$COLD_LOAD_PATCH_HOST" ] || die "$COLD_LOAD_PATCH_HOST missing"
+    [ -f "$SKIP_CGPROF_PATCH_HOST" ] || die "$SKIP_CGPROF_PATCH_HOST missing"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "$KPOOL_TAIL_PATCH_HOST missing"
+    [ -f "$KPOOL_SEED_PATCH_HOST" ] || die "$KPOOL_SEED_PATCH_HOST missing"
     [ -f "$MAMBA_STATE_PATCH_HOST" ] || die "$MAMBA_STATE_PATCH_HOST missing"
     [ -f "$MAMBA_CHUNK_PATCH_HOST" ] || die "$MAMBA_CHUNK_PATCH_HOST missing"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "$SPINWAIT_PATCH_HOST missing"
     [ -f "$ADAPTIVE_K_PATCH_HOST" ] || die "$ADAPTIVE_K_PATCH_HOST missing"
     [ -f "$DENSE_FP8_PATCH_HOST" ] || die "$DENSE_FP8_PATCH_HOST missing"
+    [ -f "$LOADCLONE_PATCH_HOST" ] || die "$LOADCLONE_PATCH_HOST missing"
     [ -f "$DEFAULT_TOKENS_PATCH_HOST" ] || die "$DEFAULT_TOKENS_PATCH_HOST missing"
     [ -f "$EXL3_OVERLAY_HOST" ] || die "$EXL3_OVERLAY_HOST missing"
     [ -f "$SCRIPT_DIR/overlay/patch_ablit.py" ] || die "$SCRIPT_DIR/overlay/patch_ablit.py missing"
@@ -1612,6 +1662,11 @@ download_only() {
 # over ~164 GiB / 120 shards on both ends for zero bytes of difference
 # (issue #22, item 2). FORCE_SYNC=1 bypasses the marker; deleting the
 # marker file on the worker has the same effect.
+# The marker is a claim, not proof: it is written only after the synced
+# snapshot passes worker_snapshot_complete, a matching marker is honored only
+# when that same probe passes, and a mutating sync clears the marker before the
+# transfer — so an interrupted sync is neither stamped complete nor skipped on
+# the next launch, and a marker left by an incomplete one is not trusted.
 sync_repo_marker_rev() {
     local src="$1" preferred="${2:-}"
     local rev
@@ -1625,20 +1680,100 @@ sync_repo_marker_rev() {
     printf '%s' "$rev"
 }
 
+# The files the loader opens in the selected snapshot — the two sidecars plus
+# every shard the snapshot's own index names (weight_map values), or the
+# drafter's config + weight — as "bytes name" lines, dereferenced as the loader
+# reads them. Fails closed instead of degrading to a weaker probe: a present
+# index that cannot be read or parsed, a required entry that is not a
+# dereferenced regular file, and a shard name that cannot be quoted into the
+# worker probe are errors, because the loader opens those same files.
+snapshot_required_sizes() {
+    python3 -S -c '
+import json, os, re, stat, sys
+snap, label = sys.argv[1], sys.argv[2]
+if label == "DFlash2 draft":
+    names = ["config.json", "model.safetensors"]
+else:
+    with open(os.path.join(snap, "model.safetensors.index.json"), encoding="utf-8") as fh:
+        weight_map = json.load(fh).get("weight_map") or {}
+    shards = sorted({n for n in weight_map.values() if isinstance(n, str) and n})
+    if not shards or any(not re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._-]*", n) for n in shards):
+        sys.exit(1)
+    names = ["config.json", "model.safetensors.index.json", *shards]
+for name in names:
+    try:
+        st = os.stat(os.path.join(snap, name))
+    except OSError:
+        sys.exit(1)
+    if not stat.S_ISREG(st.st_mode):
+        sys.exit(1)
+    print(st.st_size, name)
+' "$1/snapshots/$2" "$3"
+}
+
+# Worker-side twin of the local completeness contract — model_tree_complete for
+# the target, resolve_dflash_dir for the drafter ("DFlash2 draft") — probed in
+# one ssh call: every entry of the expected inventory must dereference to a
+# regular file of the head's own byte size, so a nonempty partial shard, a
+# directory or a symlink to either is not mistaken for the synced file. The
+# names come from the snapshot's own index, so an unrelated *.safetensors file
+# cannot stand in for a missing required shard.
+worker_snapshot_complete() {
+    local cache_name="$1" rev="$2" sizes="$3"
+    local dir="${WORKER_CACHE_DIR}/hub/${cache_name}/snapshots/${rev}"
+    local -a names=()
+    local size name
+    [ -n "$sizes" ] || return 1
+    while read -r size name; do
+        names+=("$name")
+    done <<<"$sizes"
+    # -L + -type f prints the dereferenced size of entries that resolve to a
+    # regular file only; -printf reproduces the head's "bytes name" lines, so
+    # both sides compare as one string. The unquoted expansion is deliberate:
+    # snapshot_required_sizes validated each name as a single safe token.
+    [ "$(worker_ssh "cd '$dir' && find -L ${names[*]} -maxdepth 0 -type f -printf '%s %p\n' 2>/dev/null")" = "$sizes" ]
+}
+
 sync_repo_to_worker() {
     local src="$1" cache_name="$2" label="$3" preferred="${4:-}"
-    local marker rev
+    local marker rev remote_dir sizes
     marker="${WORKER_CACHE_DIR}/hub/${cache_name}/.glm53-exl3-synced"
     rev="$(sync_repo_marker_rev "$src" "$preferred")"
+    remote_dir="${WORKER_CACHE_DIR}/hub/${cache_name}/snapshots/${rev}"
+    # Verify against the head before touching the worker: a transfer cannot
+    # repair an unreadable index or a missing required entry, so refusing here
+    # keeps a ~164 GiB rsync from running to serve a tree that cannot load.
+    sizes="$(snapshot_required_sizes "$src" "$rev" "$label")" \
+        || die "${label} snapshot cannot be verified on the head: $src/snapshots/$rev — an index or required file is missing or unusable (REFRESH_WEIGHTS=1 re-downloads it)"
     if [ "${FORCE_SYNC:-0}" != "1" ] \
        && [ "$(worker_ssh "cat '$marker' 2>/dev/null" || true)" = "$rev" ]; then
-        log "worker ${cache_name} already at ${rev} — rsync skipped (FORCE_SYNC=1 to force)"
-        return 0
+        if worker_snapshot_complete "$cache_name" "$rev" "$sizes"; then
+            log "worker ${cache_name} already at ${rev} — rsync skipped (FORCE_SYNC=1 to force)"
+            return 0
+        fi
+        warn "worker ${cache_name} marker matches ${rev}, but its snapshot is incomplete — re-syncing"
     fi
     log "syncing ${label} to worker (first run moves ~164 GiB over the p2p link) ..."
-    worker_ssh "mkdir -p '${WORKER_CACHE_DIR}/hub/${cache_name}'"
+    # A mutating sync clears the marker first: --partial keeps half-written
+    # bytes, so a marker left over a failed transfer would describe a tree no
+    # completed sync produced.
+    worker_ssh "mkdir -p '${WORKER_CACHE_DIR}/hub/${cache_name}' && rm -f '$marker'"
     rsync -a --partial --info=progress2 \
         "$src/" "${WORKER_SSH}:${WORKER_CACHE_DIR}/hub/${cache_name}/"
+    # HF cache snapshot entries are symlinks into blobs/, so a link whose target
+    # the worker never received stays dangling no matter how often the repo is
+    # re-synced. Repair only that case, and only the drafter's single weight:
+    # rsync -L dereferences the head's link, so the worker gets the 2.3 GiB of
+    # bytes instead of a second copy of the whole repo.
+    if [ "$label" = "DFlash2 draft" ] \
+       && ! worker_snapshot_complete "$cache_name" "$rev" "$sizes"; then
+        warn "DFlash2 model.safetensors is unreadable on worker — copying the weight by value"
+        worker_ssh "mkdir -p '$remote_dir'"
+        rsync -aL --partial --info=progress2 \
+            "$src/snapshots/$rev/model.safetensors" "${WORKER_SSH}:${remote_dir}/"
+    fi
+    worker_snapshot_complete "$cache_name" "$rev" "$sizes" \
+        || die "synced ${label} snapshot is incomplete on worker: $remote_dir"
     worker_ssh "printf '%s' '$rev' > '$marker'"
 }
 
@@ -1649,11 +1784,11 @@ verify_worker_model_snapshot() {
     # proves it can) — there is no worker copy to count, and the export is the
     # tree require_model_snapshot already validated on the head.
     [ "${NFS_SHARE:-0}" = "1" ] && return 0
-    local dir="${WORKER_CACHE_DIR}/hub/${MODEL_CACHE_NAME}/snapshots/${MODEL_SNAPSHOT}"
-    worker_ssh "test -f '$dir/config.json' \
-        && test -f '$dir/model.safetensors.index.json' \
-        && [ \"\$(find -L '$dir' -maxdepth 1 -type f -name '*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]')\" -ge '$EXPECTED_SHARDS' ]" \
-        || die "pinned model snapshot is incomplete on worker: $dir"
+    local sizes
+    sizes="$(snapshot_required_sizes "$MODEL_PATH" "$MODEL_SNAPSHOT" "weights")" \
+        || die "pinned model snapshot cannot be verified on the head: $MODEL_PATH/snapshots/$MODEL_SNAPSHOT"
+    worker_snapshot_complete "$MODEL_CACHE_NAME" "$MODEL_SNAPSHOT" "$sizes" \
+        || die "pinned model snapshot is incomplete on worker: ${WORKER_CACHE_DIR}/hub/${MODEL_CACHE_NAME}/snapshots/${MODEL_SNAPSHOT}"
 }
 
 sync_weights() {
@@ -1688,6 +1823,8 @@ sync_weights() {
 # kv_cache_utils.py and follows patch_glm5_drafter_group.py, the other overlay
 # editing that file.
 GLM53_OVERLAY_ORDER=(
+    patch_cold_load_uma.py
+    patch_skip_cudagraph_profile.py
     patch_glm_video_placeholders.py
     patch_suppress_stops_in_reasoning.py
     patch_scheduler_decode_floor.py
@@ -1701,9 +1838,11 @@ GLM53_OVERLAY_ORDER=(
     patch_tool_choice_none.py
     patch_xgrammar_termination.py
     patch_kpool_tail_slotmap.py
+    patch_kpool_tail_seed_stride.py
     patch_spinwait.py
     patch_adaptive_k.py
     patch_dense_fp8.py
+    patch_loadclone.py
     patch_default_max_new_tokens.py
     patch_indexer_workspace.py
     patch_cache_reset.py
@@ -1919,12 +2058,72 @@ _glm53_stage_coop_runtime_worker() {
 }
 
 # ------------------------------- launch ------------------------------------
+# Drop clean page cache on both nodes while no engine runs. Needs
+# passwordless sudo (sudo -n); otherwise warns and continues — the
+# in-container InstantTensor budget (patch_cold_load_uma.py) sizes against
+# MemAvailable and no longer depends on the drop. Swap is not cycled:
+# residual swap belongs to live co-tenants, swapoff pulls it back into RAM
+# (the opposite of the goal) and swapon only re-enables fstab entries.
+host_memory_hygiene() {
+    [ "$GLM53_HOST_MEM_HYGIENE" = "1" ] || { log "host memory hygiene skipped (GLM53_HOST_MEM_HYGIENE=0)"; return 0; }
+    # One POSIX sh script, sent to `sudo -n sh -s` on stdin on each node:
+    # drop clean page cache, report the result.
+    local hygiene_script
+    hygiene_script="$(cat <<'HYG'
+set -e
+sync
+echo 1 > /proc/sys/vm/drop_caches
+free_gib=$(awk '/^MemFree:/ { print int($2 / 1048576) }' /proc/meminfo)
+echo "MemFree=${free_gib}GiB"
+HYG
+)"
+    # After a teardown the driver returns ~80 GiB of weights asynchronously;
+    # on integrated GPUs vLLM's startup check reads MemAvailable
+    # (vllm/utils/mem_utils.py, psutil.virtual_memory().available) against
+    # GPU_MEM_UTIL x total, so wait until MemAvailable clears that bar
+    # (+1.5 GiB). /proc/meminfo is the same number vLLM reads — a throwaway
+    # `docker run --gpus all` probe adds nothing. Without passwordless sudo
+    # there is nothing to actively free, so skip the wait with one warning
+    # instead of spinning 45 drop attempts.
+    local need_mib i avail_mib
+    need_mib=$(awk -v u="$GPU_MEM_UTIL" '/MemTotal/{printf "%d", $2*u/1024 + 1536}' /proc/meminfo)
+    avail_mib=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+    avail_mib="${avail_mib:-0}"
+    if [ "$avail_mib" -lt "$need_mib" ]; then
+        if sudo -n true 2>/dev/null; then
+            log "waiting for MemAvailable ($((avail_mib/1024)) GiB) to reach $((need_mib/1024)) GiB (GPU_MEM_UTIL x total + 1.5 GiB) ..."
+            for i in $(seq 1 45); do
+                sync; sudo -n sh -c 'echo 1 > /proc/sys/vm/drop_caches' 2>/dev/null || true
+                sleep 2
+                avail_mib=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+                avail_mib="${avail_mib:-0}"
+                [ "$avail_mib" -ge "$need_mib" ] && break
+            done
+        else
+            warn "head: passwordless sudo unavailable — skipping the pre-launch memory wait (MemAvailable $((avail_mib/1024)) GiB < $((need_mib/1024)) GiB needed)"
+        fi
+    fi
+    log "MemAvailable before launch: $((avail_mib/1024)) GiB (need $((need_mib/1024)))"
+    local out
+    if out="$(printf '%s\n' "$hygiene_script" | sudo -n sh -s 2>/dev/null)"; then
+        log "host hygiene head: $out"
+    else
+        warn "head: could not drop page cache (passwordless sudo unavailable) — continuing; the InstantTensor budget uses MemAvailable and does not depend on it"
+    fi
+    if out="$(printf '%s\n' "$hygiene_script" | worker_ssh "sudo -n sh -s" 2>/dev/null)"; then
+        log "host hygiene worker: $out"
+    else
+        warn "worker: could not drop page cache (passwordless sudo unavailable) — continuing"
+    fi
+}
+
 launch_cluster() {
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || true
     worker_ssh "docker rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 || true
+    host_memory_hygiene
 
-    mkdir -p "$CACHE_ROOT" "$TRITON_HOST_CACHE" "$TILELANG_HOST_CACHE"
-    worker_ssh "mkdir -p '$WORKER_VLLM_CACHE' '$WORKER_TRITON_CACHE' '$WORKER_TILELANG_CACHE'"
+    mkdir -p "$CACHE_ROOT" "$TRITON_HOST_CACHE" "$TILELANG_HOST_CACHE" "$NV_HOST_CACHE"
+    worker_ssh "mkdir -p '$WORKER_VLLM_CACHE' '$WORKER_TRITON_CACHE' '$WORKER_TILELANG_CACHE' '$WORKER_NV_CACHE'"
     scp -q -o BatchMode=yes "$WORKER_SCRIPT" "${WORKER_SSH}:/tmp/${CONTAINER_WORKER}.sh"
     [ -f "$CHAT_TEMPLATE_HOST" ] || die "missing chat template: $CHAT_TEMPLATE_HOST"
     scp -q -o BatchMode=yes "$CHAT_TEMPLATE_HOST" "${WORKER_SSH}:/tmp/glm53-chat_template.jinja"
@@ -1950,14 +2149,21 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
     [ -f "$CACHE_RESET_PATCH_HOST" ] || die "missing $CACHE_RESET_PATCH_HOST"
     scp -q -o BatchMode=yes "$CACHE_RESET_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_cache_reset.py"
+    [ -f "$COLD_LOAD_PATCH_HOST" ] || die "missing $COLD_LOAD_PATCH_HOST"
+    scp -q -o BatchMode=yes "$COLD_LOAD_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_cold_load_uma.py"
+    scp -q -o BatchMode=yes "$SKIP_CGPROF_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_skip_cudagraph_profile.py"
     [ -f "$KPOOL_TAIL_PATCH_HOST" ] || die "missing $KPOOL_TAIL_PATCH_HOST"
     scp -q -o BatchMode=yes "$KPOOL_TAIL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_slotmap.py"
+    [ -f "$KPOOL_SEED_PATCH_HOST" ] || die "missing $KPOOL_SEED_PATCH_HOST"
+    scp -q -o BatchMode=yes "$KPOOL_SEED_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_kpool_tail_seed_stride.py"
     [ -f "$MAMBA_STATE_PATCH_HOST" ] || die "missing $MAMBA_STATE_PATCH_HOST"
     scp -q -o BatchMode=yes "$MAMBA_STATE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mamba_align_state_free.py"
     [ -f "$MAMBA_CHUNK_PATCH_HOST" ] || die "missing $MAMBA_CHUNK_PATCH_HOST"
     scp -q -o BatchMode=yes "$MAMBA_CHUNK_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_mamba_align_chunking.py"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "missing $SPINWAIT_PATCH_HOST"
     scp -q -o BatchMode=yes "$SPINWAIT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_spinwait.py"
+    [ -f "$LOADCLONE_PATCH_HOST" ] || die "missing $LOADCLONE_PATCH_HOST"
+    scp -q -o BatchMode=yes "$LOADCLONE_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_loadclone.py"
     [ -f "$ADAPTIVE_K_PATCH_HOST" ] || die "missing $ADAPTIVE_K_PATCH_HOST"
     scp -q -o BatchMode=yes "$ADAPTIVE_K_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_adaptive_k.py"
     [ -f "$DENSE_FP8_PATCH_HOST" ] || die "missing $DENSE_FP8_PATCH_HOST"
@@ -2041,6 +2247,21 @@ launch_cluster() {
         nccl_common+=(-e "VLLM_PREFIX_CACHE_RETENTION_INTERVAL_SWA=$GLM53_APC_RETENTION_INTERVAL_SWA")
         log "drafter (SWA) prefix-cache retention interval: ${GLM53_APC_RETENTION_INTERVAL_SWA} (both ranks)"
     fi
+    # UMA cold-load knobs (docs/cold-load-uma.md): optional overrides for the
+    # in-container InstantTensor budget and the mmap staging. Forward to both
+    # ranks only when set — an exported empty string would engage the
+    # GLM53_COLD_LOAD_UMA kill switch, disable the safety clone, and crash
+    # InstantTensor's int()/float() env readers.
+    local v
+    for v in GLM53_COLD_LOAD_UMA GLM53_COLD_LOAD_STAGE_MMAP \
+             INSTANTTENSOR_MAX_FREE_MEM_USAGE INSTANTTENSOR_BUFFER_SIZE \
+             INSTANTTENSOR_CHUNK_SIZE INSTANTTENSOR_CONCURRENCY \
+             INSTANTTENSOR_IO_DEPTH INSTANTTENSOR_BACKEND; do
+        if [ -n "${!v:-}" ]; then
+            nccl_common+=(-e "$v=${!v}")
+            log "$v=${!v} (both ranks)"
+        fi
+    done
 
     local -a head_preload=() worker_preload=""
     if [ "$USE_HOST_NCCL" = "1" ]; then
@@ -2065,6 +2286,7 @@ launch_cluster() {
              MAX_MODEL_LEN GPU_MEM_UTIL MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS \
              LONG_PREFILL_TOKEN_THRESHOLD \
              KV_CACHE_DTYPE LOAD_FORMAT PREFIX_MATCH_UNIT MTP_TOKENS SPEC_METHOD DFLASH_TOKENS DFLASH_MODEL_DIR \
+             GLM53_LOAD_CLONE GLM53_LOAD_PREFETCH \
              DFLASH_DRAFT_TP \
              LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING \
              MM_IMAGE_TOKENS VIDEO_NUM_FRAMES MM_PROCESSOR_CACHE_GB \
@@ -2142,6 +2364,7 @@ launch_cluster() {
         -v '$WORKER_VLLM_CACHE:/root/.cache/vllm' \
         -v '$WORKER_TRITON_CACHE:/root/.triton/cache' \
         -v '$WORKER_TILELANG_CACHE:/root/.tilelang/cache' \
+        -v '$WORKER_NV_CACHE:/root/.nv/ComputeCache' \
         -v '/tmp/${CONTAINER_WORKER}.sh:/start.sh:ro' \
         -v '/tmp/glm53-chat_template.jinja:${CHAT_TEMPLATE}:ro' \
         -v '/tmp/patch_glm_video_placeholders.py:/opt/glm53/patch_glm_video_placeholders.py:ro' \
@@ -2155,10 +2378,14 @@ launch_cluster() {
         -v '/tmp/patch_kv_capacity_log.py:/opt/glm53/patch_kv_capacity_log.py:ro' \
         -v '/tmp/patch_xgrammar_termination.py:/opt/glm53/patch_xgrammar_termination.py:ro' \
         -v '/tmp/patch_cache_reset.py:/opt/glm53/patch_cache_reset.py:ro' \
+        -v '/tmp/patch_cold_load_uma.py:/opt/glm53/patch_cold_load_uma.py:ro' \
+        -v '/tmp/patch_skip_cudagraph_profile.py:/opt/glm53/patch_skip_cudagraph_profile.py:ro' \
         -v '/tmp/patch_kpool_tail_slotmap.py:/opt/glm53/patch_kpool_tail_slotmap.py:ro' \
+        -v '/tmp/patch_kpool_tail_seed_stride.py:/opt/glm53/patch_kpool_tail_seed_stride.py:ro' \
         -v '/tmp/patch_mamba_align_state_free.py:/opt/glm53/patch_mamba_align_state_free.py:ro' \
         -v '/tmp/patch_mamba_align_chunking.py:/opt/glm53/patch_mamba_align_chunking.py:ro' \
         -v '/tmp/patch_spinwait.py:/opt/glm53/patch_spinwait.py:ro' \
+        -v '/tmp/patch_loadclone.py:/opt/glm53/patch_loadclone.py:ro' \
         -v '/tmp/patch_adaptive_k.py:/opt/glm53/patch_adaptive_k.py:ro' \
         -v '/tmp/patch_dense_fp8.py:/opt/glm53/patch_dense_fp8.py:ro' \
         -v '/tmp/patch_default_max_new_tokens.py:/opt/glm53/patch_default_max_new_tokens.py:ro' \
@@ -2185,6 +2412,7 @@ launch_cluster() {
         -v "$CACHE_ROOT:/root/.cache/vllm" \
         -v "$TRITON_HOST_CACHE:/root/.triton/cache" \
         -v "$TILELANG_HOST_CACHE:/root/.tilelang/cache" \
+        -v "$NV_HOST_CACHE:/root/.nv/ComputeCache" \
         -v "$HEAD_SCRIPT:/start.sh:ro" \
         -v "$CHAT_TEMPLATE_HOST:$CHAT_TEMPLATE:ro" \
         -v "$VIDEO_PATCH_HOST:/opt/glm53/patch_glm_video_placeholders.py:ro" \
@@ -2198,10 +2426,14 @@ launch_cluster() {
         -v "$KVCAP_PATCH_HOST:/opt/glm53/patch_kv_capacity_log.py:ro" \
         -v "$XGRAMMAR_PATCH_HOST:/opt/glm53/patch_xgrammar_termination.py:ro" \
         -v "$CACHE_RESET_PATCH_HOST:/opt/glm53/patch_cache_reset.py:ro" \
+        -v "$COLD_LOAD_PATCH_HOST:/opt/glm53/patch_cold_load_uma.py:ro" \
+        -v "$SKIP_CGPROF_PATCH_HOST:/opt/glm53/patch_skip_cudagraph_profile.py:ro" \
         -v "$KPOOL_TAIL_PATCH_HOST:/opt/glm53/patch_kpool_tail_slotmap.py:ro" \
+        -v "$KPOOL_SEED_PATCH_HOST:/opt/glm53/patch_kpool_tail_seed_stride.py:ro" \
         -v "$MAMBA_STATE_PATCH_HOST:/opt/glm53/patch_mamba_align_state_free.py:ro" \
         -v "$MAMBA_CHUNK_PATCH_HOST:/opt/glm53/patch_mamba_align_chunking.py:ro" \
         -v "$SPINWAIT_PATCH_HOST:/opt/glm53/patch_spinwait.py:ro" \
+        -v "$LOADCLONE_PATCH_HOST:/opt/glm53/patch_loadclone.py:ro" \
         -v "$ADAPTIVE_K_PATCH_HOST:/opt/glm53/patch_adaptive_k.py:ro" \
         -v "$DENSE_FP8_PATCH_HOST:/opt/glm53/patch_dense_fp8.py:ro" \
         -v "$DEFAULT_TOKENS_PATCH_HOST:/opt/glm53/patch_default_max_new_tokens.py:ro" \
@@ -2227,6 +2459,8 @@ launch_cluster() {
         -e LONG_PREFILL_TOKEN_THRESHOLD="${LONG_PREFILL_TOKEN_THRESHOLD:-}" \
         -e KV_CACHE_DTYPE="$KV_CACHE_DTYPE" \
         -e LOAD_FORMAT="${LOAD_FORMAT:-}" \
+        -e GLM53_LOAD_CLONE="$GLM53_LOAD_CLONE" \
+        -e GLM53_LOAD_PREFETCH="$GLM53_LOAD_PREFETCH" \
         -e PREFIX_MATCH_UNIT="${PREFIX_MATCH_UNIT:-}" \
         -e MTP_TOKENS="$MTP_TOKENS" \
         -e SPEC_METHOD="$SPEC_METHOD" \
@@ -2295,6 +2529,11 @@ wait_for_health() {
     local elapsed=0 healthy=0 exited=0 dead_side="" worker_fail=0 head_fail=0
     while [ "$elapsed" -lt "$READY_TIMEOUT" ]; do
         if curl -fsS -m 5 "$url" >/dev/null 2>&1; then healthy=1; break; fi
+        # Probe /health every second; the container liveness checks below
+        # (a docker inspect and an ssh round trip) only every 10 s.
+        if [ $((elapsed % 10)) -ne 0 ]; then
+            sleep 1; elapsed=$((elapsed + 1)); continue
+        fi
         # Keep the inspect result out of a grep -q pipeline. With pipefail,
         # grep can close early and make a running container look dead.
         # Same 3-strike window as the worker: one transient docker miss must
@@ -2326,7 +2565,7 @@ wait_for_health() {
                 exited=1; dead_side="worker"; break
             fi
         fi
-        sleep 10; elapsed=$((elapsed + 10))
+        sleep 1; elapsed=$((elapsed + 1))
     done
 
     _stop_logtail
@@ -2350,14 +2589,31 @@ post_ready_warmup() {
     [ -f "$SCRIPT_DIR/scripts/boot-shape-warmup.sh" ] \
         || { warn "boot-shape-warmup.sh missing — skipping"; return 0; }
     log "post-ready DFlash2/sampler warmup (nonfatal; timeout ${GLM53_WARMUP_REQ_TIMEOUT}s/req) ..."
+    local rc=0
     GLM53_WARMUP_MAX_CONCURRENCY="$MAX_NUM_SEQS" \
     GLM53_WARMUP_REQ_TIMEOUT="$GLM53_WARMUP_REQ_TIMEOUT" \
     GLM53_WARMUP_DFLASH_K="${DFLASH_TOKENS:-7}" \
     GLM53_WARMUP_TRITON_CACHE_DIR="$TRITON_HOST_CACHE" \
     GLM53_WARMUP_BEARER="${VLLM_API_KEY:-}" \
+    GLM53_WARMUP_CANARY="${GLM53_WARMUP_CANARY:-1}" \
         bash "$SCRIPT_DIR/scripts/boot-shape-warmup.sh" \
             "http://127.0.0.1:${PORT}" "$SERVED_MODEL_NAME" \
-        || warn "boot shape warmup incomplete — uncovered shapes may JIT mid-serve on TP=2"
+        || rc=$?
+    if [ "$rc" = "3" ]; then
+        # Degenerate-engine canary: /health is green but the engine generates
+        # garbage or accepted none of its drafts (#249). Keep the evidence, then
+        # take the engine off the port: a client must not reach an engine we
+        # just judged broken. Teardown is best-effort — its result never
+        # replaces the verdict, and this message claims only that a shutdown
+        # was attempted.
+        collect_failure_logs 2>/dev/null || true
+        local stop_rc=0
+        local teardown="shutdown attempted"
+        stop_containers || stop_rc=$?
+        [ "$stop_rc" = "0" ] || teardown="shutdown attempt failed (rc=${stop_rc}; containers may still be up)"
+        die "engine failed the post-ready correctness canary (degenerate output / zero DFlash acceptance); logs in $LOGDIR/; ${teardown} — start again (a later boot is usually fine); GLM53_WARMUP_CANARY=0 skips the check"
+    fi
+    [ "$rc" = "0" ] || warn "boot shape warmup incomplete — uncovered shapes may JIT mid-serve on TP=2"
 }
 
 collect_failure_logs() {
@@ -2444,11 +2700,15 @@ start() {
 }
 
 stop_containers() {
-    log "stopping head container ..."
+    # docker rm -f sends SIGTERM and waits --stop-timeout (60 s) for vLLM's
+    # shutdown; there is nothing to flush (vLLM keeps no durable state, and an
+    # NVMe prefix tier fsyncs per chunk), so kill first and remove. Both nodes in parallel.
+    log "stopping head + worker containers ..."
+    worker_ssh "docker kill '$CONTAINER_WORKER' >/dev/null 2>&1; docker rm -f '$CONTAINER_WORKER' >/dev/null 2>&1" &
+    local wpid=$!
+    docker kill "$CONTAINER_HEAD" >/dev/null 2>&1 || true
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || log "  (no head container was running)"
-    log "stopping worker container on ${WORKER_SSH} ..."
-    worker_ssh "docker rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 \
-        || log "  (no worker container was running)"
+    wait "$wpid" || log "  (no worker container was running)"
     if [ "${NFS_SHARE:-0}" = "1" ]; then
         log "removing the worker NFS volume (the exporter stays up) ..."
         nfs_unmount_workers

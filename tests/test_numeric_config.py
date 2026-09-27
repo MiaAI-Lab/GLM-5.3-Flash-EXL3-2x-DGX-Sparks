@@ -392,6 +392,48 @@ def test_swa_retention_interval_needs_the_dflash_drafter(launcher: Path) -> None
 
 
 
+@pytest.mark.parametrize("launcher", ("start.sh", "start-tp3.sh", "start-tp4.sh"))
+def test_loader_controls_precedence_and_early_rejection(launcher: str) -> None:
+    from test_launcher_rank_parity import Harness
+
+    with tempfile.TemporaryDirectory() as directory:
+        harness = Harness(Path(directory), launcher=launcher)
+        fn = harness.repo / "start.fn.sh"
+        source = fn.read_text()
+        fn.write_text(source.rsplit('"$@"', 1)[0] + '''
+inspect_loader() {
+    validate_numeric_config || return
+    printf '%s|%s|%s\\n' "$GLM53_LOAD_CLONE" "$GLM53_LOAD_PREFETCH" "$LOAD_FORMAT"
+}
+"$@"
+''')
+        dotenv = harness.repo / ".env"
+        shared = dotenv.read_text()
+        topology = None if launcher == "start.sh" else harness.repo / (".env." + launcher[6:-3])
+        for clone, depth, expected in (("0", "00016", "0|16|"), ("1", "0", "1|0|")):
+            # Caller overrides both shared and topology files, including LOAD_FORMAT=.
+            dotenv.write_text(shared + "\nGLM53_LOAD_CLONE=1\nGLM53_LOAD_PREFETCH=8\n")
+            result = harness.run("inspect_loader", entry="start.fn.sh",
+                                 GLM53_LOAD_CLONE=clone, GLM53_LOAD_PREFETCH=depth, LOAD_FORMAT="")
+            assert result.returncode == 0, result.stderr
+            assert result.stdout.strip() == expected
+            assert not harness.host_touching_calls()
+        dotenv.write_text(shared + "\nGLM53_LOAD_CLONE=0\nGLM53_LOAD_PREFETCH=6\n")
+        if topology:
+            topology.write_text(topology.read_text() + "\nGLM53_LOAD_CLONE=1\nGLM53_LOAD_PREFETCH=3\n")
+        result = harness.run("inspect_loader", entry="start.fn.sh")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip().split("|")[:2] == (["1", "3"] if topology else ["0", "6"])
+        # Every error must reach the pre-stop gate, even if .env supplies a valid value.
+        for key, values in (("GLM53_LOAD_CLONE", ("", "01", "yes", "2")),
+                            ("GLM53_LOAD_PREFETCH", ("", "-1", "17", "1.5", " 2", "99999999999999999999"))):
+            for value in values:
+                result = harness.run("restart", **{key: value})
+                assert result.returncode == 2, (launcher, key, value, result.stderr)
+                assert key in result.stderr
+                assert not harness.host_touching_calls(), harness.calls()
+
+
 if __name__ == "__main__":
     test_matrix()
     test_decimal_normalization()
@@ -405,4 +447,6 @@ if __name__ == "__main__":
     for _launcher in RETENTION_LAUNCHERS:
         test_global_retention_interval_contract(_launcher)
         test_swa_retention_interval_needs_the_dflash_drafter(_launcher)
+    for _launcher in ("start.sh", "start-tp3.sh", "start-tp4.sh"):
+        test_loader_controls_precedence_and_early_rejection(_launcher)
     print("numeric config tests: PASS")

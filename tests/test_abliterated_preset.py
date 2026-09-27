@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -163,15 +164,19 @@ def _make_snapshot(repo: Path, revision: str, shards: int = 120) -> None:
     snapshot = repo / "snapshots" / revision
     snapshot.mkdir(parents=True)
     (snapshot / "config.json").write_text("{}\n")
-    (snapshot / "model.safetensors.index.json").write_text("{}\n")
+    index = snapshot / "model.safetensors.index.json"
     blobs = repo / "blobs"
     blobs.mkdir(exist_ok=True)
-    for index in range(1, shards + 1):
-        blob = blobs / f"{revision}-{index:05d}"
+    names = []
+    for shard in range(1, shards + 1):
+        blob = blobs / f"{revision}-{shard:05d}"
         blob.touch()
-        (snapshot / f"model-{index:05d}-of-00120.safetensors").symlink_to(
-            os.path.relpath(blob, snapshot)
-        )
+        name = f"model-{shard:05d}-of-00120.safetensors"
+        names.append(name)
+        (snapshot / name).symlink_to(os.path.relpath(blob, snapshot))
+    index.write_text(json.dumps({"weight_map": {
+        f"layer.{shard}": name for shard, name in enumerate(names)
+    }}))
 
 
 def test_exact_snapshot_wins_over_refs_and_is_required_on_both_nodes() -> None:

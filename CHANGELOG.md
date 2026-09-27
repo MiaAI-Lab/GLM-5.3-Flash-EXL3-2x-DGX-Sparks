@@ -11,13 +11,40 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Added
 
+- Boot correctness canary in `scripts/boot-shape-warmup.sh`
+  (`GLM53_WARMUP_CANARY`, default `1`): the post-ready sweep now keeps the
+  reply bodies and scrapes the DFlash counters. If the bounded temperature-0
+  `c1` arm ("Reply with OK.", thinking off) does not answer OK, or DFlash
+  accepts 0 of at least `GLM53_WARMUP_CANARY_MIN_DRAFTS` (64) drafted tokens,
+  the script exits 3 with `DEGENERATE ENGINE`; `start.sh` / `start-tp3.sh` /
+  `start-tp4.sh` collect logs and attempt to take an engine just judged
+  degenerate off the port before failing without READY. Teardown is
+  best-effort: a failed attempt is reported explicitly, and neither its result
+  nor any lingering reachability changes the fatal verdict. Before this, such
+  a boot (#249 signature: garbage output, ~0 acceptance) showed up only as
+  unbounded warmup arms timing out after 240 s, reported as "uncovered shapes
+  may JIT mid-serve", and went into service. Other warmup failures stay
+  nonfatal. `tests/test_boot_shape_warmup.py` covers degenerate,
+  zero-acceptance and canary-off behavior;
+  `tests/test_warmup_canary_launchers.py` covers all three launcher rc-3 paths
+  and teardown-failure reporting.
+- Auto/lazy safetensors staging (`GLM53_LOAD_CLONE=1`) and optional bounded
+  local-shard read-ahead (`GLM53_LOAD_PREFETCH=0`, decimal `0..16`) on TP2/TP3/TP4.
+  Preserve InstantTensor selection, rank parity, PR230 safety and compact-draft
+  settings. The shard window is not a host-memory limit; GPU loader performance
+  and KV-capacity gains are not established for this combined candidate.
+  Motivated by [Alexbob0's mmap-load measurements](https://github.com/Alexbob0/glm53-flash-vllm-upstream-sm121/blob/bc3891aed74a1f4ccd679e5205ab9bd2605cf283/README.md).
 - `examples/tp2-long-coding.env`: the maintainer's TP=2 long-coding profile
   (262k context, two sequences, 1,024-token prefill batches) with each
   default-off option it enables, its measured benefit, and its cost. Not
   sourced automatically; defaults are unchanged.
-- Experimental compact DFlash2 KV pages (`GLM53_DRAFT_KV_COMPACT`, default
-  `0`): derive a page-fitting divisor of the MLA block to reduce draft
-  block-ID demand without changing precision or backing allocations.
+- Compact DFlash2 KV pages (`GLM53_DRAFT_KV_COMPACT`): derive a
+  page-fitting divisor of the MLA block to reduce draft block-ID demand
+  without changing precision or backing allocations. Now ON by default under
+  `SPEC_METHOD=dflash` (the default method) and OFF otherwise, so
+  `SPEC_METHOD=mtp`/`none` is unaffected; the default applies only when the
+  variable is unset — an explicit `0` opts out and an explicitly empty value
+  is rejected at launch (was: default `0` everywhere).
   Reject padded-page kernel splitting during backend setup. DFlash-only:
   an allocator preflight on every grouping path verifies the method and
   matching draft-layer count before exact-fit or padded selection.
@@ -76,6 +103,34 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   in #128 / #159, ported with attribution from the MIT recipe qualified on a 4x
   GB10 kit; it does not fix the underlying race. `start.sh` / `start-tp3.sh`
   untouched. (#223)
+
+- **Cold load on GB10 UMA: boot with a full page cache + 64 KiB mmap staging**
+  (`overlay/patch_cold_load_uma.py`, `tests/test_cold_load_uma.py`,
+  `docs/cold-load-uma.md`). On GB10 `torch.cuda.mem_get_info()` free is host
+  `MemFree`, so a full page cache (after the 164 GiB rsync or a previous serve)
+  made InstantTensor either abort (`buffer_size … exceeds device memory budget`,
+  reproduced) or run with `io_depth` shrunk from 512 to double digits. The patch
+  measures `MemAvailable`, drops clean cache when it can, and pins an explicit
+  budget/buffer. With the cache full stock never reaches `/health` (exit 1 at
+  168 s) while this boots in 230 s streaming 164 GiB in 36 s; with a clean
+  cache both are identical (36 s @ ~4.9 GB/s, `/health` 230 s) — this is a
+  correctness fix at the drive ceiling, not a speedup.
+  On kernels whose page size is not 4 KiB it also stages file-backed safetensors
+  tensors into anonymous memory before H2D (`cuMemcpyHtoDAsync` wedges on
+  file-backed 64 KiB mappings); byte-identical to stock on 4 KiB kernels and
+  discrete GPUs. Launcher: `GLM53_HOST_MEM_HYGIENE=1` (default) drops page cache
+  and waits for `MemAvailable` to clear the `GPU_MEM_UTIL` request
+  on both nodes before `docker run`. Runtime kill switches
+  `GLM53_COLD_LOAD_UMA=0`, `GLM53_COLD_LOAD_STAGE_MMAP=0`, forwarded to both
+  ranks when set.
+- **Boot time 259 s → 122 s on `./start.sh restart`** (`/health` 230 → 99 s from
+  `docker run`): the video-placeholder `.pth` no longer imports vLLM on every
+  interpreter start (container → first log line 100 → 6 s); the NVIDIA JIT
+  cache is persisted next to the Triton cache (DFlash2 graph capture 30 → 0 s);
+  `overlay/patch_skip_cudagraph_profile.py` skips the CUDA-graph memory
+  dry-capture when `CG_ESTIMATE=0` discards it anyway (KV profile 18 → 7 s);
+  kill-first parallel stop and a 1 s `/health` poll. Receipts in
+  `docs/cold-load-uma.md`.
 - Opt-in SM121 **thin-decode** kernels for the EXL3 routed experts
   (`GLM53_EXL3_MOE_FAST`, default `0`): `overlay/patch_exl3_decode_pipeline.py`
   adds two K4/N256 fast kernels (shared / independent gate-up input transform)
@@ -107,6 +162,27 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Changed
 
+- Correct hybrid APC checkpoint alignment to use the resolved scheduler LCM
+  (3584 in the tested layout), rather than the minimum group's 64-token size,
+  while retaining bounded small-step progress and the hash-grain prompt tail.
+  Apply the scheduler EAGLE backoff only when a participating non-SWA group
+  needs it: SWA-only drafting preserves the last full target checkpoint under
+  production 7168-token grants; no-SWA MTP retains upstream behavior. The
+  extra prefill step versus improved short-suffix hits has unmeasured GPU cost.
+- Limit the partial-hit capability veto to prefix-participating groups:
+  nonparticipating KpoolTail scratch no longer blocks compatible target states.
+  No unsafe SWA exemption is introduced; incompatible participating SWA still vetoes.
+  Preserve a reusable preceding coarse checkpoint before larger draft replay
+  backoff, require four fresh prompt tokens for Kpool scratch, and retain SWA
+  retention policy. `PREFIX_MATCH_UNIT` stays empty by default; explicit `64` is
+  supported for the tested geometry. CPU real-function metadata/composition
+  checks are not GPU state/logit parity or TTFT measurements; GPU qualification
+  remains outstanding. Reproduction uses the Dockerfile-pinned source probe
+  described in [README](README.md#reproduce-the-pinned-source-cpu-probe).
+  The four-token Kpool replay floor remains conservative and kernel-unverified;
+  coarse-only lookup can lose a whole page within three tokens of a boundary.
+- TP3/TP4 now preserve an explicitly exported `LOAD_FORMAT=` through shared and
+  topology env files, so callers can select auto without changing loader defaults.
 - Repinned the cooperative-MoE profile generators' `overlay/exl3.py` digest
   (`extensions/cooperative_moe/prepare_profile.py` and
   `extensions/cooperative_moe/tp3/prepare_profile.py`) after reviewing the
@@ -121,6 +197,31 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Fixed
 
+- `start.sh` verifies every shard named by the selected snapshot's index and
+  both sidecars against the worker's dereferenced file sizes before trusting
+  the sync marker. Pinned, non-NFS `SKIP_SYNC=1` verifies the target snapshot
+  without transferring it; unpinned and NFS paths retain their existing
+  behavior. An incomplete/invalid head snapshot fails before transfer;
+  interrupted transfers clear the marker before mutation. DFlash2 repairs a
+  dangling weight link with one dereferenced-file transfer and rechecks the
+  complete snapshot before stamping the marker. This checks file presence and
+  sizes, not content hashes. (#256)
+- Group #280's kpool patcher, test and fixture copies with existing recipe
+  copies, and run its tail-seed patch after slot-map in the same layer.
+  The separate #280 instructions produced a 128-layer image that Docker
+  overlay2 could build but could not instantiate on the target hosts;
+  grouping removes five layers without changing the patch order.
+
+- `overlay/patch_kpool_tail_seed_stride.py`: backport vLLM #57477 so the NVIDIA
+  prefill kpool tail seed addresses the padded indexer stride. Pinned vLLM
+  `487ecf187` still uses a dense 2048 B stride in `_kpool_tail_seed_kernel`.
+  This is separate from `patch_kpool_tail_slotmap.py` (block-table row clamp).
+  An unmarked file counts as already fixed upstream only when every seed
+  launch passes the tail tensor's real strides; a half-fixed file fails the
+  boot. Dependency-gated tests now report as skipped, not passed
+  (`GLM53_REQUIRE_KERNEL_TESTS=1` makes them required). Issue #264.
+- `README.md`: the Context row's KV pool is the measured 1,572,073 tokens at
+  the 850k default (14 GiB reservation, compact draft KV), not "~1M".
 - `start.sh`, `start-tp3.sh`, and `start-tp4.sh`: a GHCR pull could replace a
   local image whose recipe stamp already matched the repo, then launch the
   published image (no locally compiled artifacts; `GLM53_EXL3_MOE_FAST=1`
@@ -141,15 +242,17 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
   `MambaSpec.max_memory_usage_bytes`
   reserves `1 + max_concurrent_batches + num_speculative_blocks` pages in
   align mode (10 here, was 9), matching the resident peak.
-- `overlay/patch_mamba_align_chunking.py`: align prefill chunks to the Mamba
-  groups' block instead of `cache_config.block_size`, which the drafter
-  group drags down to its page (64, or the compact page). Off-block chunk
-  ends could hash a running state under the next boundary's label and miss
-  valid checkpoints (stock diagnostic: tails 2047, 2048, 2049 and 3583 behind
-  a 28,672-token prefix hit 25,088 while the target cached 28,672).
-  The one-block EAGLE back-off applies only when full attention is an EAGLE
-  group. Sub-block budgets keep advancing; with a 7168-token budget the
-  aligned chunk is one Mamba block. Requires decode-floor v5.
+- `overlay/patch_mamba_align_chunking.py` is the sole owner of Mamba checkpoint
+  alignment and EAGLE back-off. Use the resolved scheduler LCM rather than the
+  drafter's smaller page, preserve smaller private Mamba state boundaries, and
+  let positive sub-page grants progress without changing decode-floor policy.
+  Back off only for participating non-SWA EAGLE groups. Migrate the retained
+  alignment overlay without stacking a second scheduler implementation.
+- Exclude nonparticipating scratch groups from fine-hit capability checks.
+  Preserve compact DFlash boundary lookup while reserving four fresh Kpool
+  tokens and retrying the preceding shared checkpoint when a partial target
+  hit lacks a reusable drafter window. Existing PR238 GPU receipts below do
+  not qualify these additional fine-grained APC changes.
 - Under `GLM53_DRAFT_KV_COMPACT=1`, the DFlash drafter manager drops the
   extra EAGLE lookahead block from each retained window; the KV-capacity
   log costs the boundary lookup accordingly (`lookup=boundary`). The
