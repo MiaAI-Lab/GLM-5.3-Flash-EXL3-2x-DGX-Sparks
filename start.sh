@@ -57,6 +57,13 @@
 # ============================================================================
 set -euo pipefail
 
+# Non-login environments (cron, some service managers) may omit USER; default to the effective account. #197
+USER="${USER:-$(id -un)}"
+# log/warn/die live here (not under helpers) so the .env preamble below can use them.
+log()  { printf '\033[1;36m[glm53-exl3]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[glm53-exl3]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m[glm53-exl3]\033[0m ERROR: %s\n' "$*" >&2; exit 1; }
+
 # ---- container runtime (podman support) ------------------------------------
 # CONTAINER_RT=docker (default) or podman. Every container op below is routed
 # through ${RT}. Podman matches docker for all flags used here (rootful
@@ -72,13 +79,6 @@ esac
 RT="$CONTAINER_RT"
 RT_BUILD_ARGS=()
 [ "$RT" = "podman" ] && RT_BUILD_ARGS+=(--format docker)
-
-# Non-login environments (cron, some service managers) may omit USER; default to the effective account. #197
-USER="${USER:-$(id -un)}"
-# log/warn/die live here (not under helpers) so the .env preamble below can use them.
-log()  { printf '\033[1;36m[glm53-exl3]\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m[glm53-exl3]\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31m[glm53-exl3]\033[0m ERROR: %s\n' "$*" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
