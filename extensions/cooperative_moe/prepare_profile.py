@@ -15,7 +15,7 @@ from pathlib import Path, PurePosixPath
 # Dense EXL3 leaves the cooperative routed-expert ABI and pointer tables
 # unchanged. Regenerate from this source so a dense pack cannot select an
 # older overlay that ignores its non_routed_exl3 declarations.
-STOCK_SHA = "da7dd6540d402f53d8a1af0f17eac5570ec37041bd2e1029017bea4ed44f87e4"
+STOCK_SHA = "241ebf56a01ddf940ba7015f31355a1dad810b391f9d77ef79fa978f42ccbab3"
 ADAPTER_SHA = "a81b5bd0d90ac6e41a9a32352df79f6be901d41296029a16e39a3eae1364aa4e"
 UPSTREAM_REPOSITORY = "https://github.com/turboderp-org/exllamav3.git"
 UPSTREAM_PIN = "02aef45cd681b960a00afcd0749a4ab99e6c1bfe"

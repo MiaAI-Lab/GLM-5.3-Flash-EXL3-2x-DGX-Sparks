@@ -103,6 +103,12 @@ _cli_apc_swa="${GLM53_APC_RETENTION_INTERVAL_SWA-}"
 # value only. #204 / PR #242 review.
 _cli_extra_args_set="${EXTRA_ARGS+1}"
 _cli_extra_args="${EXTRA_ARGS-}"
+_cli_dense_fp8_set="${GLM53_DENSE_FP8+1}"
+_cli_dense_fp8="${GLM53_DENSE_FP8-}"
+_cli_kda_bf16_set="${GLM53_KDA_BF16_LARGE_M+1}"
+_cli_kda_bf16="${GLM53_KDA_BF16_LARGE_M-}"
+_cli_moe_fast_set="${GLM53_EXL3_MOE_FAST+1}"
+_cli_moe_fast="${GLM53_EXL3_MOE_FAST-}"
 _cli_adaptive_mode_set="${GLM53_ADAPTIVE_K+1}"
 _cli_adaptive_mode="${GLM53_ADAPTIVE_K-}"
 _cli_glm53_adaptive_k_set_set="${GLM53_ADAPTIVE_K_SET+1}"
@@ -145,6 +151,13 @@ if [ -n "${EXTRA_ARGS:-}" ]; then
     fi
     unset _kept _skip _tok _dropped
 fi
+# Performance settings require a TP4 opt-in; shared TP2 settings never enable them.
+GLM53_DENSE_FP8=off
+GLM53_KDA_BF16_LARGE_M=0
+GLM53_EXL3_MOE_FAST=0
+_dense_fp8_source=".env.tp4"
+_kda_bf16_source=".env.tp4"
+_moe_fast_source=".env.tp4"
 # Adaptive-k requires a TP4 opt-in, even for existing .env.tp4 files.
 GLM53_ADAPTIVE_K=off
 _adaptive_k_source=".env.tp4"
@@ -157,6 +170,12 @@ GLM53_DEFAULT_REASONING_EFFORT="${GLM53_DEFAULT_REASONING_EFFORT-}"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env.tp4"
 set +a
+[ -n "$_cli_dense_fp8_set" ] && GLM53_DENSE_FP8="$_cli_dense_fp8" _dense_fp8_source="caller environment"
+[ -n "$_cli_kda_bf16_set" ] && GLM53_KDA_BF16_LARGE_M="$_cli_kda_bf16" _kda_bf16_source="caller environment"
+[ -n "$_cli_moe_fast_set" ] && GLM53_EXL3_MOE_FAST="$_cli_moe_fast" _moe_fast_source="caller environment"
+# Fixed checkout overlay: never inherit TP2's potentially ABI-specific adapter.
+TP4_EXL3_OVERLAY_HOST="$SCRIPT_DIR/overlay/exl3.py"
+TP4_DENSE_FP8_PATCH_HOST="$SCRIPT_DIR/overlay/patch_dense_fp8.py"
 [ -n "${_cli_adaptive_mode_set}" ] && GLM53_ADAPTIVE_K="$_cli_adaptive_mode"
 [ -n "${_cli_glm53_adaptive_k_set_set}" ] && GLM53_ADAPTIVE_K_SET="$_cli_glm53_adaptive_k_set"
 [ -n "${_cli_glm53_adaptive_k_alpha_set}" ] && GLM53_ADAPTIVE_K_ALPHA="$_cli_glm53_adaptive_k_alpha"
@@ -345,6 +364,7 @@ ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
 # Called only for start/restart, after validation and before any host action.
 configure_capture_sizes() {
     local capture_sizes
+    tp4_performance_enabled && log "tp4 perf: dense_fp8=$GLM53_DENSE_FP8 ($_dense_fp8_source) kda_bf16=$GLM53_KDA_BF16_LARGE_M ($_kda_bf16_source) fast=$GLM53_EXL3_MOE_FAST ($_moe_fast_source)"
     if [[ "$GLM53_ADAPTIVE_K" =~ ^[[:space:]]*([eE][mM][aA]|[oO][nN]|1)[[:space:]]*$ ]]; then
         printf '[glm53-exl3-tp4] GLM53_ADAPTIVE_K=%s from %s\n' "$GLM53_ADAPTIVE_K" "$_adaptive_k_source" >&2
     fi
@@ -656,7 +676,21 @@ _glm53_validate_adaptive_k() {
     _glm53_canonical_positive_int DFLASH_TOKENS "$DFLASH_TOKENS" 8388608 || return
 }
 
+_tp4_validate_performance() {
+    [[ ${GLM53_DENSE_FP8-off} =~ ^(off|all|(shared|dense|kda|mla)(,(shared|dense|kda|mla))*)$ ]] || {
+        echo "GLM53_DENSE_FP8 must be off/all or groups shared,dense,kda,mla" >&2; return 2;
+    }
+    _glm53_validate_enum GLM53_KDA_BF16_LARGE_M "${GLM53_KDA_BF16_LARGE_M-0}" 0 1 || return
+    _glm53_validate_enum GLM53_EXL3_MOE_FAST "${GLM53_EXL3_MOE_FAST-0}" 0 1 || return
+    if [ "${GLM53_KDA_BF16_LARGE_M-0}" = 1 ]; then
+        [[ ,${GLM53_DENSE_FP8-off}, =~ ,(kda|all), ]] || {
+            echo "GLM53_KDA_BF16_LARGE_M=1 requires kda in GLM53_DENSE_FP8" >&2; return 2;
+        }
+    fi
+}
+
 validate_numeric_config() {
+    _tp4_validate_performance || return
     _glm53_validate_adaptive_k || return
     if ! [[ "$GPU_MEM_UTIL" =~ ^(0([.][0-9]+)?|[.][0-9]+|1([.]0+)?)$ ]] \
        || ! awk -v u="$GPU_MEM_UTIL" 'BEGIN { exit !(u > 0 && u <= 1) }'; then
@@ -705,6 +739,34 @@ validate_numeric_config() {
     fi
 }
 # GLM53 numeric config guard (end)
+
+tp4_performance_enabled() {
+    [ "${GLM53_DENSE_FP8:-off}" != off ] || [ "${GLM53_EXL3_MOE_FAST:-0}" = 1 ]
+}
+
+validate_tp4_performance_artifacts() {
+    tp4_performance_enabled || return 0
+    local path
+    for path in "$TP4_EXL3_OVERLAY_HOST" "$TP4_DENSE_FP8_PATCH_HOST"; do
+        [ -s "$path" ] || { echo "TP4 performance overlay missing: $path" >&2; return 2; }
+    done
+    if [ "$GLM53_EXL3_MOE_FAST" = 1 ]; then
+        local probe='import torch; import exllamav3_ext as e; assert e.glm53_fast_moe_version() == 1; assert callable(e.exl3_moe)'
+        local command inspect r
+        local refusal="GLM53_EXL3_MOE_FAST=1 requires a decode-pipeline image; rebuild/ship with BUILD=1 and GLM53_EXL3_MOE_FAST=0, then retry. Use SKIP_PULL=1 on later restarts; SKIP_BUILD=1 alone re-pulls GHCR over the local build."
+        printf -v command '%q ' docker run --rm --pull=never --entrypoint python3 "$IMAGE" -c "$probe"
+        printf -v inspect '%q ' docker image inspect "$IMAGE"
+        # Only pre-stop may defer absent images until ensure_image pulls/ships them.
+        if [ "${1:-}" != pre-stop ] || eval "$inspect" >/dev/null 2>&1; then
+            eval "$command" || { echo "head: $refusal" >&2; return 2; }
+        fi
+        for r in 1 2 3; do
+            if [ "${1:-}" != pre-stop ] || worker_ssh_n "$r" "$inspect" >/dev/null 2>&1; then
+                worker_ssh_n "$r" "$command" || { echo "rank $r: $refusal" >&2; return 2; }
+            fi
+        done
+    fi
+}
 
 validate_loadclone_artifacts() {
     [ -s "$LOADCLONE_PATCH_HOST" ] || { echo "loader patch missing: $LOADCLONE_PATCH_HOST" >&2; return 2; }
@@ -1532,6 +1594,8 @@ if [ -n "${EXTRA_ARGS:-}" ]; then
 fi
 
 [ -f "${MODEL_DIR}/config.json" ] || { say "FATAL: ${MODEL_DIR}/config.json missing"; ls -la "${MODEL_DIR}" | head; exit 1; }
+# The checkout runtime installer must precede the other overlays.
+if [ -f /opt/glm53/patch_dense_fp8.py ]; then python3 /opt/glm53/patch_dense_fp8.py; fi
 if [ -f /opt/glm53/patch_glm_video_placeholders.py ]; then
     python3 /opt/glm53/patch_glm_video_placeholders.py
 fi
@@ -1656,6 +1720,8 @@ if [ -n "${EXTRA_ARGS:-}" ]; then
 fi
 
 [ -f "${MODEL_DIR}/config.json" ] || { say "FATAL: ${MODEL_DIR}/config.json missing"; ls -la "${MODEL_DIR}" | head; exit 1; }
+# The checkout runtime installer must precede the other overlays.
+if [ -f /opt/glm53/patch_dense_fp8.py ]; then python3 /opt/glm53/patch_dense_fp8.py; fi
 if [ -f /opt/glm53/patch_glm_video_placeholders.py ]; then
     python3 /opt/glm53/patch_glm_video_placeholders.py
 fi
@@ -1724,6 +1790,10 @@ _tp4_scp_runtime() {
     local r="$1" ssh_t cname
     ssh_t="$(_tp4_ssh_target "$r")"
     cname="$(_tp4_rank_container "$r")"
+    if tp4_performance_enabled; then
+        scp -q -o BatchMode=yes "$TP4_EXL3_OVERLAY_HOST" "${ssh_t}:/tmp/glm53-exl3.py"
+        scp -q -o BatchMode=yes "$TP4_DENSE_FP8_PATCH_HOST" "${ssh_t}:/tmp/patch_dense_fp8.py"
+    fi
     scp -q -o BatchMode=yes "$WORKER_SCRIPT" "${ssh_t}:/tmp/${cname}.sh"
     scp -q -o BatchMode=yes "$CHAT_TEMPLATE_HOST" "${ssh_t}:/tmp/glm53-chat_template.jinja"
     scp -q -o BatchMode=yes "$VIDEO_PATCH_HOST" "${ssh_t}:/tmp/patch_glm_video_placeholders.py"
@@ -1748,7 +1818,17 @@ _tp4_scp_runtime() {
 }
 
 launch_cluster() {
+    # ensure_image may rebuild/pull/ship after preflight. Recheck all actual
+    # rank images before replacing containers; never silently use stock FAST.
+    validate_tp4_performance_artifacts
     local r
+    local -a perf_mounts=()
+    local worker_perf_mounts=""
+    if tp4_performance_enabled; then
+        perf_mounts=(-v "$TP4_EXL3_OVERLAY_HOST:/opt/glm53/exl3.py:ro"
+                     -v "$TP4_DENSE_FP8_PATCH_HOST:/opt/glm53/patch_dense_fp8.py:ro")
+        worker_perf_mounts="-v '/tmp/glm53-exl3.py:/opt/glm53/exl3.py:ro' -v '/tmp/patch_dense_fp8.py:/opt/glm53/patch_dense_fp8.py:ro'"
+    fi
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || true
     for r in 1 2 3; do
         worker_ssh_n "$r" "docker rm -f '$(_tp4_rank_container "$r")'" >/dev/null 2>&1 || true
@@ -1820,6 +1900,9 @@ TP4_SKIP_OLD_SCP
         -e "GLM53_DRAFT_KV_COMPACT=$GLM53_DRAFT_KV_COMPACT"
         -e "GLM53_SPINWAIT_MS=$GLM53_SPINWAIT_MS"
         -e "VLLM_SM120_SPARSE_MLA_SLICE_TOKENS=$VLLM_SM120_SPARSE_MLA_SLICE_TOKENS"
+        -e "GLM53_DENSE_FP8=$GLM53_DENSE_FP8"
+        -e "GLM53_KDA_BF16_LARGE_M=$GLM53_KDA_BF16_LARGE_M"
+        -e "GLM53_EXL3_MOE_FAST=$GLM53_EXL3_MOE_FAST"
         -e "GLM53_ADAPTIVE_K=$GLM53_ADAPTIVE_K"
         -e "GLM53_ADAPTIVE_K_SET=$GLM53_ADAPTIVE_K_SET"
         -e "GLM53_ADAPTIVE_K_ALPHA=$GLM53_ADAPTIVE_K_ALPHA"
@@ -1886,7 +1969,8 @@ TP4_SKIP_OLD_SCP
              ABLIT ABLIT_METHOD ABLIT_DIRECTION ABLIT_LAYERS ABLIT_ALPHA ABLIT_INCLUDE_MTP \
              VLLM_SM120_SPARSE_MLA_SLICE_TOKENS \
              GLM53_ADAPTIVE_K GLM53_ADAPTIVE_K_SET GLM53_ADAPTIVE_K_ALPHA GLM53_ADAPTIVE_K_MARGIN \
-             GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST; do
+             GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST \
+             GLM53_DENSE_FP8 GLM53_KDA_BF16_LARGE_M GLM53_EXL3_MOE_FAST; do
         serve_env+=" -e $v='${!v:-}'"
     done
     # VLLM_API_KEY is read by the head (rank 0) API server for bearer auth; the
@@ -1938,6 +2022,7 @@ TP4_SKIP_OLD_SCP
             -v '/tmp/glm53-ablit:/opt/glm53/ablit:ro' \
             -v '/tmp/glm53-ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro' \
             -v '/tmp/patch_ablit.py:/opt/glm53/patch_ablit.py:ro' \
+            ${worker_perf_mounts} \
             ${worker_preload} \
             ${worker_nccl} \
             -e NCCL_SOCKET_IFNAME='$(_tp4_rank_cx7_if "$r")' \
@@ -1979,6 +2064,7 @@ TP4_SKIP_OLD_SCP
         -v "$SCRIPT_DIR/ablit:/opt/glm53/ablit:ro" \
         -v "$SCRIPT_DIR/overlay/ablit_runtime.py:/opt/glm53/ablit_runtime.py:ro" \
         -v "$SCRIPT_DIR/overlay/patch_ablit.py:/opt/glm53/patch_ablit.py:ro" \
+        "${perf_mounts[@]}" \
         "${head_preload[@]}" \
         "${nccl_common[@]}" \
         -e NCCL_SOCKET_IFNAME="$HEAD_CX7_IF" \
@@ -2261,7 +2347,7 @@ logs() {
 main() {
     local cmd="${1:-start}"
     case "$cmd" in
-        start|restart) validate_numeric_config; configure_capture_sizes; validate_loadclone_artifacts ;;
+        start|restart) validate_numeric_config; configure_capture_sizes; validate_loadclone_artifacts; validate_tp4_performance_artifacts pre-stop ;;
     esac
     case "$cmd" in
         stop)     banner stop.sh ;;

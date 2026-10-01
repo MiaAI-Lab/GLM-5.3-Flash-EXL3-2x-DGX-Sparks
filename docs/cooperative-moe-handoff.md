@@ -59,7 +59,7 @@ Pins (`extensions/cooperative_moe/prepare_profile.py`):
 
 The rows above describe the historical C1 deployment (2026-09-16), not the
 current build acceptance policy. The TP2 generator now pins stock overlay
-`da7dd6540d402f53d8a1af0f17eac5570ec37041bd2e1029017bea4ed44f87e4`,
+`241ebf56a01ddf940ba7015f31355a1dad810b391f9d77ef79fa978f42ccbab3`,
 the ExLlamaV3 commit and combined source tree, and each native/runtime source
 hash. It deliberately does not pin the complete ELF: CUDA/host toolchain
 updates may change it. `build-manifest.json` carries compiler provenance, and
