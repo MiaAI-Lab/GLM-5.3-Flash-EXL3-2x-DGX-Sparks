@@ -56,12 +56,29 @@
 # Handy overrides: SKIP_DOWNLOAD=1 SKIP_SYNC=1 SKIP_PULL=1 SKIP_SHIP=1 SKIP_BUILD=1 PULL=1 BUILD=1 TAIL=1 HF_TOKEN=...
 # ============================================================================
 set -euo pipefail
+
 # Non-login environments (cron, some service managers) may omit USER; default to the effective account. #197
 USER="${USER:-$(id -un)}"
 # log/warn/die live here (not under helpers) so the .env preamble below can use them.
 log()  { printf '\033[1;36m[glm53-exl3]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[glm53-exl3]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[glm53-exl3]\033[0m ERROR: %s\n' "$*" >&2; exit 1; }
+
+# ---- container runtime (podman support) ------------------------------------
+# CONTAINER_RT=docker (default) or podman. Every container op below is routed
+# through ${RT}. Podman matches docker for all flags used here (rootful
+# --network host --ipc=host --gpus all --device /dev/infiniband --cap-add
+# --ulimit). The one build-time caveat: multi-stage COPY --from= wants
+# --format docker, which we add automatically for podman. Set in .env:
+#   CONTAINER_RT=podman
+CONTAINER_RT="${CONTAINER_RT:-docker}"
+case "$CONTAINER_RT" in
+  docker|podman) ;;
+  *) die "CONTAINER_RT must be docker or podman (got: $CONTAINER_RT)" ;;
+esac
+RT="$CONTAINER_RT"
+RT_BUILD_ARGS=()
+[ "$RT" = "podman" ] && RT_BUILD_ARGS+=(--format docker)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
@@ -1207,7 +1224,7 @@ build_dense_h3() {
     if [ -f "$draft_root/snapshots/$draft_rev/model.safetensors" ]; then
         log "dense-h3: 6-bpw draft present: $draft_root/snapshots/$draft_rev"
     else
-        if [ -n "$(docker ps -q --filter "name=^${CONTAINER_HEAD}\$")" ]; then
+        if [ -n "$(${RT} ps -q --filter "name=^${CONTAINER_HEAD}\$")" ]; then
             die "dense-h3: quantizing the draft needs the head GPU — stop the serve first (./start.sh stop && ./start.sh)"
         fi
         HF_HOME="$HF_CACHE_DIR" "${HF_BIN_CMD[@]}" download "$DENSE_H3_DRAFT_SRC" --revision "$DENSE_H3_DRAFT_SRC_REV" >/dev/null \
@@ -1297,7 +1314,7 @@ check_port_free() {
     if ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; then
         # Do not pipe docker inspect into grep -q: pipefail can turn grep's
         # early close into a false negative when docker gets SIGPIPE.
-        if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_HEAD" 2>/dev/null || true)" = "true" ]; then
+        if [ "$(${RT} inspect -f '{{.State.Running}}' "$CONTAINER_HEAD" 2>/dev/null || true)" = "true" ]; then
             die "port ${port} is held by ${CONTAINER_HEAD} — use './start.sh restart' or './start.sh stop' first"
         fi
         die "port ${port} is already in use — stop it or rerun with ${envname}=<free-port>"
@@ -1371,10 +1388,10 @@ trap 'warn "interrupted — containers keep running ('"'"'./start.sh logs'"'"' t
 
 # ------------------------------ preflight ----------------------------------
 preflight() {
-    command -v docker  >/dev/null 2>&1 || die "docker not found on head"
+    command -v ${RT}  >/dev/null 2>&1 || die "${RT} not found on head"
     command -v curl    >/dev/null 2>&1 || die "curl not found on head"
     command -v rsync   >/dev/null 2>&1 || die "rsync not found on head"
-    docker info >/dev/null 2>&1 || die "cannot talk to docker daemon on head"
+    ${RT} info >/dev/null 2>&1 || die "cannot talk to ${RT} daemon on head"
 
     ip -4 addr show 2>/dev/null | grep -q "inet ${HEAD_IP}/" \
         || die "HEAD_IP=${HEAD_IP} is not assigned on this host — set it in .env"
@@ -1382,8 +1399,8 @@ preflight() {
     log "checking worker ${WORKER_SSH} ..."
     worker_ssh true 2>/dev/null \
         || die "cannot ssh (key-based) to ${WORKER_SSH} — set up passwordless ssh first"
-    worker_ssh "docker info >/dev/null 2>&1" \
-        || die "worker cannot talk to its docker daemon (docker group?)"
+    worker_ssh "${RT} info >/dev/null 2>&1" \
+        || die "worker cannot talk to its ${RT} daemon (${RT} group?)"
     worker_ssh "nvidia-smi -L 2>/dev/null | grep -q GB10" \
         || warn "no GB10 GPU visible on worker"
 
@@ -1438,7 +1455,7 @@ preflight() {
     [ "$NNODES" = "2" ] || warn "NNODES=${NNODES} — expected 2"
 
     local others
-    others=$(worker_ssh "docker ps --format '  {{.Names}}  ({{.Image}})'" 2>/dev/null | grep -v "^  ${CONTAINER_WORKER}" || true)
+    others=$(worker_ssh "${RT} ps --format '  {{.Names}}  ({{.Image}})'" 2>/dev/null | grep -v "^  ${CONTAINER_WORKER}" || true)
     if [ -n "$others" ]; then
         warn "other containers are running on the worker:"
         echo "$others" >&2
@@ -1520,14 +1537,14 @@ image_from_registry() {
 
 login_ghcr_if_token() {
     [ -n "${GHCR_TOKEN:-}" ] || return 0
-    log "docker login ghcr.io as ${GHCR_USER} (GHCR_TOKEN)"
-    echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null
+    log "${RT} login ghcr.io as ${GHCR_USER} (GHCR_TOKEN)"
+    echo "$GHCR_TOKEN" | ${RT} login ghcr.io -u "$GHCR_USER" --password-stdin >/dev/null
 }
 
 login_ghcr_if_token_worker() {
     [ -n "${GHCR_TOKEN:-}" ] || return 0
-    log "docker login ghcr.io on worker as ${GHCR_USER} (GHCR_TOKEN)"
-    echo "$GHCR_TOKEN" | worker_ssh "docker login ghcr.io -u '$GHCR_USER' --password-stdin" >/dev/null
+    log "${RT} login ghcr.io on worker as ${GHCR_USER} (GHCR_TOKEN)"
+    echo "$GHCR_TOKEN" | worker_ssh "${RT} login ghcr.io -u '$GHCR_USER' --password-stdin" >/dev/null
 }
 
 # Identity for "does the worker already have the head's image?". No single
@@ -1550,11 +1567,11 @@ parse_image_key() {
 }
 
 local_image_key() {
-    docker image inspect -f "GLM53KEY ${_IMAGE_KEY_FMT}" "$IMAGE" 2>/dev/null | parse_image_key
+    ${RT} image inspect -f "GLM53KEY ${_IMAGE_KEY_FMT}" "$IMAGE" 2>/dev/null | parse_image_key
 }
 
 worker_image_key() {
-    worker_ssh "docker image inspect -f 'GLM53KEY ${_IMAGE_KEY_FMT}' '$IMAGE' 2>/dev/null" | parse_image_key
+    worker_ssh "${RT} image inspect -f 'GLM53KEY ${_IMAGE_KEY_FMT}' '$IMAGE' 2>/dev/null" | parse_image_key
 }
 
 images_match() {
@@ -1567,7 +1584,7 @@ image_platform() {
         return
     fi
     local p
-    p="$(docker image inspect -f '{{.Os}}/{{.Architecture}}' "$IMAGE" 2>/dev/null || true)"
+    p="$(${RT} image inspect -f '{{.Os}}/{{.Architecture}}' "$IMAGE" 2>/dev/null || true)"
     printf '%s' "${p:-linux/arm64}"
 }
 
@@ -1591,7 +1608,7 @@ overlay_recipe_hash() {
 
 image_recipe_stamp() {
     local stamp
-    stamp="$(docker image inspect -f '{{ index .Config.Labels "glm53.recipe.stamp" }}' "$IMAGE" 2>/dev/null || true)"
+    stamp="$(${RT} image inspect -f '{{ index .Config.Labels "glm53.recipe.stamp" }}' "$IMAGE" 2>/dev/null || true)"
     case "$stamp" in
         ""|"<no value>"|"<nil>") printf '' ;;
         *) printf '%s' "$stamp" ;;
@@ -1602,40 +1619,40 @@ build_image() {
     local stamp
     stamp="$(overlay_recipe_hash)"
     log "building ${IMAGE} from Dockerfile stamp=${stamp:0:12} (log: $LOGDIR/build-sm121.log) ..."
-    docker build --build-arg "GLM53_RECIPE_STAMP=$stamp" -t "$IMAGE" "$SCRIPT_DIR" \
+    ${RT} build ${RT_BUILD_ARGS[@]} --build-arg "GLM53_RECIPE_STAMP=$stamp" -t "$IMAGE" "$SCRIPT_DIR" \
         >"$LOGDIR/build-sm121.log" 2>&1 \
-        || { tail -n 40 "$LOGDIR/build-sm121.log" >&2; die "docker build of $IMAGE failed"; }
+        || { tail -n 40 "$LOGDIR/build-sm121.log" >&2; die "${RT} build of $IMAGE failed"; }
 }
 
 pull_image() {
     login_ghcr_if_token
     log "pulling ${IMAGE} ..."
-    docker pull "$IMAGE" && return 0
-    die "docker pull ${IMAGE} failed.
+    ${RT} pull "$IMAGE" && return 0
+    die "${RT} pull ${IMAGE} failed.
   :exl3-instanttensor is a public GHCR package — check network / disk.
-  If you still get 401/403: echo YOUR_PAT | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
+  If you still get 401/403: echo YOUR_PAT | ${RT} login ghcr.io -u YOUR_GITHUB_USER --password-stdin
   Overlay rebuild: BUILD=1 ./start.sh. Recipe-stamp drift also rebuilds; SKIP_BUILD=1 keeps GHCR."
 }
 
 pull_image_on_worker() {
     login_ghcr_if_token_worker
     log "pulling ${IMAGE} on worker ..."
-    worker_ssh "docker pull '$IMAGE'"
+    worker_ssh "${RT} pull '$IMAGE'"
 }
 
 ship_image_to_worker() {
     local platform
     platform="$(image_platform)"
-    log "shipping ${IMAGE} (${platform}) to worker via docker save | ssh docker load ..."
+    log "shipping ${IMAGE} (${platform}) to worker via ${RT} save | ssh ${RT} load ..."
     # A multi-arch OCI index references blobs docker save does not pack
     # (only the native platform is local). docker load then dies with:
     #   open /var/lib/docker/tmp/docker-import-*/blobs/sha256/<id>: no such file
     # (issue #8). --platform emits a complete single-manifest tar.
-    if docker save --platform "$platform" "$IMAGE" | worker_ssh docker load; then
+    if ${RT} save --platform "$platform" "$IMAGE" | worker_ssh ${RT} load; then
         return 0
     fi
-    warn "docker save --platform ${platform} failed — retrying without --platform"
-    docker save "$IMAGE" | worker_ssh docker load
+    warn "${RT} save --platform ${platform} failed — retrying without --platform"
+    ${RT} save "$IMAGE" | worker_ssh ${RT} load
 }
 
 # Pull $IMAGE without letting a different published recipe replace a local
@@ -1654,28 +1671,28 @@ pull_image_keeping_repo_stamp() {
     fi
     local hold="glm53-recipe-hold-$$-${RANDOM}"
     local keep_id="" pulled_id="" pulled_stamp=""
-    docker tag "$IMAGE" "$hold" || die "could not hold ${IMAGE} before pull"
-    keep_id="$(docker image inspect -f '{{.Id}}' "$hold" 2>/dev/null || true)"
+    ${RT} tag "$IMAGE" "$hold" || die "could not hold ${IMAGE} before pull"
+    keep_id="$(${RT} image inspect -f '{{.Id}}' "$hold" 2>/dev/null || true)"
     login_ghcr_if_token
     log "pulling ${IMAGE} (local recipe ${have:0:12} held until the pulled stamp is checked) ..."
-    if ! docker pull "$IMAGE"; then
-        docker tag "$hold" "$IMAGE" >/dev/null 2>&1 || true
-        docker rmi "$hold" >/dev/null 2>&1 || true
-        die "docker pull ${IMAGE} failed.
+    if ! ${RT} pull "$IMAGE"; then
+        ${RT} tag "$hold" "$IMAGE" >/dev/null 2>&1 || true
+        ${RT} rmi "$hold" >/dev/null 2>&1 || true
+        die "${RT} pull ${IMAGE} failed.
   :exl3-instanttensor is a public GHCR package — check network / disk.
-  If you still get 401/403: echo YOUR_PAT | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
+  If you still get 401/403: echo YOUR_PAT | ${RT} login ghcr.io -u YOUR_GITHUB_USER --password-stdin
   Overlay rebuild: BUILD=1 ./start.sh. Recipe-stamp drift also rebuilds; SKIP_BUILD=1 keeps GHCR."
     fi
     pulled_stamp="$(image_recipe_stamp)"
-    pulled_id="$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
+    pulled_id="$(${RT} image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
     if [ "$pulled_stamp" = "$wanted" ]; then
-        docker rmi "$hold" >/dev/null 2>&1 || true
+        ${RT} rmi "$hold" >/dev/null 2>&1 || true
         return 0
     fi
-    docker tag "$hold" "$IMAGE" || die "could not restore ${IMAGE} after rejecting a mismatched pull"
-    docker rmi "$hold" >/dev/null 2>&1 || true
+    ${RT} tag "$hold" "$IMAGE" || die "could not restore ${IMAGE} after rejecting a mismatched pull"
+    ${RT} rmi "$hold" >/dev/null 2>&1 || true
     if [ -n "$pulled_id" ] && [ "$pulled_id" != "$keep_id" ]; then
-        docker rmi "$pulled_id" >/dev/null 2>&1 || true
+        ${RT} rmi "$pulled_id" >/dev/null 2>&1 || true
     fi
     PULL_KEPT_LOCAL=1
     warn "pulled ${IMAGE} recipe ${pulled_stamp:0:12} != repo ${wanted:0:12} — kept the local image"
@@ -1684,11 +1701,11 @@ pull_image_keeping_repo_stamp() {
 ensure_image() {
     mkdir -p "$LOGDIR"
     local head_ok=0 worker_ok=0 head_key="" worker_key=""
-    if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    if ${RT} image inspect "$IMAGE" >/dev/null 2>&1; then
         head_ok=1
         head_key="$(local_image_key || true)"
     fi
-    if worker_ssh "docker image inspect '$IMAGE' >/dev/null 2>&1"; then
+    if worker_ssh "${RT} image inspect '$IMAGE' >/dev/null 2>&1"; then
         worker_key="$(worker_image_key || true)"
         if images_match "$head_key" "$worker_key"; then
             worker_ok=1
@@ -1754,7 +1771,7 @@ ensure_image() {
                     warn "worker pull left a different image (head=${head_key:-none} worker=${worker_key:-none}) — shipping"
                 fi
             else
-                warn "worker docker pull failed — shipping over SSH (worker does not need GHCR)"
+                warn "worker ${RT} pull failed — shipping over SSH (worker does not need GHCR)"
             fi
         fi
         if [ "$worker_ok" = "0" ]; then
@@ -1762,7 +1779,7 @@ ensure_image() {
             worker_key="$(worker_image_key || true)"
             if images_match "$head_key" "$worker_key"; then
                 worker_ok=1
-            elif worker_ssh "docker image inspect '$IMAGE' >/dev/null 2>&1"; then
+            elif worker_ssh "${RT} image inspect '$IMAGE' >/dev/null 2>&1"; then
                 warn "worker has ${IMAGE} after ship but keys still differ (head=${head_key:-none} worker=${worker_key:-none}) — continuing"
                 worker_ok=1
             else
@@ -1772,7 +1789,7 @@ ensure_image() {
     fi
     if [ "${SKIP_OVERLAY_VERIFY:-0}" != "1" ]; then
         log "GPU EXL3 self-check on ${IMAGE} (log: $LOGDIR/overlay-verify.log) ..."
-        docker run --rm --gpus all \
+        ${RT} run --rm --gpus all \
             -e EXL3_SELFCHECK_GPU=1 \
             --entrypoint python3 "$IMAGE" /opt/glm53/test_exl3_overlay.py \
             >"$LOGDIR/overlay-verify.log" 2>&1 \
@@ -2397,8 +2414,8 @@ HYG
 }
 
 launch_cluster() {
-    docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || true
-    worker_ssh "docker rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 || true
+    ${RT} rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || true
+    worker_ssh "${RT} rm -f '$CONTAINER_WORKER'" >/dev/null 2>&1 || true
     host_memory_hygiene
 
     mkdir -p "$CACHE_ROOT" "$TRITON_HOST_CACHE" "$TILELANG_HOST_CACHE" "$NV_HOST_CACHE"
@@ -2639,7 +2656,7 @@ launch_cluster() {
     # credential into its remote docker command or container environment.
 
     log "starting worker on ${WORKER_SSH} (NCCL if=${WORKER_CX7_IF} hca=${WORKER_CX7_IB}) ..."
-    worker_ssh "docker run -d --name '$CONTAINER_WORKER' \
+    worker_ssh "${RT} run -d --name '$CONTAINER_WORKER' \
         --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
         --device /dev/infiniband --cap-add IPC_LOCK \
         --ulimit memlock=-1 --ulimit stack=67108864 \
@@ -2689,7 +2706,7 @@ launch_cluster() {
         --entrypoint bash '$IMAGE' /start.sh" >/dev/null
 
     log "starting head (vLLM API :${PORT}; NCCL if=${HEAD_CX7_IF} hca=${HEAD_CX7_IB}) ..."
-    VLLM_API_KEY="$VLLM_API_KEY" docker run -d --name "$CONTAINER_HEAD" \
+    VLLM_API_KEY="$VLLM_API_KEY" ${RT} run -d --name "$CONTAINER_HEAD" \
         --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
         --device /dev/infiniband --cap-add IPC_LOCK \
         --ulimit memlock=-1 --ulimit stack=67108864 \
@@ -2812,7 +2829,7 @@ wait_for_health() {
     # 9>&-: the follower must not inherit the lifecycle lock fd. Bash passes
     # `exec 9>` descriptors through exec, so a follower that somehow outlives
     # this shell (SIGKILL, no trap) would keep the flock held.
-    docker logs -f --tail 0 "$CONTAINER_HEAD" 2>&1 9>&- &
+    ${RT} logs -f --tail 0 "$CONTAINER_HEAD" 2>&1 9>&- &
     logpid=$!
 
     local elapsed=0 healthy=0 exited=0 dead_side="" worker_fail=0 head_fail=0
@@ -2827,12 +2844,12 @@ wait_for_health() {
         # grep can close early and make a running container look dead.
         # Same 3-strike window as the worker: one transient docker miss must
         # not abort a multi-minute weight load.
-        if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_HEAD" 2>/dev/null || true)" = "true" ]; then
+        if [ "$(${RT} inspect -f '{{.State.Running}}' "$CONTAINER_HEAD" 2>/dev/null || true)" = "true" ]; then
             head_fail=0
         else
             head_fail=$((head_fail + 1))
             if [ "$head_fail" -ge 3 ]; then
-                if docker inspect "$CONTAINER_HEAD" >/dev/null 2>&1; then
+                if ${RT} inspect "$CONTAINER_HEAD" >/dev/null 2>&1; then
                     log "head container not running during startup (3 consecutive checks)"
                 else
                     log "head container missing during startup (removed by concurrent stop/restart?)"
@@ -2845,7 +2862,7 @@ wait_for_health() {
         # #22, item 4). Transient ssh/docker hiccups are tolerated; only
         # three consecutive non-running answers (~30 s) count as a dead
         # worker.
-        if [ "$(worker_ssh "docker inspect -f '{{.State.Running}}' '$CONTAINER_WORKER' 2>/dev/null" || true)" = "true" ]; then
+        if [ "$(worker_ssh "${RT} inspect -f '{{.State.Running}}' '$CONTAINER_WORKER' 2>/dev/null" || true)" = "true" ]; then
             worker_fail=0
         else
             worker_fail=$((worker_fail + 1))
@@ -2907,8 +2924,8 @@ post_ready_warmup() {
 
 collect_failure_logs() {
     mkdir -p "$LOGDIR"
-    docker logs "$CONTAINER_HEAD" >"$LOGDIR/head.log" 2>&1 || true
-    worker_ssh "docker logs '$CONTAINER_WORKER' 2>&1" >"$LOGDIR/worker.log" 2>&1 || true
+    ${RT} logs "$CONTAINER_HEAD" >"$LOGDIR/head.log" 2>&1 || true
+    worker_ssh "${RT} logs '$CONTAINER_WORKER' 2>&1" >"$LOGDIR/worker.log" 2>&1 || true
 }
 
 on_ready() {
@@ -2946,7 +2963,7 @@ on_ready() {
     if [ "${TAIL:-0}" = "1" ]; then
         log "tailing head logs — Ctrl-C just detaches, the server keeps running"
         trap '' INT
-        docker logs -f --tail 20 "$CONTAINER_HEAD" || true
+        ${RT} logs -f --tail 20 "$CONTAINER_HEAD" || true
         trap 'warn "interrupted — containers keep running"; exit 130' INT
     fi
 }
@@ -2998,10 +3015,10 @@ stop_containers() {
     # shutdown; there is nothing to flush (vLLM keeps no durable state, and an
     # NVMe prefix tier fsyncs per chunk), so kill first and remove. Both nodes in parallel.
     log "stopping head + worker containers ..."
-    worker_ssh "docker kill '$CONTAINER_WORKER' >/dev/null 2>&1; docker rm -f '$CONTAINER_WORKER' >/dev/null 2>&1" &
+    worker_ssh "${RT} kill '$CONTAINER_WORKER' >/dev/null 2>&1; ${RT} rm -f '$CONTAINER_WORKER' >/dev/null 2>&1" &
     local wpid=$!
-    docker kill "$CONTAINER_HEAD" >/dev/null 2>&1 || true
-    docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || log "  (no head container was running)"
+    ${RT} kill "$CONTAINER_HEAD" >/dev/null 2>&1 || true
+    ${RT} rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || log "  (no head container was running)"
     wait "$wpid" || log "  (no worker container was running)"
     if [ "${NFS_SHARE:-0}" = "1" ]; then
         log "removing the worker NFS volume (the exporter stays up) ..."
@@ -3020,14 +3037,14 @@ stop() {
 # ------------------------------ status -------------------------------------
 status() {
     log "head (${CONTAINER_HEAD} on $(hostname)):"
-    docker ps -a --filter "name=${CONTAINER_HEAD}" --format '  {{.Names}}  {{.Status}}' || true
+    ${RT} ps -a --filter "name=${CONTAINER_HEAD}" --format '  {{.Names}}  {{.Status}}' || true
     if curl -fsS -m 5 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
         log "  API: healthy — http://127.0.0.1:${PORT}/v1"
     else
         log "  API: not responding"
     fi
     log "worker (${CONTAINER_WORKER} on ${WORKER_SSH}):"
-    worker_ssh "docker ps -a --filter name=${CONTAINER_WORKER} --format '  {{.Names}}  {{.Status}}'" 2>/dev/null \
+    worker_ssh "${RT} ps -a --filter name=${CONTAINER_WORKER} --format '  {{.Names}}  {{.Status}}'" 2>/dev/null \
         || log "  (worker unreachable)"
 }
 
@@ -3037,13 +3054,13 @@ logs() {
         worker)
             log "following worker container logs on ${WORKER_SSH} ..."
             trap '' INT
-            worker_ssh "docker logs -f --tail 100 '$CONTAINER_WORKER'" || true
+            worker_ssh "${RT} logs -f --tail 100 '$CONTAINER_WORKER'" || true
             trap 'warn "interrupted"; exit 130' INT
             ;;
         head|*)
             log "following head logs (driver + API server) ..."
             trap '' INT
-            docker logs -f --tail 100 "$CONTAINER_HEAD" || true
+            ${RT} logs -f --tail 100 "$CONTAINER_HEAD" || true
             trap 'warn "interrupted"; exit 130' INT
             ;;
     esac
