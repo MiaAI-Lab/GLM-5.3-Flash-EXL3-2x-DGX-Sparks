@@ -1603,7 +1603,22 @@ the default `0` is byte-identical stock. It was qualified on another 4x GB10 kit
 unqualified until soaked. It does not identify or fix the underlying race.
 `GLM53_ADAPTIVE_K` (and `GLM53_ADAPTIVE_K_SET`, `_ALPHA`, `_MARGIN`, `_MIN_STEPS`, `_SATURATE`,
 `_HIST`) work on this launcher with the same defaults and capture-size handling as `start.sh`
-(see *Faster prose decode*). `GLM53_DENSE_FP8` is not wired here.
+(see *Faster prose decode*).
+
+**Performance opt-ins.** In `.env.tp4` or caller exports, set
+`GLM53_DENSE_FP8=all` (or canonical comma-separated `shared,dense,kda,mla` groups)
+and/or `GLM53_EXL3_MOE_FAST=1`; defaults are `off`/`0`/`0`.
+Caller exports override `.env.tp4`; shared `.env` is ignored for these knobs.
+Empty values, aliases, uppercase and whitespace are refused.
+`GLM53_KDA_BF16_LARGE_M=1` requires the `kda` group (or `all`), retaining
+the TP4 [6416,4096] BF16 shape at ~1.66 GiB/rank for M>512.
+FAST requires a decode-pipeline image on every rank; use `SKIP_PULL=1` on later restarts.
+
+Measured on 4× GB10 (2026-09-30), same locally rebuilt decode-pipeline image and branch, one boot per arm, 5 runs per decode workload, all three opt-ins on vs all off:
+decode structured 97.9→120.1 tok/s (+22.7 %), prose 42.9→54.0 (+25.9 %), coding 61.9→79.3 (+28.1 %); cold prefill flat (11k +3 %, 55k −5 %, 191k +0.5 %),
+so KDA large-M's TP2 prefill gain does not reproduce at TP4; GPU KV 4,248,206→4,213,773 tokens (−0.8 %); boot to ready +303 s.
+Prompt NLL (≈11k tokens each of code and prose) stayed within max(stock range, 0.005) nats/token of three stock boots; the greedy quality probe passed;
+0 NVRM lines outside the logprob probe. Not measured: A/B/A repetition, per-feature attribution, task pass@1.
 
 Do not pull `glm53-flash-sm121:v8` — that is the older NVFP4/Ray kernel.
 
@@ -1788,7 +1803,7 @@ that are now documented/enforced:
 | `ABLIT` | `0` (off) | opt-in. `1` = apply o_proj edit at load on both ranks. Unset leaves checkpoint weights unchanged |
 | `GLM53_ADAPTIVE_K` | `off` | `ema` = adaptive verification length (prose +13–21 %); needs the capture-size list in `EXTRA_ARGS`. See *Faster prose decode* |
 | `GLM53_ADAPTIVE_K_SET` | `2,4,7` | candidate draft lengths; graphs are captured for each length + 1 |
-| `GLM53_DENSE_FP8` | `all` in `.env.example`; `off` if unset | FP8 weight-only (Marlin) dense projections. Groups: `shared,dense,kda,mla`; changes target numerics. See the [TP2 adoption finding](adopt-fp8-all-kda-bf16-2026-09-26.md). TP3's template selects `dense,kda` |
+| `GLM53_DENSE_FP8` | `all` in `.env.example`; `off` if unset | FP8 weight-only (Marlin) dense projections. Groups: `shared,dense,kda,mla`; changes target numerics. See the [TP2 adoption finding](adopt-fp8-all-kda-bf16-2026-09-26.md). TP3's template selects `dense,kda`; TP4 defaults to `off` and requires its own opt-in |
 | `ABLIT_METHOD` | `auto` | `auto` = transplant when `ablit/transplant/` is populated, else `proj` |
 | `ABLIT_LAYERS` | `15-45` | inclusive range; `45` is the checkpoint MTP block |
 | `ABLIT_DIRECTION` | `dealign` | proj-only: `dealign` \| `bf_oproj` \| path to a custom `.pt` |
@@ -1847,7 +1862,8 @@ that are now documented/enforced:
 | `HEAD_CX7_IF` / `WORKER_CX7_IF` | `enp1s0f1np1` / `enp1s0f0np0` | NCCL sockets |
 | `HEAD_CX7_IB` / `WORKER_CX7_IB` | `rocep1s0f1` / `rocep1s0f0` | NCCL HCAs |
 | `USE_HOST_NCCL` | `0` | image nvidia-nccl; host preload duplicates DeepEP |
-| `GLM53_EXL3_MOE_FAST` | `0` | opt-in SM121 K4/N256 **thin-decode** kernels for routed experts (`overlay/patch_exl3_decode_pipeline.py`; see [docs/sm121-perf-paths.md](sm121-perf-paths.md)). `1` needs an image built with that patch and requires the fused `exl3_moe` path — otherwise model load raises instead of silently degrading (also under `EXL3_FUSED_MOE=0`). Exactly `0` or `1`; the launcher refuses anything else, including explicit empty, before `restart` stops the pair. TP=2 only; the TP3 launcher keeps unsetting it |
+| `GLM53_KDA_BF16_LARGE_M` | `0` | Exactly `0` or `1`; requires the `kda` FP8 group. Retains BF16 for M>512; TP4 [6416,4096] costs ~1.66 GiB/rank. TP4 ignores shared `.env` |
+| `GLM53_EXL3_MOE_FAST` | `0` | opt-in SM121 K4/N256 **thin-decode** kernels for routed experts (`overlay/patch_exl3_decode_pipeline.py`; see [docs/sm121-perf-paths.md](sm121-perf-paths.md)). `1` needs an image built with that patch and requires the fused `exl3_moe` path — otherwise model load raises instead of silently degrading (also under `EXL3_FUSED_MOE=0`). Exactly `0` or `1`; the launcher refuses anything else, including explicit empty, before `restart` stops the pair. TP2 and TP4 (TP4 ignores shared `.env`; after a local rebuild use `SKIP_PULL=1` on later restarts); the TP3 launcher keeps unsetting it |
 | `VLLM_SM120_SPARSE_MLA_SLICE_TOKENS` | `0` (`start-tp4.sh`, `.env.tp4.example`) | **TP=4 only.** `64` slices the final sparse-MLA attention call into <=64 query rows on every rank (`overlay/patch_sparse_mla_slice.py`, hash-pinned to this image's backend); `0` keeps the backend byte-identical. Opt-in mitigation for the all-rank stall in #128 / #159 (#223); bounds the call where progress stopped, does not fix the race. Any other value is refused. |
 
 `DEFAULT_MAX_NEW_TOKENS` preserves omitted completion limits through Pydantic normalization; an explicit `max_tokens: null` retains the pinned runtime's native normalization to 16. The overlay validates the limiter, completion caller, and protocol validator before writing any target. The CPU regression (`python3 tests/test_gen_defaults.py`) requires Pydantic v2 and exercises its real before-validator, not fabricated field-set metadata.

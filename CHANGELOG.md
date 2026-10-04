@@ -11,6 +11,12 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Added
 
+- TP4 opt-ins: `GLM53_DENSE_FP8`, `GLM53_KDA_BF16_LARGE_M` ([6416,4096],
+  ~1.66 GiB/rank), and `GLM53_EXL3_MOE_FAST`; defaults off/0/0, shared `.env` ignored.
+  FAST needs a decode-pipeline image; use `SKIP_PULL=1` on later restarts.
+  Cooperative-MoE generator digest repinned; overlay change is the TP4 shape entry only.
+  TP4 A/B (same rebuilt image, one boot per arm): decode +23–28%, prefill flat, KV −0.8%, boot +5 min; numerics within tolerance.
+
 - `GLM53_MODEL_PRESET=dense-h3` with `ABLIT=1` (TP2): builds and serves a
   second target variant whose `o_proj` on layers 15–44 stay native BF16, so
   the runtime abliteration edit applies to them; layers 0–14 keep EXL3
