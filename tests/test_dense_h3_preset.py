@@ -39,7 +39,7 @@ def hf_repo(tmp_path):
     shutil.move(weights, blob)
     (base / "model.safetensors").symlink_to(Path("../../blobs") / blob.name)
     (repo / "refs/main").write_text(base.name)
-    (base / "provenance").mkdir()  # real TR3 snapshots carry sidecar directories
+    (base / "provenance").mkdir()  # real base snapshots carry sidecar directories
     (base / "provenance/receipt.json").write_text("{}")
     overlay = repo / "snapshots" / ".build"
     overlay_tool.link_pack(str(base), str(overlay), "dense.safetensors")
@@ -131,17 +131,17 @@ IMAGE=img SCRIPT_DIR={ROOT}
 def test_build_refuses_a_foreign_base_checkpoint(tmp_path):
     _hub, repo, _overlay, _draft = hf_repo(tmp_path)
     result = subprocess.run(["bash", "-c", build_script(tmp_path, repo, False)], capture_output=True, text=True)
-    assert "DIE dense-h3 builds on the pinned TR3 4-bpw pack" in result.stdout
+    assert "DIE dense-h3 builds on the pinned 4-bpw base pack" in result.stdout
 
 
 def repinned_build(tmp_path, docker_running):
-    """The real TR3 sidecars are not fixtures; re-pin the base check to a stand-in."""
+    """The real base-pack sidecars are not fixtures; re-pin the base check to a stand-in."""
     _hub, repo, _overlay, _draft = hf_repo(tmp_path)
     base = repo / "snapshots" / ("b" * 40)
     for name in ("config.json", "model.safetensors.index.json"):
         (base / name).write_text("{}")
     empty = hashlib.sha256(b"{}").hexdigest()
-    script = re.sub(r"^(DENSE_H3_TR3_(CONFIG|INDEX)_SHA256)=\w+$", rf"\1={empty}",
+    script = re.sub(r"^(DENSE_H3_BASE_(CONFIG|INDEX)_SHA256)=\w+$", rf"\1={empty}",
                     build_script(tmp_path, repo, docker_running), flags=re.M)
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True).stdout
 
@@ -172,7 +172,7 @@ def test_ablit_build_keeps_o_proj_bf16_under_its_own_pin(tmp_path):
     (draft / "model.safetensors").write_text("")
 
     def build(ablit):
-        script = re.sub(r"^(DENSE_H3_TR3_(CONFIG|INDEX)_SHA256)=\w+$", rf"\1={empty}",
+        script = re.sub(r"^(DENSE_H3_BASE_(CONFIG|INDEX)_SHA256)=\w+$", rf"\1={empty}",
                         build_script(tmp_path, repo, False), flags=re.M)
         script = script.replace("printf 'PY %s\\n' \"$2\"", "printf 'PY %s\\n' \"$*\"")
         return subprocess.run(["bash", "-c", f"ABLIT={ablit}\n" + script], capture_output=True, text=True).stdout

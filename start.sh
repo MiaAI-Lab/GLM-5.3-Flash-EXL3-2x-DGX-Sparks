@@ -3,9 +3,8 @@
 # start.sh — Spark runtime for GLM-5.3-Flash EXL3 (SM121 / GB10)
 # ============================================================================
 #
-# We serve Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw (mirror of
-# brandonmusic/GLM-5.3-Flash-tr3-4bpw @ 5ab363a8) on this 2× DGX Spark (GB10 /
-# SM121) kit: vLLM TP=2 over CX7, OpenAI API on :8888, NoPE-MLA overlay image.
+# We serve Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold on this 2× DGX Spark
+# (GB10 / SM121) kit: vLLM TP=2 over CX7, OpenAI API on :8888, NoPE-MLA overlay image.
 # DFlash2-7 is the default speculator. Target KV stays packed fp8_ds_mla;
 # the SM120 B12X recipe (EP2/DCP2 + nvfp4_ds_mla) is a different image/arch.
 #
@@ -26,7 +25,7 @@
 #                   Dockerfile/overlay also rebuilds once (recipe stamp);
 #                   SKIP_BUILD=1 keeps GHCR. Local-only tags (no slash) skip
 #                   pull. SKIP_SHIP=1 never copies.
-#   3. download   — EXL3/TR3 (+ DFlash2) into the local HF cache if missing
+#   3. download   — EXL3 (+ DFlash2) into the local HF cache if missing
 #   4. sync       — rsync that cache to the worker (each rank loads local disk)
 #   5. launch     — worker --headless, then head + `vllm serve` (both
 #                   --network host --ipc=host)
@@ -113,13 +112,13 @@ unset _glm53_env_watch _name _cval
 unset _k _kv _flags _caller_overrides
 
 # ----------------------------- configuration -------------------------------
-MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"
-# If the durable mirror is empty/moved, download.sh falls back to this id.
-MODEL_FALLBACK="${MODEL_FALLBACK:-brandonmusic/GLM-5.3-Flash-tr3-4bpw}"
+MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold}"
+# Same repo unless the operator points MODEL_FALLBACK at another complete cache.
+MODEL_FALLBACK="${MODEL_FALLBACK:-Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold}"
 MODEL_CACHE_NAME="${MODEL_CACHE_NAME:-models--${MODEL//\//--}}"
 MODEL_FALLBACK_CACHE_NAME="${MODEL_FALLBACK_CACHE_NAME:-models--${MODEL_FALLBACK//\//--}}"
-# Hub commit on the Mia-AiLab mirror (the 5ab363a8-byte-identical upload).
-MODEL_REVISION="${MODEL_REVISION:-25a44fdbf16862a46b7cc9921142c6c81350af2f}"
+# Hub commit of the default TensorFold EXL3 pack.
+MODEL_REVISION="${MODEL_REVISION:-76c0b5173166d2795dd48860f45d8224817f894c}"
 # Optional pinned-checkpoint preset (start-abliterated.sh). It pins repo,
 # fallback, revision and inventory, and that exact snapshot is then required on
 # every path: refs/main is not consulted for it, and a complete but different
@@ -144,8 +143,9 @@ case "$GLM53_MODEL_PRESET" in
         ;;
     dense-h3)
         # TP2 dense-EXL3 H3 target + 6-bpw DFlash2 draft, built on the head
-        # from pinned public inputs by build_dense_h3; the TR3 target above is
-        # its base, and tools/pack_profile.py selects the serving settings.
+        # from pinned public inputs by build_dense_h3; the base is the
+        # checkpoint whose config and index match the pinned hashes below,
+        # and tools/pack_profile.py selects the serving settings.
         # With ABLIT=1 the target keeps o_proj L15-44 BF16 for the runtime edit.
         ;;
     *)
@@ -542,7 +542,7 @@ CLUSTER_LOCK_PID="$LOGDIR/cluster.lock.pid"
 CLUSTER_LOCK_WAIT=30
 HEAD_SCRIPT="$SCRIPT_DIR/.glm53-exl3-head.inner.sh"
 WORKER_SCRIPT="$SCRIPT_DIR/.glm53-exl3-worker.inner.sh"
-EXPECTED_SHARDS="${EXPECTED_SHARDS:-120}"
+EXPECTED_SHARDS="${EXPECTED_SHARDS:-83}"
 # Under a preset the pinned inventory wins: a caller EXPECTED_SHARDS must not
 # lower the gate for one exact checkpoint.
 [ -n "$MODEL_PINNED_SHARDS" ] && EXPECTED_SHARDS="$MODEL_PINNED_SHARDS"
@@ -1137,15 +1137,15 @@ resolve_dflash_dir() {
 # GLM53_MODEL_PRESET=dense-h3 inputs. All public and pinned; the pair itself
 # is built on the head (no Hub repo carries it: the IncoAI draft license is
 # CC BY-NC-ND 4.0, so its quantized derivative is not redistributed).
-DENSE_H3_TR3_CONFIG_SHA256=4f5341e048984459471bfb9c894e6bf87e69b9c67402672af901631d1349f265
-DENSE_H3_TR3_INDEX_SHA256=2f64d21c67c90bbafeb36c4e9b2f06f54063ed439e9f7cf95962d425a1d8515d
+DENSE_H3_BASE_CONFIG_SHA256=4f5341e048984459471bfb9c894e6bf87e69b9c67402672af901631d1349f265
+DENSE_H3_BASE_INDEX_SHA256=2f64d21c67c90bbafeb36c4e9b2f06f54063ed439e9f7cf95962d425a1d8515d
 DENSE_H3_QUANT_BRANCH=4.05bpw
 DENSE_H3_QUANT_REV=2a30229e67012798ba9f0cd832bb78abf4c363d5
 # Both builds are byte-reproducible (2026-09-26 and 2026-09-28 builds identical):
 # a build that differs is refused rather than served.
 DENSE_H3_OVERLAY_SHA256=1a1b0793bebfa273ed8f5307c5c6d8ebcdb3c7d1faabc9956304abd095bfdeac
 # ABLIT=1 variant: the same overlay minus o_proj on layers 15-44, which stay
-# native BF16 from TR3 so the runtime hook (overlay/ablit_runtime.py) can edit
+# native BF16 from the base pack so the runtime hook (overlay/ablit_runtime.py) can edit
 # them. ABLIT_LAYERS must stay inside 15-45 (45 = the MTP block, unloaded here).
 DENSE_H3_ABLIT_BF16=self_attn.o_proj:15-44
 DENSE_H3_ABLIT_OVERLAY_SHA256=0623ec344b5ae4dc0926480f12c236c84606a9c97b9b4094275dca15be219e2f
@@ -1153,7 +1153,7 @@ DENSE_H3_DRAFT_SRC=incoai/GLM-5.3-Flash-DFlash2
 DENSE_H3_DRAFT_SRC_REV=dc77ff1c99eeb2df044ee3d4f0094eb033fee410
 DENSE_H3_DRAFT_REPO=local/GLM-5.3-Flash-DFlash2-EXL3-6bpw
 DENSE_H3_DRAFT_REV=27d192863a9a167d443be34200861ed42b4557a7
-# refs/<name> in the TR3 repo names the built target; refs/main stays on the
+# refs/<name> in the base repo names the built target; refs/main stays on the
 # ordinary snapshot so leaving the preset restores the ordinary pack.
 DENSE_H3_REF=glm53-dense-h3
 DENSE_H3_ABLIT_REF=glm53-dense-h3-ablit
@@ -1163,7 +1163,7 @@ dense_h3_ref() {
     if [ "${ABLIT:-0}" = "1" ]; then printf '%s' "$DENSE_H3_ABLIT_REF"; else printf '%s' "$DENSE_H3_REF"; fi
 }
 
-# Adopt an already built pair from the primary or fallback TR3 repo.
+# Adopt an already built pair from the primary or fallback base repo.
 select_dense_h3() {
     [ "$GLM53_MODEL_PRESET" = "dense-h3" ] || return 0
     local entry repo name rev ref
@@ -1182,7 +1182,7 @@ select_dense_h3() {
 }
 
 # Build the pair once: dense EXL3 tensors range-read from turboderp's quant
-# (~5.3 GB, CPU) over the downloaded TR3 snapshot, and the IncoAI BF16 draft
+# (~5.3 GB, CPU) over the downloaded base snapshot, and the IncoAI BF16 draft
 # quantized to 6 bpw on the head GPU. resolve_pack_profile validates the result.
 build_dense_h3() {
     [ "$GLM53_MODEL_PRESET" = "dense-h3" ] || return 0
@@ -1195,9 +1195,9 @@ build_dense_h3() {
     local hub="$HF_CACHE_DIR/hub" work="$HF_CACHE_DIR/glm53-dense-h3"
     local src overlay marker draft_root draft_rev rev sources
     src="$MODEL_PATH/snapshots/$(<"$MODEL_PATH/refs/main")"
-    if [ "$(sha256sum <"$src/config.json" | cut -d' ' -f1)" != "$DENSE_H3_TR3_CONFIG_SHA256" ] \
-       || [ "$(sha256sum <"$src/model.safetensors.index.json" | cut -d' ' -f1)" != "$DENSE_H3_TR3_INDEX_SHA256" ]; then
-        die "dense-h3 builds on the pinned TR3 4-bpw pack; $src is a different checkpoint"
+    if [ "$(sha256sum <"$src/config.json" | cut -d' ' -f1)" != "$DENSE_H3_BASE_CONFIG_SHA256" ] \
+       || [ "$(sha256sum <"$src/model.safetensors.index.json" | cut -d' ' -f1)" != "$DENSE_H3_BASE_INDEX_SHA256" ]; then
+        die "dense-h3 builds on the pinned 4-bpw base pack; $src is a different checkpoint"
     fi
     resolve_hf_bin || die "no 'hf' / 'huggingface-cli' on PATH and no python huggingface_hub — pip install --user -U 'huggingface_hub[cli]' (or set HF_BIN=/path/to/hf)"
     mkdir -p "$work"
@@ -1244,8 +1244,8 @@ build_dense_h3() {
             || die "dense-h3: the dense EXL3 overlay does not match its pinned SHA-256 — refusing to serve it"
         printf '%s' "$src|$DENSE_H3_QUANT_REV" > "$marker"
     fi
-    sources="$(printf '{"tr3_config_sha256":"%s","dense_exl3":"turboderp/GLM-5.3-Flash-exl3@%s","draft":"%s@%s"%s}' \
-        "$DENSE_H3_TR3_CONFIG_SHA256" "$DENSE_H3_QUANT_REV" "$DENSE_H3_DRAFT_SRC" "$DENSE_H3_DRAFT_SRC_REV" \
+    sources="$(printf '{"base_config_sha256":"%s","dense_exl3":"turboderp/GLM-5.3-Flash-exl3@%s","draft":"%s@%s"%s}' \
+        "$DENSE_H3_BASE_CONFIG_SHA256" "$DENSE_H3_QUANT_REV" "$DENSE_H3_DRAFT_SRC" "$DENSE_H3_DRAFT_SRC_REV" \
         "${keep[1]:+,\"keep_bf16\":\"${keep[1]}\"}")"
     rev="$(python3 "$SCRIPT_DIR/tools/stage_dense_h3.py" target --overlay "$overlay" --hub "$hub" \
         --draft-repo "$DENSE_H3_DRAFT_REPO" --draft-rev "$draft_rev" --ref "$ref" \
@@ -1783,9 +1783,9 @@ ensure_image() {
 }
 
 # ---------------------------- weight download ------------------------------
-# Use an already-complete local tree (primary or upstream fallback). If the
-# durable Mia-AiLab mirror is still filling / 404s, keep serving from the
-# brandonmusic cache folder without a second 164 GiB pull.
+# Use an already-complete local tree (primary, or MODEL_FALLBACK when that
+# id differs). A partial primary cache can adopt the fallback folder
+# without a second ~164 GiB pull.
 adopt_complete_weights() {
     local have
     have="$(count_shards "$MODEL_PATH" "$MODEL_SNAPSHOT")"
@@ -1931,7 +1931,7 @@ download_only() {
 # MODEL_REVISION: the marker lives inside each synced repo folder, so a MODEL /
 # revision switch re-syncs automatically.
 # Without it, every ./start.sh pays a full size+mtime re-verification walk
-# over ~164 GiB / 120 shards on both ends for zero bytes of difference
+# over ~164 GiB / 83 shards on both ends for zero bytes of difference
 # (issue #22, item 2). FORCE_SYNC=1 bypasses the marker; deleting the
 # marker file on the worker has the same effect.
 # The marker is a claim, not proof: it is written only after the synced

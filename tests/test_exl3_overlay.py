@@ -968,7 +968,7 @@ def _real_expert_layer(device, n_exp: int = 3, cap: int = 32):
     import torch
     from vllm.model_executor.layers.quantization.exl3 import Exl3Config, Exl3MoEMethod
 
-    snaps = glob.glob("/root/.cache/huggingface/hub/models--brandonmusic--GLM-5.3-Flash-tr3-4bpw/snapshots/*/model.safetensors.index.json")
+    snaps = glob.glob("/root/.cache/huggingface/hub/models--Mia-AiLab--GLM-5.3-Flash-EXL3-4bpw-TensorFold/snapshots/*/model.safetensors.index.json")
     if not snaps:
         return None
     try:

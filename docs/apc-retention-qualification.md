@@ -26,7 +26,7 @@ lookup proposals in #84 and #125 are not included.
 
 ## Measured runtime pair
 
-Tests used one 2× DGX Spark GB10 pair over CX7, stock EXL3/TR3 4bpw, target TP2,
+Tests used one 2× DGX Spark GB10 pair over CX7, stock EXL3 4bpw, target TP2,
 DFlash2 k=7 / draft TP2, target FP8 (`fp8_ds_mla`) and draft auto/BF16 KV.
 The target revision was `61e26e1484e16d7a603f77040cda9b43cc4a31d6` and the draft
 revision was `dc77ff1c99eeb2df044ee3d4f0094eb033fee410`.

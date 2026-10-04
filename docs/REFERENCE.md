@@ -6,15 +6,12 @@ Sections below keep their original anchors.
 
 OpenAI-compatible vLLM serve of
 [zai-org/GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) as
-**[Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw)**
-— a byte-identical public mirror of
-[brandonmusic/GLM-5.3-Flash-tr3-4bpw](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw)
-snapshot `5ab363a8…` (uniform-K4 EXL3/TR3 routed-experts, 4 bpw, ~164 GiB, 120 shards)
-so this recipe stays fetchable if the upstream Hub id moves. On a **2× NVIDIA GB10**
-kit: tensor-parallel size 2 over CX7, native `sm_121a` cubins, API on `:8888`.
-A **3×** sibling is `./start-tp3.sh` on the same image and weights (see
-[3× Spark (TP=3)](#3x-spark-tp3)). Served model id: **`GLM-5.3-Flash-EXL3`**. EXL3/TR3 quant by
-[brandonmusic](https://huggingface.co/brandonmusic).
+**[Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold)**
+(EXL3 routed experts, 4 bpw, ~164 GiB, 83 shards, Hub commit `76c0b517…`).
+On a **2× NVIDIA GB10** kit: tensor-parallel size 2 over CX7, native `sm_121a`
+cubins, API on `:8888`. A **3×** sibling is `./start-tp3.sh` on the same image
+and weights (see [3× Spark (TP=3)](#3x-spark-tp3)). Served model id:
+**`GLM-5.3-Flash-EXL3`**. The quant is Mia's AI Lab's TensorFold EXL3 pack.
 
 Optional TP3 contribution for evaluation: [cooperative ABI2, 64-row support,
 FlashKDA and combined-profile measurements](tp3-throughput-results.md).
@@ -27,8 +24,8 @@ requests, selected default-off options with their tradeoffs):
 configured `.env`; defaults are unchanged.
 
 This is **EXL3 weights + fp8 KV** on GB10. Do not pass `--moe-backend marlin`.
-The Hub card on brandonmusic (TP2/EP2/DCP2 + calibrated NVFP4 MLA KV) is the SM120 B12X
-image (`verdictai/glm53-flash-exl3-k4:…-v84-dflash2`), not this overlay. Target KV
+The SM120 B12X image (`verdictai/glm53-flash-exl3-k4:…-v84-dflash2`, TP2/EP2/DCP2
++ calibrated NVFP4 MLA KV) is a different overlay. Target KV
 stays packed **`fp8_ds_mla`**. Speculator is **DFlash2 k=7**
 ([incoai/GLM-5.3-Flash-DFlash2](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2));
 draft attention is **FLASH_ATTN** (do not pin `TRITON_ATTN` — that mask is causal
@@ -68,8 +65,8 @@ three public inputs, each pinned in `start.sh`:
 
 | Part | Public input | Built by |
 |---|---|---|
-| Target base | [Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw) (the default target; `config.json` and index SHA-256 pinned) | — |
-| Target dense EXL3 tensors | [turboderp/GLM-5.3-Flash-exl3 `4.05bpw`](https://huggingface.co/turboderp/GLM-5.3-Flash-exl3/tree/4.05bpw) at commit `2a30229e`, MIT | `tools/dense_overlay.py` range-reads only the non-routed linears (~5.3 GB) and links the TR3 shards |
+| Target base | The 4-bpw pack whose `config.json` and index match the SHA-256 pins in `start.sh`. The default TensorFold pack is a different checkpoint, and the preset refuses it. | — |
+| Target dense EXL3 tensors | [turboderp/GLM-5.3-Flash-exl3 `4.05bpw`](https://huggingface.co/turboderp/GLM-5.3-Flash-exl3/tree/4.05bpw) at commit `2a30229e`, MIT | `tools/dense_overlay.py` range-reads only the non-routed linears (~5.3 GB) and links the base-pack shards |
 | Draft | [incoai/GLM-5.3-Flash-DFlash2](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2) at `dc77ff1c` (BF16) | `tools/dflash2_exl3_quant.sh` quantizes it to 6 bpw with [MiaAI-Lab/exllamav3](https://github.com/MiaAI-Lab/exllamav3) at `63b32f0` on the head GPU, in the serve image |
 
 Opt in on a TP2 kit with one `.env` line, then start from a stopped serve:
@@ -79,12 +76,12 @@ echo 'GLM53_MODEL_PRESET=dense-h3' >> .env
 ./start.sh stop && ./start.sh
 ```
 
-The first start downloads TR3 and the BF16 draft if missing, quantizes the
+The first start downloads the pinned base pack and the BF16 draft if missing, quantizes the
 draft (~25 min on the head GB10, including a one-off extension compile),
 fetches the dense tensors (~2 min measured), and stages the pair:
 
-- **Target:** `<TR3 repo>/snapshots/<rev>` under `$HF_HOME/hub`. It shares
-  the TR3 blobs through relative links, so the usual worker rsync adds only
+- **Target:** `<base repo>/snapshots/<rev>` under `$HF_HOME/hub`. It shares
+  the base-pack blobs through relative links, so the usual worker rsync adds only
   the one overlay file. `refs/glm53-dense-h3` names it; `refs/main` is not
   touched, so removing the preset line restores the ordinary pack; the
   launcher's newest-snapshot fallbacks skip this snapshot.
@@ -113,7 +110,7 @@ The ordinary dense-h3 target quantizes every `o_proj`, and
 [`ABLIT=1`](#abliteration-ablit1) edits BF16 `o_proj` only. With the preset
 and `ABLIT=1`, the first start therefore builds a **second target variant**:
 the same overlay minus `o_proj` on layers 15–44, which stay native BF16 from
-TR3 so the runtime edit applies to them exactly as on the ordinary pack.
+the base pack so the runtime edit applies to them exactly as on the ordinary pack.
 Layers 0–14 keep EXL3 `o_proj`; they are the recipe's stock safety anchors and
 are not edited. The paired 6-bpw draft is shared, so a kit that already built
 the ordinary pair only fetches the overlay again (~2 min, CPU):
@@ -137,10 +134,10 @@ preset.
 ### Find and stage a compatible Hub pair
 
 For the ordinary FP8/BF16-draft setup today, use the public
-[TR3 4-bpw target](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw)
+[TensorFold 4-bpw target](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold)
 and [BF16 DFlash2 draft](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2);
 `./start.sh download` fetches these defaults. **They do not activate the
-H3/6-bpw profile:** the public TR3 target has no `glm53_profile`, and the
+H3/6-bpw profile:** the public TensorFold target has no `glm53_profile`, and the
 public IncoAI draft is BF16, not a 6-bpw EXL3 draft.
 
 For the optional H3 profile, search
@@ -443,21 +440,9 @@ comparison.
 
 ## Quality (KLD)
 
-Independent teacher-logit panel from
-[malaiwah on the 4bpw discussion](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw/discussions/1#6a9144846b0bdba943bfe86f):
-KLD(teacher ‖ model), five cold runs, 25 sealed windows (51,175 positions). This
-scores the **weights**, not this GB10 overlay. We serve the **4bpw** row.
-
-| Model | Mean KLD (nats) | Size |
-|---|---:|---:|
-| TR3 K6 (6bpw) | 0.013723 | 254 GB |
-| Official FP8 (cross-stack) | 0.020615 | 328 GB |
-| **This checkpoint — EXL3 4bpw** | **0.024555** | **176 GB** |
-| Official FP8 (brandonmusic stack, v44) | 0.024629 | 328 GB |
-| NVFP4 (brandonmusic stack, v44) | 0.060535 | ~180 GB |
-
-On the same stack, 4bpw matches official FP8 (~1.00× KLD) at **54%** of the bytes.
-K6 (`malaiwah/GLM-5.3-Flash-TR3-6bpw`) is a different checkpoint. Padded DFlash
+Quality figures for the default checkpoint are on its model card:
+[Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold).
+Those scores are the **weights**, not this GB10 overlay. Padded DFlash
 slot-share is an allocator change only — target KV stays packed `fp8_ds_mla`,
 same path as the compact-64 fp8 serve (not NVFP4 KV).
 
@@ -466,7 +451,7 @@ same path as the compact-64 fp8 serve (not NVFP4 KV).
 | Layer | Runtime |
 |---|---|
 | API | vLLM OpenAI (`/v1/chat/completions`) on the head, port **8888**. Open by default; set `VLLM_API_KEY` for optional Bearer auth |
-| Weights | `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` (mirror of `brandonmusic/…` snapshot `5ab363a8…`) |
+| Weights | `Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold` @ `76c0b517…` |
 | Model id | `GLM-5.3-Flash-EXL3` (`--served-model-name`) |
 | Image | `ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3-instanttensor` FROM `vllm/vllm-openai:glm53-flash-arm64-cu130@sha256:905c0293…` (arm64, CUDA 13.0). InstantTensor baked in; `--load-format instanttensor` is the default. Wheel-less `:exl3` still exists |
 | Executor | `mp`, `--nnodes 2`, `--tensor-parallel-size 2` |
@@ -1393,8 +1378,7 @@ an empty `GLM53_DEFAULT_REASONING_EFFORT` disables the `.env` setting, while an
 empty `GLM53_INDEXER_WORKSPACE` is rejected.
 
 `./start.sh` downloads weights automatically when the HF cache is incomplete
-(120 shards of `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`, falling back to
-`brandonmusic/GLM-5.3-Flash-tr3-4bpw` if the mirror is incomplete, plus DFlash2 when
+(83 shards of `Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold`, plus DFlash2 when
 `SPEC_METHOD=dflash`). `./download.sh` is the same Hub fetch **on this machine
 only** — no docker, no SSH, no worker rsync. Use it to stage ~164 GiB before
 the worker is ready. `REFRESH_WEIGHTS=1 ./download.sh` re-fetches.
@@ -1413,7 +1397,7 @@ SPEC_METHOD=mtp ./start.sh restart      # MTP k=2
 
 1. Preflight docker/ssh/disk on both nodes
 2. `docker pull` `ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3-instanttensor` (public; no login) on the head, then the same pull on the worker if GHCR is reachable — **unless** the local image's `glm53.recipe.stamp` does not match this checkout (Dockerfile/overlay change after `git pull`), in which case it rebuilds from this Dockerfile once. If the worker cannot pull, `docker save --platform linux/arm64 | ssh docker load`. `SKIP_PULL=1` keeps a local copy. `SKIP_BUILD=1` keeps GHCR even when the stamp drifts. `SKIP_SHIP=1` never copies. Existing kits: see [Existing installs: pull the InstantTensor image](#existing-installs-pull-the-instanttensor-image) — `git pull` alone does not replace `:exl3`.
-3. Download the TR3 EXL3 repo into `$HF_HOME` / `~/.cache/huggingface` (~164 GiB, 120 shards) if missing. Same job as `./download.sh`, which stops here (head only).
+3. Download the TensorFold EXL3 repo into `$HF_HOME` / `~/.cache/huggingface` (~164 GiB, 83 shards) if missing. Same job as `./download.sh`, which stops here (head only).
 4. Put the cache on the worker: **`NFS_SHARE=1`** (this kit) mounts the head's
    HF cache read-only over NFSv4 on ConnectX; otherwise `rsync` a full copy to
    `${WORKER_HOME}/.cache/huggingface`
@@ -1774,8 +1758,8 @@ that are now documented/enforced:
 | `WORKER_IP` | `10.0.0.2` | other Spark |
 | `WORKER_USER` | *(unset = `$USER`)* | SSH user on the worker |
 | `WORKER_HOME` | `$HOME` if same user, else `/home/$WORKER_USER` | worker HF cache |
-| `MODEL` | `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` | Hub repo into the HF cache (mirror) |
-| `MODEL_FALLBACK` | `brandonmusic/GLM-5.3-Flash-tr3-4bpw` | Used if the mirror 404s or has fewer than 120 shards |
+| `MODEL` | `Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold` | Hub repo into the HF cache |
+| `MODEL_FALLBACK` | same as `MODEL` | Used only when set to a different id that is already complete on disk |
 | `SERVED_MODEL_NAME` | `GLM-5.3-Flash-EXL3` | OpenAI `model` id (`/v1/models`) |
 | `IMAGE` | `ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3-instanttensor` | public GHCR tag with InstantTensor 0.2.0. Existing kits must pull this tag — `git pull` does not replace a leftover `:exl3` or `SKIP_PULL=1` ([Existing installs](#existing-installs-pull-the-instanttensor-image)). Rebuilt when the overlay recipe stamp drifts (`BUILD=1` forces; `SKIP_BUILD=1` keeps GHCR). `SKIP_PULL=1` skips pull. Wheel-less fallback: `:exl3` |
 | `LOAD_FORMAT` | `instanttensor` when `IMAGE` contains `instanttensor`; else empty | `--load-format`. Direct-I/O safetensors. Explicit empty (`LOAD_FORMAT=`) restores vLLM auto. Required empty on the wheel-less `:exl3` tag |
@@ -2056,20 +2040,18 @@ This repository (serve scripts, overlay, docs) is **[AGPL-3.0](../LICENSE)**.
 If you run a modified version as a network service, the AGPL requires you to
 offer its source to users of that service. Contributions made before
 2026-09-07 were licensed MIT; that notice is retained in
-[`LICENSE.MIT`](../LICENSE.MIT). The EXL3/TR3
-checkpoint stays [ShapleyMCG License 1.0](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw/blob/main/LICENSE)
-(unmodified upstream LICENSE; also on
-[brandonmusic/GLM-5.3-Flash-tr3-4bpw](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw)).
-The [prebuilt derivative](https://huggingface.co/bullerwins/GLM-5.3-Flash-exl3-4bpw-ablit)
-retains that license and the parent's third-party notices. DFlash2 stays [CC BY-NC-ND 4.0](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2).
+[`LICENSE.MIT`](../LICENSE.MIT). The default EXL3 checkpoint is
+[Apache-2.0](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold/blob/main/LICENSE).
+The base model stays MIT
+(`LICENSE-GLM-5.3-Flash` on that repo). The
+[prebuilt derivative](https://huggingface.co/bullerwins/GLM-5.3-Flash-exl3-4bpw-ablit)
+keeps the license on its own model card. DFlash2 stays [CC BY-NC-ND 4.0](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2).
 
 ## Credits
 
 - **Root commit:** [Chris Scott](https://github.com/chriswritescode-dev) (chriswritescode-dev) authored [`dc6b4fdd`](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/commit/dc6b4fdd68005ab6ee0b1decfa4ebb8384393d37).
-- **EXL3/TR3 weights:** [brandonmusic](https://huggingface.co/brandonmusic) —
-  [GLM-5.3-Flash-tr3-4bpw](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw)
-  (uniform-K4 routed-experts, ShapleyMCG License 1.0). Public mirror for this
-  recipe: [Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw)
+- **EXL3 4bpw weights:** [Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold)
+  (Apache-2.0)
 - **EXL3 format / kernels:** [turboderp](https://github.com/turboderp-org/exllamav3) (ExLlamaV3)
 - **Dense-EXL3 TP2 loader:** ported from
   [Alexbob0/glm53-flash-dense-exl3-tp2](https://github.com/Alexbob0/glm53-flash-dense-exl3-tp2)
@@ -2078,8 +2060,6 @@ retains that license and the parent's third-party notices. DFlash2 stays [CC BY-
 - **DFlash2 drafter:** [IncoAI](https://huggingface.co/incoai) —
   [GLM-5.3-Flash-DFlash2](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2)
   (CC BY-NC-ND 4.0, research/eval)
-- **KLD panel:** [malaiwah](https://huggingface.co/malaiwah) —
-  [discussion #1](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw/discussions/1#6a9144846b0bdba943bfe86f)
 - **Prebuilt EXL3 derivative:** [bullerwins](https://huggingface.co/bullerwins) published
   [GLM-5.3-Flash-exl3-4bpw-ablit](https://huggingface.co/bullerwins/GLM-5.3-Flash-exl3-4bpw-ablit),
   using the [Keys L15-43/MTP-L45 transplant](https://huggingface.co/drowzeys/keys-GLM-5.3-Flash-NVFP4-ablit-l15-43-mtp-l45)

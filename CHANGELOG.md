@@ -24,7 +24,7 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 - `GLM53_MODEL_PRESET=dense-h3` (TP2, opt-in): the first start builds the
   H3/6-bpw pair on the head from pinned public inputs and stages it in the HF
-  cache: the TR3 target plus dense EXL3 tensors range-read from
+  cache: the pinned 4-bpw base plus dense EXL3 tensors range-read from
   `turboderp/GLM-5.3-Flash-exl3@4.05bpw` (`2a30229e`), and the IncoAI BF16
   DFlash2 draft quantized to 6 bpw with MiaAI-Lab/exllamav3 `63b32f0`. The
   pack builders move from the #281 branch into `tools/`, and
@@ -643,8 +643,7 @@ Initial public recipe: GLM-5.3-Flash EXL3 4 bpw on 2× NVIDIA GB10 (SM121).
 
 - `start.sh` / `stop.sh` two-node serve over CX7, native `sm_121a` cubins,
   OpenAI API on `:8888`, served id `GLM-5.3-Flash-EXL3`.
-- Public GHCR image pull and Mia-AiLab Hub mirror of
-  `brandonmusic/GLM-5.3-Flash-tr3-4bpw` (uniform-K4 EXL3/TR3, 4 bpw).
+- Public GHCR image pull and the EXL3 4 bpw checkpoint.
 - DFlash2 k=7 speculator (`incoai/GLM-5.3-Flash-DFlash2`), FLASH_ATTN draft.
 - CUDA graphs on fused EXL3.
 - Image/video placeholders, GB10 long-prefill chunk size, glm46v video timestamps.

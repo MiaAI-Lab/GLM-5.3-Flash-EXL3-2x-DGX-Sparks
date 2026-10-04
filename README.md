@@ -1,3 +1,10 @@
+# Use the TensorFold recipe
+
+> [!IMPORTANT]
+> # There is an improved version of this recipe that runs faster on TensorFold. Everything should use that.
+>
+> **[https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold)**
+
 <p align="center">
   <img src="assets/glm.png" width="140" alt="GLM">
 </p>
@@ -45,7 +52,7 @@ the weights, shares them with the other Sparks and starts the cluster.
 | | |
 |---|---|
 | **Model id** | `GLM-5.3-Flash-EXL3` on `http://<head>:8888/v1` |
-| **Weights** | [Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw), EXL3 TR3 4 bpw, ~164 GiB |
+| **Weights** | [Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold), EXL3 4 bpw, ~164 GiB, 83 shards |
 | **Speculative decoding** | [DFlash2](https://huggingface.co/incoai/GLM-5.3-Flash-DFlash2), 7 draft tokens |
 | **Context** | 850k tokens by default; 1.23M-token KV pool (1.45Ã— one full request) |
 | **Features** | Tool calling, reasoning, image and video input, prefix caching, optional API key |
@@ -229,12 +236,11 @@ Every knob with its measured tradeoff: [.env reference](docs/REFERENCE.md#env) Â
 
 Recipe code and docs: **[AGPL-3.0](LICENSE)** (contributions before
 2026-09-07: [MIT](LICENSE.MIT)). Weights keep their own licenses: the EXL3
-checkpoint is ShapleyMCG License 1.0 and DFlash2 is CC BY-NC-ND 4.0.
+checkpoint is [Apache-2.0](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold/blob/main/LICENSE) and DFlash2 is CC BY-NC-ND 4.0.
 
 **Chris Scott** ([chriswritescode-dev](https://github.com/chriswritescode-dev)) authored the root commit [`dc6b4fdd`](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/commit/dc6b4fdd68005ab6ee0b1decfa4ebb8384393d37).
 
-Built on the work of [brandonmusic](https://huggingface.co/brandonmusic)
-(EXL3/TR3 weights), [turboderp](https://github.com/turboderp-org/exllamav3)
+Built on the work of [turboderp](https://github.com/turboderp-org/exllamav3)
 (ExLlamaV3), [Z.ai](https://huggingface.co/zai-org/GLM-5.3-Flash) (base model),
 [IncoAI](https://huggingface.co/incoai) (DFlash2),
 [Alexbob0](https://github.com/Alexbob0/glm53-flash-dense-exl3-tp2) and

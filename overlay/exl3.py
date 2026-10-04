@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """EXL3/MCG trellis quantization for GLM-5.3-Flash routed experts.
 
-Checkpoint ABI (brandonmusic/GLM-5.3-Flash-tr3-4bpw):
+Checkpoint ABI (Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold):
   quant_method=exl3, codebook=mcg, scope=glm53_routed_experts_only
   per expert matrix: trellis (int16) + suh/svh (fp16) + mcg (int32 marker)
 
@@ -1828,7 +1828,7 @@ class Exl3Config(QuantizationConfig):
             "codebook",
             "scope",
             "quant_method",
-            # tr3 ships a 37 MiB per-tensor ledger; keep it off the config object.
+            # Some packs ship a 37 MiB per-tensor ledger; keep it off the config object.
             "tensor_storage",
         }
         return cls(

@@ -24,7 +24,7 @@ assignees: ""
 - Hardware / nodes: <!-- e.g. 2x DGX Spark (GB10, 128 GB unified memory), 4x via start-tp4.sh, ... -->
 - Interconnect: <!-- e.g. ConnectX RoCE/IB, 10GbE, ... -->
 - Image: <!-- `docker images | grep glm` — the kit image is ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3-instanttensor -->
-- Model (`MODEL` + `MODEL_REVISION`): <!-- e.g. Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw @ 25a44fd -->
+- Model (`MODEL` + `MODEL_REVISION`): <!-- e.g. Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold @ 76c0b51 -->
 - Served name (`SERVED_MODEL_NAME`): <!-- e.g. GLM-5.3-Flash-EXL3 -->
 - How you started the serve: <!-- e.g. ./start.sh, ./start.sh restart, ABLIT=1 ./start.sh, custom compose -->
 - Relevant settings: <!-- e.g. MAX_MODEL_LEN, MAX_NUM_SEQS, MAX_NUM_BATCHED_TOKENS, EXL3_FAT_KERNEL, SPEC_METHOD, DFLASH_DRAFT_TP, LANGUAGE_MODEL_ONLY, ABLIT -->
