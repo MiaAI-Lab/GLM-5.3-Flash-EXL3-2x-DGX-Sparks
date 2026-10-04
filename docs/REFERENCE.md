@@ -2065,6 +2065,7 @@ retains that license and the parent's third-party notices. DFlash2 stays [CC BY-
 
 ## Credits
 
+- **Root commit:** [Chris Scott](https://github.com/chriswritescode-dev) (chriswritescode-dev) authored [`dc6b4fdd`](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/commit/dc6b4fdd68005ab6ee0b1decfa4ebb8384393d37).
 - **EXL3/TR3 weights:** [brandonmusic](https://huggingface.co/brandonmusic) —
   [GLM-5.3-Flash-tr3-4bpw](https://huggingface.co/brandonmusic/GLM-5.3-Flash-tr3-4bpw)
   (uniform-K4 routed-experts, ShapleyMCG License 1.0). Public mirror for this

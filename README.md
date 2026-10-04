@@ -22,6 +22,8 @@
   <a href="https://x.com/MiaAI_lab"><img src="https://img.shields.io/badge/Follow_on_X-000000?style=for-the-badge&logo=x&logoColor=white" alt="Follow on X" height="28"></a>
 </p>
 
+**Chris Scott** ([chriswritescode-dev](https://github.com/chriswritescode-dev)) authored the root commit [`dc6b4fdd`](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/commit/dc6b4fdd68005ab6ee0b1decfa4ebb8384393d37).
+
 An OpenAI-compatible vLLM server for
 [zai-org/GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash), using
 4-bpw EXL3 weights, fp8 KV cache and DFlash2 speculative decoding, built
@@ -228,6 +230,8 @@ Every knob with its measured tradeoff: [.env reference](docs/REFERENCE.md#env) Â
 Recipe code and docs: **[AGPL-3.0](LICENSE)** (contributions before
 2026-09-07: [MIT](LICENSE.MIT)). Weights keep their own licenses: the EXL3
 checkpoint is ShapleyMCG License 1.0 and DFlash2 is CC BY-NC-ND 4.0.
+
+**Chris Scott** ([chriswritescode-dev](https://github.com/chriswritescode-dev)) authored the root commit [`dc6b4fdd`](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/commit/dc6b4fdd68005ab6ee0b1decfa4ebb8384393d37).
 
 Built on the work of [brandonmusic](https://huggingface.co/brandonmusic)
 (EXL3/TR3 weights), [turboderp](https://github.com/turboderp-org/exllamav3)
