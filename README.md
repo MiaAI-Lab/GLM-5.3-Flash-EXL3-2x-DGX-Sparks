@@ -1,7 +1,7 @@
 # Use the TensorFold recipe
 
 > [!IMPORTANT]
-> # There is an improved version of this recipe that runs faster on TensorFold. Everything should use that.
+> # There is an improved version of this recipe that runs faster on TensorFold. Everyone should use that.
 >
 > **[https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold)**
 
