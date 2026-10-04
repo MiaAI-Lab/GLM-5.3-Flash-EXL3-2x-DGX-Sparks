@@ -10,7 +10,7 @@ Must remain enabled and at least as capable as the goal-start serve:
 
 | Knob | Required value |
 |---|---|
-| Checkpoint / quant | GLM-5.3-Flash EXL3 TR3 K4 MCG |
+| Checkpoint / quant | GLM-5.3-Flash EXL3 K4 MCG |
 | Topology | TP2, two Sparks, not EP |
 | Prefill | E3 grouped (`EXL3_FAT_GROUPED=1`), fused cap 32 |
 | Speculative decode | DFlash2 k=7, adaptive-k `ema` set `2,4,7` |

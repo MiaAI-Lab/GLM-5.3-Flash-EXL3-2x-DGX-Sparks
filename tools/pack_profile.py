@@ -202,7 +202,7 @@ def resolve(snapshot: Path, hub: Path, env: dict[str, str], explicit: set[str]) 
     }
     # Existing .env files retain #281 defaults. Only those known defaults may
     # be replaced automatically; caller exports are always deliberate choices.
-    defaults = {"EXPECTED_SHARDS": "120", "GLM53_DENSE_EXL3": "0", "GLM53_DENSE_FP8": "all",
+    defaults = {"EXPECTED_SHARDS": "83", "GLM53_DENSE_EXL3": "0", "GLM53_DENSE_FP8": "all",
                 "GLM53_DENSE_EXL3_PREFILL_BF16": "off", "GLM53_KDA_BF16_LARGE_M": "1",
                 "DFLASH_MODEL": DEFAULT_DRAFT, "DFLASH_REVISION": DEFAULT_REVISION,
                 "DFLASH_CACHE_NAME": "models--" + DEFAULT_DRAFT.replace("/", "--")}

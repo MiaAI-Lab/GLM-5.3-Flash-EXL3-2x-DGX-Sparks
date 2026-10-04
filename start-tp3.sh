@@ -217,13 +217,13 @@ set +a
 [ -n "${_cli_extra_args_set}" ] && EXTRA_ARGS="$_cli_extra_args"
 
 # ----------------------------- configuration -------------------------------
-MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw}"
-# If the durable mirror is empty/moved, download.sh falls back to this id.
-MODEL_FALLBACK="${MODEL_FALLBACK:-brandonmusic/GLM-5.3-Flash-tr3-4bpw}"
+MODEL="${MODEL:-Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold}"
+# Same repo unless the operator points MODEL_FALLBACK at another complete cache.
+MODEL_FALLBACK="${MODEL_FALLBACK:-Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold}"
 MODEL_CACHE_NAME="${MODEL_CACHE_NAME:-models--${MODEL//\//--}}"
 MODEL_FALLBACK_CACHE_NAME="${MODEL_FALLBACK_CACHE_NAME:-models--${MODEL_FALLBACK//\//--}}"
-# Hub commit on the Mia-AiLab mirror (the 5ab363a8-byte-identical upload).
-MODEL_REVISION="${MODEL_REVISION:-25a44fdbf16862a46b7cc9921142c6c81350af2f}"
+# Hub commit of the default TensorFold EXL3 pack.
+MODEL_REVISION="${MODEL_REVISION:-76c0b5173166d2795dd48860f45d8224817f894c}"
 IMAGE="${IMAGE:-ghcr.io/miaai-lab/glm-5.3-flash-2x-dgx-sparks:exl3-instanttensor}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-GLM-5.3-Flash-EXL3}"
 GHCR_USER="${GHCR_USER:-MiaAI-Lab}"
@@ -564,7 +564,7 @@ TILELANG_CACHE_DIR="${TILELANG_CACHE_DIR:-/root/.tilelang/cache}"
 LOGDIR="$SCRIPT_DIR/logs"
 HEAD_SCRIPT="$SCRIPT_DIR/.glm53-exl3-tp3-head.inner.sh"
 WORKER_SCRIPT="$SCRIPT_DIR/.glm53-exl3-tp3-worker.inner.sh"
-EXPECTED_SHARDS="${EXPECTED_SHARDS:-120}"
+EXPECTED_SHARDS="${EXPECTED_SHARDS:-83}"
 
 # ------------------------------- helpers -----------------------------------
 log()  { printf '\033[1;36m[glm53-exl3-tp3]\033[0m %s\n' "$*"; }
@@ -1426,9 +1426,9 @@ ensure_image() {
 }
 
 # ---------------------------- weight download ------------------------------
-# Use an already-complete local tree (primary or upstream fallback). If the
-# durable Mia-AiLab mirror is still filling / 404s, keep serving from the
-# brandonmusic cache folder without a second 164 GiB pull.
+# Use an already-complete local tree (primary, or MODEL_FALLBACK when that
+# id differs). A partial primary cache can adopt the fallback folder
+# without a second ~164 GiB pull.
 adopt_complete_weights() {
     local have
     have="$(count_shards "$MODEL_PATH")"
@@ -1566,7 +1566,7 @@ download_only() {
 # ensure_refs_main), not on MODEL_REVISION: the marker lives inside each
 # synced repo folder, so a MODEL / revision switch re-syncs automatically.
 # Without it, every ./start.sh pays a full size+mtime re-verification walk
-# over ~164 GiB / 120 shards on both ends for zero bytes of difference
+# over ~164 GiB / 83 shards on both ends for zero bytes of difference
 # (issue #22, item 2). FORCE_SYNC=1 bypasses the marker; deleting the
 # marker file on the worker has the same effect.
 sync_repo_marker_rev() {

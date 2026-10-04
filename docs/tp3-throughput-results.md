@@ -28,7 +28,7 @@ isolated cooperative-kernel gains. This branch starts at upstream `6961fa0`.
 
 Three GB10 devices, TP=3/EP=3, 96 experts per rank, 66 padded attention heads;
 CUDA 13 SM121a, vLLM `487ecf187`, EXL3 K4 MCG, FP8 KV. Target:
-`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw@25a44fdbf16862a46b7cc9921142c6c81350af2f`.
+the EXL3 4bpw checkpoint used for that run.
 Drafter: `incoai/GLM-5.3-Flash-DFlash2@9a5c86e3b48179cfdb6e5a7d1ed701b00a9c8fa5`,
 k=7, adaptive 2/4/7, draft TP=1, TP3 padding 36/9. Quant and drafter were
 unchanged between measured arms. Existing donor edits at layers 15–45,
