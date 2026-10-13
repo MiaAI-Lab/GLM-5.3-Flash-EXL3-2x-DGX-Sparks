@@ -2049,6 +2049,7 @@ keeps the license on its own model card. DFlash2 stays [CC BY-NC-ND 4.0](https:/
 
 ## Credits
 
+- **DFlash2 KV group patch:** [tonyd2wild](https://github.com/tonyd2wild) authored `overlay/patch_glm5_drafter_group.py` in [`64c92e98`](https://github.com/tonyd2wild/GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark/commit/64c92e982cf71ecd7a05bf25582344a5554ab08a) of [GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark](https://github.com/tonyd2wild/GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark); this repo's first copy is his, byte for byte, and later changes are ours.
 - **Root commit:** [Chris Scott](https://github.com/chriswritescode-dev) (chriswritescode-dev) authored [`dc6b4fdd`](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/commit/dc6b4fdd68005ab6ee0b1decfa4ebb8384393d37).
 - **EXL3 4bpw weights:** [Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold](https://huggingface.co/Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold)
   (Apache-2.0)
