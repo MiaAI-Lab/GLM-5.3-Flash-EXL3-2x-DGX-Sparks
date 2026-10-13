@@ -31,8 +31,6 @@
 
 **Chris Scott** ([chriswritescode-dev](https://github.com/chriswritescode-dev)) authored the root commit [`dc6b4fdd`](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/commit/dc6b4fdd68005ab6ee0b1decfa4ebb8384393d37).
 
-**tonyd2wild** ([profile](https://github.com/tonyd2wild)) authored `overlay/patch_glm5_drafter_group.py`, which adds the DFlash2 sliding-window KV group to the GLM-5-Next layout, in commit [`64c92e98`](https://github.com/tonyd2wild/GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark/commit/64c92e982cf71ecd7a05bf25582344a5554ab08a) of [GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark](https://github.com/tonyd2wild/GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark). This repo's first copy of the file is his, byte for byte; later changes are ours.
-
 An OpenAI-compatible vLLM server for
 [zai-org/GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash), using
 4-bpw EXL3 weights, fp8 KV cache and DFlash2 speculative decoding, built
