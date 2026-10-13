@@ -11,7 +11,7 @@ from manifest import verify_artifacts
 # Dense EXL3 leaves the cooperative routed-expert ABI, pointer tables and
 # TP3 Marlin exclusions unchanged. This pin supports the ordinary TP3 pack;
 # dense EXL3 still refuses TP3 trellis/head padding.
-STOCK_SHA = "da7dd6540d402f53d8a1af0f17eac5570ec37041bd2e1029017bea4ed44f87e4"
+STOCK_SHA = "241ebf56a01ddf940ba7015f31355a1dad810b391f9d77ef79fa978f42ccbab3"
 
 
 def prepare(stock, bundle):
