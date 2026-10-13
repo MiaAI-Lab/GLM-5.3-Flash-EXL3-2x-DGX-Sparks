@@ -60,8 +60,10 @@ df = _load("glm53_decode_floor_restart", PATCH)
 if ADAPTIVE_K.is_file():
     FOREIGN_HELPER = _load("glm53_adaptive_k_restart", ADAPTIVE_K).SCHED_HELPER
 else:
+    # Match SCHED_HELPER's single leading newline: v7 only accepts that
+    # separator (or none) before the adaptive-k anchor after its exact helper.
     FOREIGN_HELPER = (
-        "\n\nclass _Glm53AdaptiveK:  # [glm53-adaptive-k]\n"
+        "\nclass _Glm53AdaptiveK:  # [glm53-adaptive-k]\n"
         "    pass\n\n\n"
         "_GLM53_ADAPTIVE_K = _Glm53AdaptiveK()  # [glm53-adaptive-k]\n\n\n"
     )
