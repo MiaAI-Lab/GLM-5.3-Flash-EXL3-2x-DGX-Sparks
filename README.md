@@ -231,7 +231,7 @@ Every knob with its measured tradeoff: [.env reference](docs/REFERENCE.md#env) Â
   workers; fold new Dockerfile steps into existing layers.
 - **Pull requests:** describe what you measured and on which kit. Defaults
   change only with receipts. Speed claims come with
-  [Grill evidence](CONTRIBUTING.md#performance-claims).
+  [evidence measured against the recipe baseline](CONTRIBUTING.md#performance-claims).
 
 ## License and credits
 

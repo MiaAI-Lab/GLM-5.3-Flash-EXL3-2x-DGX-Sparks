@@ -21,8 +21,9 @@ Every run uses the recipe's Default TP2 setup, so numbers from different
 contributors compare:
 
 - `.env` copied fresh from the `.env.example` of the checkout you are booting.
-  Change only what your machines need: the `nodes`, `weights`, `worker weights`
-  and `API auth` sections, plus `NCCL_IB_GID_INDEX` if your fabric needs it.
+  Change only what your machines need: the `nodes` and `worker weights`
+  sections, `HF_HOME`, `HF_TOKEN`, `HF_BIN`, and `NCCL_IB_GID_INDEX` if your
+  fabric needs it.
 - A shell with no kit variables exported: exports override `.env`.
 - `BUILD=1 ./start.sh`, so the image is built from that checkout.
 - Nothing else running on the GPUs.
@@ -50,9 +51,9 @@ Take three runs. Before each one, stop the kit, check out the commit, copy
 
 | Run | Checkout | Settings |
 |---|---|---|
-| A | `main` | baseline |
+| A | `main` at your branch point (`git merge-base origin/main HEAD`) | baseline |
 | B | your pull request | baseline |
-| A2 | `main` again | baseline |
+| A2 | the same `main` commit again | baseline |
 
 For a new opt-in option, all three runs use your pull request: A and A2 without
 the option, B with it.
@@ -64,7 +65,7 @@ both for a profile claim. The two files differ only in `runtime` (a code or
 default change) or only in `settings` (an option).
 
 ```json
-{"model_revision": "GLM53_MODEL_PRESET from .env.example",
+{"model_revision": "as in .env.example",
  "runtime": "GLM-5.3-Flash-EXL3-2x-DGX-Sparks@<git rev-parse HEAD>",
  "hardware": "2x DGX Spark GB10, TP2",
  "settings": "baseline"}
@@ -87,8 +88,9 @@ grill-perf compare A B --reference A2 > qualification.txt
 grill-perf compare A B --reference A2 --json > qualification.json
 ```
 
-Runs must start at least 60 seconds apart; a reboot usually covers that. If a
-run needs more than five minutes, pass the same `--seconds N` to all three.
+Each run must start at least 60 seconds after the previous one finished; a
+reboot usually covers that. If a run needs more than five minutes, pass the same
+`--seconds N` to all three.
 
 **The claim stands only if `compare` prints `MEASURED FASTER`:** B is faster than
 both A and A2. Quote the measured change, not a bigger number. Anything else,
@@ -122,32 +124,35 @@ a loopback address and your declarations.
 ### Maintainer check
 
 No GPU and no re-run. `compare` re-verifies every byte (one edited byte makes it
-`INVALID`), and the `jq` checks the rest. Set `HEAD` to the pull request's head
-commit:
+`INVALID`), and the `jq` checks the rest. Set `BASE` and `HEAD` to the pull
+request's merge base and head commits:
 
 ```sh
 tar xzf grill-evidence.tgz
 V=v$(jq -r .collector.version A/capture.json)
 START=$(jq '.acquisitions[0].started_unix_ms / 1000 | floor' A/capture.json)
-NEWEST=$(gh release list --repo plotarmordev/thegrill --json tagName,publishedAt \
-  --jq "[.[] | select((.publishedAt | fromdate) < $START)][0].tagName")
+NEWEST=$(gh release list --repo plotarmordev/thegrill --json tagName,publishedAt,isDraft \
+  --jq "[.[] | select((.isDraft | not) and (.publishedAt | fromdate) < $START)][0].tagName")
 SHA=$(gh release download "$V" --repo plotarmordev/thegrill \
   -p "grill-perf-${V#v}-$(jq -r .collector.target A/capture.json).receipt.json" \
   -O - | jq -r .binary.sha256)
-grill-perf compare A B --reference A2 --json | jq --arg sha "$SHA" --arg head "$HEAD" \
+grill-perf compare A B --reference A2 --json | jq --arg sha "$SHA" \
+  --arg base "${BASE:?set BASE to the merge base sha}" \
+  --arg head "${HEAD:?set HEAD to the pull request head sha}" \
   --arg v "$V" --arg newest "$NEWEST" -e '
   .result == "IMPROVED"
   and $v == $newest
   and .deployment.baseline.collector_sha256 == $sha
   and .deployment.candidate.collector_sha256 == $sha
   and (.deployment.candidate.declaration.runtime | endswith($head))
+  and (.deployment.baseline.declaration.runtime | endswith($base) or endswith($head))
   and ([.deployment.baseline.declaration, .deployment.candidate.declaration]
        | . as [$a, $b] | [$a | keys[] | select($a[.] != $b[.])] | IN(["runtime"], ["settings"]))'
 ```
 
 `true` means: B is faster than both baseline runs; both sides were measured by
 the official binary of the Grill release that was newest when measuring started;
-B is the pull request head; and the declarations differ only in `runtime` or only
-in `settings`. The evidence is tamper-evident, not signed. Hardware, settings and
-the reboots are the contributor's word, so maintainers may still re-run a claim
-occasionally.
+B is the pull request head and A its merge base (or the head, for an option);
+and the declarations differ only in `runtime` or only in `settings`. The
+evidence is tamper-evident, not signed. Hardware, settings and the reboots are
+the contributor's word, so maintainers may still re-run a claim occasionally.
