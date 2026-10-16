@@ -44,33 +44,18 @@
 
 ---
 
-## GPU qualification
+## Performance claim
 
 <!--
 
-    Required when this PR changes a GPU path or claims a speed change; otherwise
-    write "Not required: no GPU path changed". Steps: CONTRIBUTING.md#gpu-qualification.
-    Fill every line from qualification.json, attach grill-evidence.tgz, and paste
-    qualification.txt under the block.
+    Leave "None" unless this PR claims a speed improvement. If it does, follow
+    CONTRIBUTING.md#performance-claims and replace "None" with the evidence:
+    for a single-request speed claim, the Grill summary and qualification.txt
+    with grill-evidence.tgz attached; otherwise the raw benchmark output.
 
 -->
 
-```grill-qualification
-grill:        <version> (source <commit>, binary sha256 <collector_sha256>)
-workload:     portable-v1, C1, 400 tokens/request, same-host
-main:         <runtime from main.json>
-pr:           <runtime from pr.json>
-hardware:     <hardware>   settings: <settings>
-verdict:      <MEASURED FASTER | INCONCLUSIVE>
-pr vs main:        <+x.xx%> (95% range <a> to <b>)
-pr vs main re-run: <+x.xx%> (95% range <a> to <b>)
-main drift:        <+x.xx%> (95% range <a> to <b>)
-requests:     main <n>/32, pr <n>/32, main re-run <n>/32 complete
-tok/s per round, main:        <8 values>
-tok/s per round, pr:          <8 values>
-tok/s per round, main re-run: <8 values: candidate_acquisition_medians in A2/report.json>
-evidence:     grill-evidence.tgz (sha256 <...>)
-```
+None.
 
 ---
 
@@ -90,4 +75,3 @@ evidence:     grill-evidence.tgz (sha256 <...>)
 - [ ] My change is reproducible and verified (a boot and, for behavior changes, measurements).
 - [ ] Defaults still work out of the box; a new knob has a sane fallback consistent with the existing ones.
 - [ ] I updated the README or docs/REFERENCE.md (and docs/ where relevant) for any knob, default, or measured number I changed.
-- [ ] GPU path or speed claim, if any: I qualified it with the newest Grill release and attached the evidence.

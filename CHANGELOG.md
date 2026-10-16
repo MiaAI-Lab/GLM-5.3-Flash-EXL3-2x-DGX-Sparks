@@ -11,11 +11,8 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Added
 
-- GPU qualification for pull requests (`CONTRIBUTING.md`, `AGENTS.md`,
-  `CLAUDE.md`, pull request template): a change to a GPU path or a speed
-  claim is measured by the contributor with the newest Grill release (main,
-  the pull request, main again) and opens only if it qualifies, with the raw
-  numbers and evidence archive attached.
+- Speed claims in pull requests come with Grill evidence measured against the
+  recipe baseline (`CONTRIBUTING.md`, `AGENTS.md`, pull request template).
 
 - `GLM53_MODEL_PRESET=dense-h3` with `ABLIT=1` (TP2): builds and serves a
   second target variant whose `o_proj` on layers 15–44 stay native BF16, so
