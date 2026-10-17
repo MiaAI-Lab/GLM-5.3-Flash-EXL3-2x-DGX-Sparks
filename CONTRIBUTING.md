@@ -32,19 +32,24 @@ A claim about another profile or topology uses it on every run instead: for
 example `GLM53_MODEL_PRESET=dense-h3`, or `.env.tp3` copied fresh from
 `.env.tp3.example` with `BUILD=1 ./start-tp3.sh`. Say so in the declarations.
 
-### Single-request speed claims: the Grill
+### Speed claims the Grill measures
 
-The Grill measures generation speed for one request at a time: a short counting
-prompt, temperature 0, thinking off, 400 output tokens, timed from request to
-last token. A claim about that ("faster decode", "+N% tok/s") is measured with
-the newest release of [The Grill](https://github.com/plotarmordev/thegrill/releases)
-(the highest version listed, pre-releases included). Install it as its
+The Grill measures generation speed on a short counting prompt (temperature 0,
+thinking off, 400 output tokens per request), either one request at a time
+(`portable-v1`) or with 2, 4 or 8 requests at once (`portable-c2-v1`,
+`portable-c4-v1`, `portable-c8-v1`, verdict on their combined tokens per second).
+A claim about either ("faster decode", "+N% tok/s", "+N% at 4 concurrent
+requests") is measured with the newest release of
+[The Grill](https://github.com/plotarmordev/thegrill/releases) (the highest
+version listed, pre-releases included; 0.8.0 or later for the concurrent
+workloads). Install it as its
 [install guide](https://github.com/plotarmordev/thegrill/blob/main/docs/performance/INSTALL.md#obtain-verify-unpack)
-shows, checksum included.
+shows, checksum included. State the concurrency level in the claim before you
+measure, and use that one workload for all three runs.
 
-Claims the Grill doesn't measure (cold prefill, long context, concurrency, prose
-only) use the Testing section's protocol on the same baseline instead, with the
-raw output attached.
+Claims the Grill doesn't measure (cold prefill, long context, prose only) use the
+Testing section's protocol on the same baseline instead, with the raw output
+attached.
 
 Take three runs. Before each one, stop the kit, check out the commit, copy
 `.env` fresh and start the kit:
@@ -78,6 +83,7 @@ On the head, with `ENDPOINT=http://127.0.0.1:8888/v1/chat/completions` and
 # A
 grill-perf baseline --workload portable-v1 --client-placement same-host \
   --endpoint "$ENDPOINT" --local-http --model "$MODEL" --deployment a.json --out A
+# (for a concurrency claim, use --workload portable-cN-v1 instead)
 # B
 grill-perf check A --change deployment --deployment b.json --endpoint "$ENDPOINT" \
   --local-http --model "$MODEL" --client-placement same-host --out B
@@ -89,8 +95,9 @@ grill-perf compare A B --reference A2 --json > qualification.json
 ```
 
 Each run must start at least 60 seconds after the previous one finished; a
-reboot usually covers that. If a run needs more than five minutes, pass the same
-`--seconds N` to all three.
+reboot usually covers that. If a run can't finish in five minutes (likely at
+4 or 8 concurrent requests; the Grill's report prints the rate it needed), pass
+the same `--seconds N` to all three.
 
 **The claim stands only if `compare` prints `MEASURED FASTER`:** B is faster than
 both A and A2. Quote the measured change, not a bigger number. Anything else,
@@ -110,7 +117,7 @@ jq -r --slurpfile a2 A2/report.json '
   "B:        \($d.candidate.declaration | .runtime + "; " + .settings)",
   "result:   \(.result)",
   "B vs A:   \(leg)    B vs A2: \($d.candidate_against_reference | leg)    A2 vs A: \($d.reference_against_baseline | leg)",
-  "complete: A \(.baseline_accounting.complete_requests)/32, B \(.candidate_accounting.complete_requests)/32, A2 \($a2[0].candidate_accounting.complete_requests)/32",
+  "complete: A \(.baseline_accounting.complete_requests)/\(.baseline_accounting.request_ceiling), B \(.candidate_accounting.complete_requests)/\(.candidate_accounting.request_ceiling), A2 \($a2[0].candidate_accounting.complete_requests)/\($a2[0].candidate_accounting.request_ceiling)",
   "tok/s A:  \(.baseline_acquisition_medians | rounds)",
   "tok/s B:  \(.candidate_acquisition_medians | rounds)",
   "tok/s A2: \($a2[0].candidate_acquisition_medians | rounds)"' qualification.json
