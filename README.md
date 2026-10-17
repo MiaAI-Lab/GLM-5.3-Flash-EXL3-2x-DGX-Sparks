@@ -230,7 +230,8 @@ Every knob with its measured tradeoff: [.env reference](docs/REFERENCE.md#env) Â
   or directly. `tests/test_image_layer_budget.py` keeps the image loadable on
   workers; fold new Dockerfile steps into existing layers.
 - **Pull requests:** describe what you measured and on which kit. Defaults
-  change only with receipts.
+  change only with receipts. Speed claims come with
+  [evidence measured against the recipe baseline](CONTRIBUTING.md#performance-claims).
 
 ## License and credits
 
