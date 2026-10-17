@@ -50,7 +50,7 @@
 
     Leave "None" unless this PR claims a speed improvement. If it does, follow
     CONTRIBUTING.md#performance-claims and replace "None" with the evidence:
-    for a single-request speed claim, the Grill summary and qualification.txt
+    for a speed claim the Grill measures, the Grill summary and qualification.txt
     with grill-evidence.tgz attached; otherwise the raw benchmark output.
 
 -->
