@@ -41,8 +41,8 @@ thinking off, 400 output tokens per request), either one request at a time
 A claim about either ("faster decode", "+N% tok/s", "+N% at 4 concurrent
 requests") is measured with the newest release of
 [The Grill](https://github.com/plotarmordev/thegrill/releases) (the highest
-version listed, pre-releases included; 0.8.0 or later for the concurrent
-workloads). Install it as its
+version listed, pre-releases included; 0.7.0 or later, 0.8.0 or later for the
+concurrent workloads). Install it as its
 [install guide](https://github.com/plotarmordev/thegrill/blob/main/docs/performance/INSTALL.md#obtain-verify-unpack)
 shows, checksum included. State the concurrency level in the claim before you
 measure, and use that one workload for all three runs.
@@ -67,7 +67,7 @@ Write one declaration for each side, `a.json` and `b.json`. `runtime` is the
 checkout's `git rev-parse HEAD`. `settings` is `baseline` (the checkout's
 `.env.example`), plus the option on B for an option claim, plus the profile on
 both for a profile claim. The two files differ only in `runtime` (a code or
-default change) or only in `settings` (an option).
+default change) or only in `settings` (an option); the Grill refuses B otherwise.
 
 ```json
 {"model_revision": "as in .env.example",
@@ -84,15 +84,17 @@ On the head, with `ENDPOINT=http://127.0.0.1:8888/v1/chat/completions` and
 grill-perf baseline --workload portable-v1 --client-placement same-host \
   --endpoint "$ENDPOINT" --local-http --model "$MODEL" --deployment a.json --out A
 # (for a concurrency claim, use --workload portable-cN-v1 instead)
-# B
-grill-perf check A --change deployment --deployment b.json --endpoint "$ENDPOINT" \
-  --local-http --model "$MODEL" --client-placement same-host --out B
+# B: --change runtime for a code or default change, --change settings for an option
+grill-perf check A --change runtime --deployment b.json --out B
 # A2 (its own exit code doesn't matter)
 grill-perf check A --change none --deployment A/deployment.json --out A2
 
 grill-perf compare A B --reference A2 > qualification.txt
 grill-perf compare A B --reference A2 --json > qualification.json
 ```
+
+B and A2 reuse A's endpoint, model and placement, and must be measured by the
+same Grill binary as A.
 
 Each run must start at least 60 seconds after the previous one finished; a
 reboot usually covers that. If a run can't finish in five minutes (likely at
@@ -150,16 +152,15 @@ grill-perf compare A B --reference A2 --json | jq --arg sha "$SHA" \
   .result == "IMPROVED"
   and $v == $newest
   and .deployment.baseline.collector_sha256 == $sha
-  and .deployment.candidate.collector_sha256 == $sha
+  and (.declared_change | IN("runtime", "settings"))
   and (.deployment.candidate.declaration.runtime | endswith($head))
-  and (.deployment.baseline.declaration.runtime | endswith($base) or endswith($head))
-  and ([.deployment.baseline.declaration, .deployment.candidate.declaration]
-       | . as [$a, $b] | [$a | keys[] | select($a[.] != $b[.])] | IN(["runtime"], ["settings"]))'
+  and (.deployment.baseline.declaration.runtime | endswith($base) or endswith($head))'
 ```
 
-`true` means: B is faster than both baseline runs; both sides were measured by
-the official binary of the Grill release that was newest when measuring started;
-B is the pull request head and A its merge base (or the head, for an option);
-and the declarations differ only in `runtime` or only in `settings`. The
+`true` means: B is faster than both baseline runs; the measuring binary is the
+official one of the Grill release that was newest when measuring started; B is
+the pull request head and A its merge base (or the head, for an option); and B is
+a `runtime` or `settings` change, for which the Grill itself guarantees that only
+that declaration field differs and that one binary measured all three runs. The
 evidence is tamper-evident, not signed. Hardware, settings and the reboots are
 the contributor's word, so maintainers may still re-run a claim occasionally.
