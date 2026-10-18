@@ -41,8 +41,7 @@ thinking off, 400 output tokens per request), either one request at a time
 A claim about either ("faster decode", "+N% tok/s", "+N% at 4 concurrent
 requests") is measured with the newest release of
 [The Grill](https://github.com/plotarmordev/thegrill/releases) (the highest
-version listed, pre-releases included; 0.7.0 or later, 0.8.0 or later for the
-concurrent workloads). Install it as its
+version listed, pre-releases included; 0.8.0 or later). Install it as its
 [install guide](https://github.com/plotarmordev/thegrill/blob/main/docs/performance/INSTALL.md#obtain-verify-unpack)
 shows, checksum included. State the concurrency level in the claim before you
 measure, and use that one workload for all three runs.
@@ -76,14 +75,14 @@ default change) or only in `settings` (an option); the Grill refuses B otherwise
  "settings": "baseline"}
 ```
 
-On the head, with `ENDPOINT=http://127.0.0.1:8888/v1/chat/completions` and
-`MODEL=GLM-5.3-Flash-EXL3`:
+On the head, with `ENDPOINT=http://127.0.0.1:8888/v1/chat/completions`,
+`MODEL=GLM-5.3-Flash-EXL3` and `WORKLOAD` set to the claim's workload
+(`portable-v1`, or `portable-c2-v1`/`-c4-v1`/`-c8-v1`):
 
 ```sh
 # A
-grill-perf baseline --workload portable-v1 --client-placement same-host \
+grill-perf baseline --workload "$WORKLOAD" --client-placement same-host \
   --endpoint "$ENDPOINT" --local-http --model "$MODEL" --deployment a.json --out A
-# (for a concurrency claim, use --workload portable-cN-v1 instead)
 # B: --change runtime for a code or default change, --change settings for an option
 grill-perf check A --change runtime --deployment b.json --out B
 # A2 (its own exit code doesn't matter)
