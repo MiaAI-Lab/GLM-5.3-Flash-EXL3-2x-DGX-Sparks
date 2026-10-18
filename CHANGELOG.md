@@ -11,6 +11,10 @@ There were no git tags for 1.0.0–1.4.0; 1.5.0 is the first cut named as a rele
 
 ### Added
 
+- Speed claims in pull requests come with raw evidence measured against the
+  recipe baseline, using The Grill for single-request and concurrent speed (`CONTRIBUTING.md`,
+  `AGENTS.md`, pull request template).
+
 - `GLM53_MODEL_PRESET=dense-h3` with `ABLIT=1` (TP2): builds and serves a
   second target variant whose `o_proj` on layers 15–44 stay native BF16, so
   the runtime abliteration edit applies to them; layers 0–14 keep EXL3
