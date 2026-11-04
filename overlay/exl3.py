@@ -2013,12 +2013,14 @@ def _glm53_use_marlin(group: str, prefix: str, tp_size: int) -> bool:
 # keeps ordinary decode entirely on stock Marlin. Intentionally not
 # user-configurable: 512 is the boundary actually measured and qualified.
 KDA_BF16_LARGE_M_MIN_M = 512
-# TP-local in_proj_qkvbfg_a shapes. TP2 shards 64 heads; TP3 pads 64→66
-# (local 22) and concatenates q/k/v/b + replicated f_a/g_a (128 each).
+# TP-local in_proj_qkvbfg_a shapes: local_heads * 385 + 256.
+# TP2/TP4 shard 64 heads (local 32/16); TP3 pads 64→66 (local 22).
+# q/k/v/b are sharded; f_a/g_a (128 each) remain replicated.
 # Everything else stays Marlin by construction.
 KDA_BF16_LARGE_M_SHAPES_BY_TP = {
     2: (12576, 4096),
     3: (8726, 4096),
+    4: (6416, 4096),
 }
 KDA_BF16_LARGE_M_SHAPES = frozenset(KDA_BF16_LARGE_M_SHAPES_BY_TP.values())
 # Rows per dequant chunk: bounds the peak fp32 intermediate to ~8 MiB at
@@ -2159,10 +2161,11 @@ class Glm53DenseFp8Method(UnquantizedLinearMethod):
         Marlin consumes -- as one BF16 [N,K] copy, and retains nothing else.
         Cost when enabled: TP2 12576 x 4096 x 2 bytes = 98.25 MiB per
         layer-rank (~3.26 GiB/rank, 34 KDA layers); TP3 8726 x 4096 x 2
-        bytes = 68.17 MiB per layer-rank (~2.26 GiB/rank).
+        bytes = 68.17 MiB per layer-rank (~2.26 GiB/rank); TP4 6416 x
+        4096 x 2 bytes = 50.1 MiB per layer-rank (~1.66 GiB/rank).
 
         Fail-closed: a KDA in_proj layer with the feature enabled must satisfy
-        every predicate (TP=2 or TP=3, SM121 capability, validated TP-local
+        every predicate (TP=2, TP=3 or TP=4, SM121 capability, exact TP-local
         shape, e4m3 weight with a BF16 stored scale); anything else raises at
         load instead of silently running Marlin under a large-M label.
         Non-candidate layers retain nothing and stay on Marlin.
@@ -2177,7 +2180,7 @@ class Glm53DenseFp8Method(UnquantizedLinearMethod):
         expected = KDA_BF16_LARGE_M_SHAPES_BY_TP.get(tp_size)
         if expected is None:
             raise RuntimeError(
-                "GLM53_KDA_BF16_LARGE_M=1 requires TP=2 or TP=3 "
+                "GLM53_KDA_BF16_LARGE_M=1 requires TP=2, TP=3 or TP=4 "
                 f"(got tp_size={tp_size})"
             )
         try:
