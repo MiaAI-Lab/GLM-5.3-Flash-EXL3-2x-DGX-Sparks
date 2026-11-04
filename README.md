@@ -1,9 +1,9 @@
-# Use the TensorFold recipe
+# 🚨 NEW, BETTER RECIPE AVAILABLE — EVERYONE SHOULD USE IT 🚨
 
 > [!IMPORTANT]
-> # There is an improved version of this recipe that runs faster on TensorFold. Everyone should use that.
+> ## This recipe is superseded. **Everything should be using the new one.**
 >
-> **[https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold)**
+> # 👉 [github.com/MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104](https://github.com/MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104) 👈
 
 <p align="center">
   <img src="assets/glm.png" width="140" alt="GLM">
